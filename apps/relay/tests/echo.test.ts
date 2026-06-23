@@ -1,41 +1,15 @@
 import type { AddressInfo } from 'node:net';
 
 import { createDaemon, type Daemon } from '@telecode/daemon';
-import { makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { pino } from 'pino';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import WebSocket from 'ws';
 
 import { buildRelay } from '../src/relay';
+import { connectBrowser, sendEcho, waitForEnvelope } from './_helpers/ws';
 
 const USER_ID = 'u_1';
 const DEVICE_ID = 'd_1';
-
-/** Resolve with the first envelope a socket receives that matches `predicate`. */
-function waitForEnvelope(
-  socket: WebSocket,
-  predicate: (envelope: Envelope) => boolean,
-  timeoutMs = 5000,
-): Promise<Envelope> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      socket.off('message', onMessage);
-      reject(new Error('timed out waiting for envelope'));
-    }, timeoutMs);
-
-    function onMessage(raw: WebSocket.RawData): void {
-      const envelope = parseEnvelope(JSON.parse(raw.toString()));
-      if (predicate(envelope)) {
-        clearTimeout(timer);
-        socket.off('message', onMessage);
-        resolve(envelope);
-      }
-    }
-
-    socket.on('message', onMessage);
-  });
-}
 
 describe('walking skeleton: browser -> relay -> daemon -> relay -> browser echo', () => {
   let app: FastifyInstance;
@@ -53,12 +27,7 @@ describe('walking skeleton: browser -> relay -> daemon -> relay -> browser echo'
       { level: 'info' },
       { write: (chunk: string) => daemonLogs.push(chunk) },
     );
-    daemon = createDaemon({
-      relayUrl,
-      userId: USER_ID,
-      deviceId: DEVICE_ID,
-      logger: daemonLogger,
-    });
+    daemon = createDaemon({ relayUrl, userId: USER_ID, deviceId: DEVICE_ID, logger: daemonLogger });
     await daemon.start();
   });
 
@@ -68,36 +37,10 @@ describe('walking skeleton: browser -> relay -> daemon -> relay -> browser echo'
   });
 
   it('echoes a string sent by the browser back to the browser', async () => {
-    const browser = new WebSocket(relayUrl);
-    await new Promise<void>((resolve, reject) => {
-      browser.once('open', () => resolve());
-      browser.once('error', reject);
-    });
-
-    const ack = waitForEnvelope(browser, (e) => e.type === 'hello.ack');
-    browser.send(
-      JSON.stringify(
-        makeEnvelope({
-          type: 'hello',
-          userId: USER_ID,
-          deviceId: DEVICE_ID,
-          payload: { role: 'browser' },
-        }),
-      ),
-    );
-    await ack;
+    const browser = await connectBrowser(relayUrl, USER_ID, DEVICE_ID);
 
     const reply = waitForEnvelope(browser, (e) => e.type === 'echo.reply');
-    browser.send(
-      JSON.stringify(
-        makeEnvelope({
-          type: 'echo',
-          userId: USER_ID,
-          deviceId: DEVICE_ID,
-          payload: { text: 'ping' },
-        }),
-      ),
-    );
+    sendEcho(browser, USER_ID, DEVICE_ID, 'ping');
 
     const envelope = await reply;
     expect(envelope.payload).toEqual({ text: 'ping' });
