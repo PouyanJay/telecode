@@ -1,9 +1,22 @@
 /**
  * @telecode/protocol — the single shared wire contract used by the relay, daemon, and web.
  *
- * Phase 0 (Task 1): placeholder export proving the toolchain. Task 2 adds the zod
- * `Envelope`, the message union, and the libsodium crypto helpers.
+ * One zod-validated `Envelope` is the only wire format; it must never drift. Validate inbound
+ * data with {@link parseEnvelope} / {@link safeParseEnvelope} at every boundary and infer types
+ * from the schemas via `z.infer` rather than hand-writing parallel interfaces.
  */
 
-/** Wire protocol version. Bump on any breaking change to the envelope or message union. */
-export const PROTOCOL_VERSION = 1 as const;
+export {
+  PROTOCOL_VERSION,
+  MESSAGE_TYPES,
+  messageTypeSchema,
+  envelopeSchema,
+  echoPayloadSchema,
+  parseEnvelope,
+  safeParseEnvelope,
+  makeEnvelope,
+} from './envelope';
+export type { MessageType, Envelope, EchoPayload } from './envelope';
+
+export { ready, generateKeyPair, seal, open } from './crypto';
+export type { KeyPair, SealedMessage } from './crypto';
