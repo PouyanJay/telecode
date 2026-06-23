@@ -161,3 +161,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Make/run orchestration state (PIDs + logs)
+.run-state/
