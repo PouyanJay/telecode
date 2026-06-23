@@ -12,6 +12,8 @@ export default tseslint.config(
       '**/.turbo/**',
       '**/.claude/**',
       '**/.memory/**',
+      '**/*.svelte',
+      '**/*.d.ts',
     ],
   },
   js.configs.recommended,

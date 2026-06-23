@@ -58,6 +58,12 @@ web_modules/
 # Turborepo
 .turbo/
 
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
 # Optional npm cache directory
 .npm
 
