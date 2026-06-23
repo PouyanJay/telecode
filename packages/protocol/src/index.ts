@@ -12,11 +12,13 @@ export {
   messageTypeSchema,
   envelopeSchema,
   echoPayloadSchema,
+  peerRoleSchema,
+  helloPayloadSchema,
   parseEnvelope,
   safeParseEnvelope,
   makeEnvelope,
 } from './envelope';
-export type { MessageType, Envelope, EchoPayload } from './envelope';
+export type { MessageType, Envelope, EchoPayload, PeerRole, HelloPayload } from './envelope';
 
 export { ready, generateKeyPair, seal, open } from './crypto';
 export type { KeyPair, SealedMessage } from './crypto';

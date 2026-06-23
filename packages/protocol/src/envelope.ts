@@ -62,6 +62,14 @@ export type Envelope = z.infer<typeof envelopeSchema>;
 export const echoPayloadSchema = z.object({ text: z.string() });
 export type EchoPayload = z.infer<typeof echoPayloadSchema>;
 
+/** The two peer roles that dial out to the relay. */
+export const peerRoleSchema = z.enum(['daemon', 'browser']);
+export type PeerRole = z.infer<typeof peerRoleSchema>;
+
+/** Payload for `hello` — a peer announcing its role when it connects to the relay. */
+export const helloPayloadSchema = z.object({ role: peerRoleSchema });
+export type HelloPayload = z.infer<typeof helloPayloadSchema>;
+
 /** Validate an inbound value as an Envelope, throwing `ZodError` on mismatch. */
 export function parseEnvelope(raw: unknown): Envelope {
   return envelopeSchema.parse(raw);
