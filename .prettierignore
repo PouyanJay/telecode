@@ -1,0 +1,8 @@
+**/dist/**
+**/build/**
+**/.svelte-kit/**
+**/coverage/**
+**/.turbo/**
+.claude/
+.memory/
+pnpm-lock.yaml
