@@ -13,7 +13,7 @@ export function waitForEnvelope(
       reject(new Error('timed out waiting for envelope'));
     }, timeoutMs);
 
-    function onMessage(raw: WebSocket.RawData): void {
+    function onMessage(raw: Buffer): void {
       const envelope = parseEnvelope(JSON.parse(raw.toString()));
       if (predicate(envelope)) {
         clearTimeout(timer);

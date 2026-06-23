@@ -9,6 +9,8 @@ export interface RelayClientOptions {
   readonly relayUrl: string;
   readonly userId: string;
   readonly deviceId: string;
+  /** How long to wait for hello.ack / echo.reply before rejecting. */
+  readonly timeoutMs?: number;
 }
 
 export interface RelayClient {
@@ -18,6 +20,7 @@ export interface RelayClient {
 }
 
 export function createRelayClient(options: RelayClientOptions): RelayClient {
+  const timeoutMs = options.timeoutMs ?? 5000;
   let socket: WebSocket | null = null;
 
   function send(envelope: Envelope): void {
@@ -29,6 +32,7 @@ export function createRelayClient(options: RelayClientOptions): RelayClient {
       return new Promise<void>((resolve, reject) => {
         const ws = new WebSocket(options.relayUrl);
         socket = ws;
+        const timer = setTimeout(() => reject(new Error('relay connection timed out')), timeoutMs);
         ws.addEventListener('open', () => {
           send(
             makeEnvelope({
@@ -39,13 +43,16 @@ export function createRelayClient(options: RelayClientOptions): RelayClient {
             }),
           );
         });
-        ws.addEventListener('message', (event: MessageEvent) => {
-          const envelope = parseEnvelope(JSON.parse(event.data as string));
-          if (envelope.type === 'hello.ack') {
+        ws.addEventListener('message', (event: MessageEvent<string>) => {
+          if (parseEnvelope(JSON.parse(event.data)).type === 'hello.ack') {
+            clearTimeout(timer);
             resolve();
           }
         });
-        ws.addEventListener('error', () => reject(new Error('relay connection error')));
+        ws.addEventListener('error', () => {
+          clearTimeout(timer);
+          reject(new Error('relay connection error'));
+        });
       });
     },
 
@@ -56,13 +63,18 @@ export function createRelayClient(options: RelayClientOptions): RelayClient {
           reject(new Error('not connected'));
           return;
         }
-        const onMessage = (event: MessageEvent): void => {
-          const envelope = parseEnvelope(JSON.parse(event.data as string));
+        const onMessage = (event: MessageEvent<string>): void => {
+          const envelope = parseEnvelope(JSON.parse(event.data));
           if (envelope.type === 'echo.reply') {
+            clearTimeout(timer);
             ws.removeEventListener('message', onMessage);
             resolve(echoPayloadSchema.parse(envelope.payload).text);
           }
         };
+        const timer = setTimeout(() => {
+          ws.removeEventListener('message', onMessage);
+          reject(new Error('echo timed out'));
+        }, timeoutMs);
         ws.addEventListener('message', onMessage);
         send(
           makeEnvelope({

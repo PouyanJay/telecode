@@ -28,7 +28,11 @@
 
   async function send() {
     if (client === null) return;
-    reply = await client.echo(input);
+    try {
+      reply = await client.echo(input);
+    } catch {
+      reply = '(echo failed)';
+    }
   }
 </script>
 

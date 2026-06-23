@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import type { DeviceCodeResponse, PollResult } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
@@ -14,19 +15,6 @@ import { z } from 'zod';
  */
 
 const USER_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no ambiguous 0/O/1/I
-
-export interface DeviceCodeResponse {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  expires_in: number;
-  interval: number;
-}
-
-export type PollResult =
-  | { status: 'authorization_pending' }
-  | { status: 'expired' }
-  | { status: 'approved'; device_token: string; user_id: string };
 
 export interface DeviceAuthOptions {
   verificationUri: string;

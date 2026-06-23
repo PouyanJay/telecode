@@ -22,3 +22,6 @@ export type { MessageType, Envelope, EchoPayload, PeerRole, HelloPayload } from 
 
 export { ready, generateKeyPair, seal, open } from './crypto';
 export type { KeyPair, SealedMessage } from './crypto';
+
+export { deviceCodeResponseSchema, pollResultSchema } from './device-auth';
+export type { DeviceCodeResponse, PollResult } from './device-auth';

@@ -62,7 +62,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       const channel = channelKey(envelope.user_id, envelope.device_id);
 
       if (envelope.type === 'hello') {
-        const { role } = helloPayloadSchema.parse(envelope.payload);
+        const hello = helloPayloadSchema.safeParse(envelope.payload);
+        if (!hello.success) {
+          log.warn({ channel }, 'relay: dropped hello with invalid payload');
+          return;
+        }
+        const { role } = hello.data;
         peer.role = role;
         peer.channel = channel;
         if (role === 'daemon') {

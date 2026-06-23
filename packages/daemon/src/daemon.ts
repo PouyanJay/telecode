@@ -27,7 +27,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const log = options.logger ?? pino({ name: 'daemon' });
   let socket: WebSocket | null = null;
 
-  function handleMessage(raw: WebSocket.RawData, onReady: () => void): void {
+  function handleMessage(raw: Buffer, onReady: () => void): void {
     let envelope: Envelope;
     try {
       envelope = parseEnvelope(JSON.parse(raw.toString()));
@@ -43,7 +43,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
         return;
       }
       case 'echo': {
-        const { text } = echoPayloadSchema.parse(envelope.payload);
+        const echo = echoPayloadSchema.safeParse(envelope.payload);
+        if (!echo.success) {
+          log.warn({ device: options.deviceId }, 'daemon: dropped echo with invalid payload');
+          return;
+        }
+        const { text } = echo.data;
         log.info({ device: options.deviceId, text }, 'daemon: echo received');
         socket?.send(
           JSON.stringify(
@@ -70,7 +75,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
       await new Promise<void>((resolve, reject) => {
         const onReady = (): void => resolve();
-        ws.on('message', (raw) => handleMessage(raw, onReady));
+        ws.on('message', (raw: Buffer) => handleMessage(raw, onReady));
         ws.once('open', () => {
           ws.send(
             JSON.stringify(

@@ -1,3 +1,4 @@
+import { deviceCodeResponseSchema, pollResultSchema } from '@telecode/protocol';
 import { pino, type Logger } from 'pino';
 
 /**
@@ -19,19 +20,6 @@ export interface DeviceCredentials {
   readonly userId: string;
 }
 
-interface DeviceCodeResponse {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  interval: number;
-}
-
-interface TokenResponse {
-  status: string;
-  device_token?: string;
-  user_id?: string;
-}
-
 export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCredentials> {
   const log = options.logger ?? pino({ name: 'daemon:pair' });
 
@@ -39,7 +27,7 @@ export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCred
   if (!codeRes.ok) {
     throw new Error(`device/code request failed: ${codeRes.status}`);
   }
-  const code = (await codeRes.json()) as DeviceCodeResponse;
+  const code = deviceCodeResponseSchema.parse(await codeRes.json());
 
   const prompt = { userCode: code.user_code, verificationUri: code.verification_uri };
   if (options.onPrompt) {
@@ -58,8 +46,8 @@ export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCred
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ device_code: code.device_code }),
     });
-    const result = (await tokenRes.json()) as TokenResponse;
-    if (result.status === 'approved' && result.device_token && result.user_id) {
+    const result = pollResultSchema.parse(await tokenRes.json());
+    if (result.status === 'approved') {
       log.info({ userId: result.user_id }, 'daemon: device paired');
       return { deviceToken: result.device_token, userId: result.user_id };
     }
