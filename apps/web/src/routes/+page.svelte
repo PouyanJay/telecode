@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { env } from '$env/dynamic/public';
   import { onMount } from 'svelte';
 
   import { createRelayClient, type RelayClient } from '$lib/relay-client';
 
-  // Phase 0: fixed stub identity + relay URL; both become real in later phases.
-  const RELAY_URL = 'ws://127.0.0.1:8080/ws';
+  // Phase 0: fixed stub identity; the relay URL is injected by `make start`
+  // (so it tracks the relay's actual port) and falls back to the default.
+  const RELAY_URL = env.PUBLIC_TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
   const USER_ID = 'u_dev';
   const DEVICE_ID = 'd_dev';
 
