@@ -5,6 +5,8 @@ import type { WebSocket } from 'ws';
 
 import { helloPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
 
+import { createDeviceAuthService, registerDeviceAuthRoutes } from './device-auth';
+
 /**
  * The relay / control plane. Both the daemon and the browser dial *out* to it (loopback in
  * Phase 0; WSS in production), and it multiplexes messages by `(user_id, device_id)`. It never
@@ -13,6 +15,8 @@ import { helloPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '
  */
 export interface RelayOptions {
   readonly logger?: Logger;
+  /** Where users go to enter the device code (shown by the daemon during pairing). */
+  readonly verificationUri?: string;
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -35,6 +39,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   await app.register(websocket);
 
   app.get('/healthz', async () => ({ status: 'ok' }));
+
+  // Device Authorization Grant endpoints (/device/code, /device/token, /device/approve).
+  const deviceAuth = createDeviceAuthService({
+    verificationUri: options.verificationUri ?? 'http://127.0.0.1:8080/activate',
+  });
+  registerDeviceAuthRoutes(app, deviceAuth);
 
   app.get('/ws', { websocket: true }, (socket: WebSocket) => {
     const peer: PeerState = { role: 'unknown', channel: null };
