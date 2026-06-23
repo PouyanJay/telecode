@@ -17,6 +17,7 @@ export interface ClaudeAgentAdapterOptions {
   readonly permissionMode?: PermissionMode;
   readonly allowedTools?: string[];
   readonly maxTurns?: number;
+  readonly model?: string;
   /**
    * Which on-disk settings to load. Defaults to `[]` (none) so the daemon runs an isolated session
    * and never inherits the operator's personal Claude config — and so every tool actually routes
@@ -57,6 +58,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           permissionMode: options.permissionMode ?? 'default',
           maxTurns: options.maxTurns ?? 4,
           settingSources: options.settingSources ?? [],
+          ...(options.model ? { model: options.model } : {}),
           ...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
         },
       });

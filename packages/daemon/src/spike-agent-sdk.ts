@@ -9,12 +9,11 @@ import { createClaudeAgentAdapter } from './claude-agent-adapter';
  *
  *   node --import tsx --env-file=.env packages/daemon/src/spike-agent-sdk.ts
  *
- * IMPORTANT — two requirements for `canUseTool` to actually fire:
- *  1. A VALID `ANTHROPIC_API_KEY` (or working Claude Code auth).
- *  2. Run it OUTSIDE a Claude Code session. When this runs nested inside Claude Code, the SDK
- *     inherits the parent's permission context and auto-allows tools, bypassing `canUseTool`
- *     (you'll see the tool execute with `intercepted: 0`). `settingSources: []` isolates settings
- *     but cannot undo a nested launch. On a standalone daemon (a user's laptop) this is moot.
+ * IMPORTANT — run this OUTSIDE a Claude Code session. When it runs nested inside Claude Code, the
+ * SDK routes tool-permission decisions to the PARENT harness instead of this `canUseTool`, so the
+ * tool is allowed/denied by the parent and you see `intercepted: 0` regardless of the operation or
+ * `settingSources: []`. On a standalone daemon (a user's laptop) `canUseTool` fires normally. A
+ * valid `ANTHROPIC_API_KEY` in `.env` is required (and confirmed working).
  *
  * The CI-safe contract test lives in `agent-adapter.test.ts` (no model call) and is the durable
  * Phase 0 proof of the allow/deny contract.
@@ -28,10 +27,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  const adapter = createClaudeAgentAdapter({ logger: log, allowedTools: ['Bash'], maxTurns: 3 });
+  const adapter = createClaudeAgentAdapter({
+    logger: log,
+    model: 'claude-haiku-4-5-20251001',
+    allowedTools: ['Write'],
+    maxTurns: 3,
+  });
 
   const result = await adapter.run(
-    'Use the Bash tool to run exactly: echo telecode. Then stop.',
+    'Use the Write tool to create a file ./telecode-spike-test.txt containing the word telecode. Do nothing else.',
     async (request) => {
       log.info(
         { tool: request.toolName, input: request.input },
@@ -52,8 +56,8 @@ async function main(): Promise<void> {
 
   if (result.intercepted.length === 0) {
     log.warn(
-      'canUseTool was not exercised. Likely causes: invalid ANTHROPIC_API_KEY (auth fell back / failed), ' +
-        'or running nested inside Claude Code (parent auto-allows tools). Run standalone with a valid key.',
+      'canUseTool was not exercised — almost certainly because this ran nested inside Claude Code ' +
+        '(the parent harness handles permissions). Re-run standalone, outside any Claude Code session.',
     );
   } else {
     log.info(

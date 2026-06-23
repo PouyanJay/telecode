@@ -64,6 +64,9 @@ playwright-report/
 blob-report/
 playwright/.cache/
 
+# Spike 1 scratch artifact (created only if the agent's Write is allowed)
+telecode-spike-test.txt
+
 # Optional npm cache directory
 .npm
 
