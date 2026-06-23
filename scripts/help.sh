@@ -15,10 +15,12 @@ ui::cmd "make help"        "Print this command reference (default)"
 
 ui::section "Setup & Run"
 ui::cmd "make setup"       "Install dev dependencies (pnpm, browsers, .env) — idempotent"
-ui::cmd "make start"       "Start the backend (relay + daemon), health-gated"
+ui::cmd "make run"         "One command from a fresh clone: setup + start the full stack"
+ui::cmd "make start"       "Start the backend (relay + daemon) — reuses if healthy"
 ui::cmd "make start-all"   "Start the full stack (relay + daemon + web)"
-ui::cmd "make run"         "Bulletproof end-to-end: setup + start-all"
 ui::cmd "make stop"        "Stop all services started by 'make start'"
+
+printf "    %sHealthy services are reused; a taken port auto-relocates to a free one.%s\n" "${UI_DIM}" "${UI_RESET}"
 
 ui::section "Testing"
 ui::cmd "make test"        "Run all suites: Vitest + Playwright e2e"
