@@ -1,3 +1,5 @@
+import { type SessionStatusName } from '@telecode/protocol';
+
 import { env } from '$env/dynamic/private';
 
 import type { ProviderIdentity } from './auth/provider';
@@ -28,6 +30,17 @@ export interface RelayDevice {
   id: string;
   name: string;
   lastSeenAt: Date | null;
+}
+
+/** A session in the user's registry (routing metadata only) — the dashboard's persisted list source. */
+export interface RelaySession {
+  id: string;
+  deviceId: string;
+  title: string | null;
+  status: SessionStatusName;
+  createdAt: Date;
+  updatedAt: Date;
+  endedAt: Date | null;
 }
 
 /** Mint a login session for a verified identity (service-secret guarded). */
@@ -81,6 +94,36 @@ export async function listDevices(sessionToken: string): Promise<RelayDevice[]> 
     id: device.id,
     name: device.name,
     lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
+  }));
+}
+
+/** List the user's sessions, newest-first (session-token authed). Empty on any error. */
+export async function listSessions(sessionToken: string): Promise<RelaySession[]> {
+  const res = await fetch(`${RELAY_HTTP_URL}/me/sessions`, {
+    headers: { authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) {
+    return [];
+  }
+  const body = (await res.json()) as {
+    sessions: {
+      id: string;
+      device_id: string;
+      title: string | null;
+      status: SessionStatusName;
+      created_at: string;
+      updated_at: string;
+      ended_at: string | null;
+    }[];
+  };
+  return body.sessions.map((session) => ({
+    id: session.id,
+    deviceId: session.device_id,
+    title: session.title,
+    status: session.status,
+    createdAt: new Date(session.created_at),
+    updatedAt: new Date(session.updated_at),
+    endedAt: session.ended_at ? new Date(session.ended_at) : null,
   }));
 }
 
