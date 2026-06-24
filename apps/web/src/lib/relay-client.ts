@@ -28,6 +28,8 @@ export interface RelayConnectionOptions {
 export interface RelayConnection {
   /** Launch a new agent session on the watched device. The relay mints the `session_id`. */
   launch(payload: SessionLaunchPayload): void;
+  /** Re-attach to an existing session on reopen; the daemon replies with `session.history` (backfill). */
+  subscribe(sessionId: string): void;
   /** Send a follow-up instruction to steer an existing session (resumes its agent conversation). */
   sendUserMessage(sessionId: string, text: string): void;
   /** Send the human's verdict for a pending `agent.permission_request` on `sessionId`. */
@@ -40,7 +42,7 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   options.onStatus('connecting');
 
   function send(
-    type: 'session.launch' | 'permission.decision' | 'user.message',
+    type: 'session.launch' | 'session.subscribe' | 'permission.decision' | 'user.message',
     payload: unknown,
     sessionId?: string,
   ): void {
@@ -90,6 +92,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   return {
     launch(payload: SessionLaunchPayload): void {
       send('session.launch', payload);
+    },
+    subscribe(sessionId: string): void {
+      send('session.subscribe', {}, sessionId);
     },
     sendUserMessage(sessionId: string, text: string): void {
       send('user.message', { text }, sessionId);

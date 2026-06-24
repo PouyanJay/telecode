@@ -39,6 +39,9 @@ export {
   agentPermissionRequestPayloadSchema,
   permissionDecisionPayloadSchema,
   userMessagePayloadSchema,
+  sessionSubscribePayloadSchema,
+  sessionHistoryEntrySchema,
+  sessionHistoryPayloadSchema,
 } from './session';
 export type {
   PermissionModeName,
@@ -52,4 +55,7 @@ export type {
   AgentPermissionRequestPayload,
   PermissionDecisionPayload,
   UserMessagePayload,
+  SessionSubscribePayload,
+  SessionHistoryEntry,
+  SessionHistoryPayload,
 } from './session';

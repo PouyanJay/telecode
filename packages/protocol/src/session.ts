@@ -99,3 +99,44 @@ export type PermissionDecisionPayload = z.infer<typeof permissionDecisionPayload
  */
 export const userMessagePayloadSchema = z.object({ text: z.string().min(1) });
 export type UserMessagePayload = z.infer<typeof userMessagePayloadSchema>;
+
+/**
+ * Payload for `session.subscribe` (web → daemon): re-attach to an existing session on UI reopen/reload.
+ * The session id is on the envelope; the daemon replies with {@link sessionHistoryPayloadSchema}.
+ */
+export const sessionSubscribePayloadSchema = z.object({});
+export type SessionSubscribePayload = z.infer<typeof sessionSubscribePayloadSchema>;
+
+/**
+ * One entry of a backfilled transcript (in `session.history`), mirroring the UI's transcript kinds. A
+ * `permission` carries its resolved verdict so the replay shows a decided gate without action buttons
+ * (`pending` still awaits a human); `allow`/`deny` render as approved/rejected.
+ */
+export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('user'), text: z.string() }),
+  z.object({ kind: z.literal('message'), text: z.string() }),
+  z.object({
+    kind: z.literal('tool'),
+    toolName: z.string().min(1),
+    input: z.record(z.unknown()),
+  }),
+  z.object({
+    kind: z.literal('permission'),
+    requestId: z.string().min(1),
+    toolName: z.string().min(1),
+    input: z.record(z.unknown()),
+    decision: z.enum(['pending', 'allow', 'deny']),
+  }),
+]);
+export type SessionHistoryEntry = z.infer<typeof sessionHistoryEntrySchema>;
+
+/**
+ * Payload for `session.history` (daemon → web): the ordered transcript + current status, sent in
+ * response to `session.subscribe`. Backfill comes from the daemon — the live transcript holder — so the
+ * relay never needs the plaintext (consistent with E2E in Phase 3). Reopen is a reconnect, not a restart.
+ */
+export const sessionHistoryPayloadSchema = z.object({
+  status: sessionStatusSchema,
+  entries: z.array(sessionHistoryEntrySchema),
+});
+export type SessionHistoryPayload = z.infer<typeof sessionHistoryPayloadSchema>;

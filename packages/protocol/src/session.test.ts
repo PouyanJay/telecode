@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   agentPermissionRequestPayloadSchema,
   permissionDecisionPayloadSchema,
+  sessionHistoryPayloadSchema,
   userMessagePayloadSchema,
 } from './session';
 
@@ -100,5 +101,45 @@ describe('userMessagePayloadSchema', () => {
 
   it('rejects an empty follow-up', () => {
     expect(userMessagePayloadSchema.safeParse({ text: '' }).success).toBe(false);
+  });
+});
+
+describe('sessionHistoryPayloadSchema', () => {
+  it('parses a backfilled transcript of mixed entry kinds + status', () => {
+    const parsed = sessionHistoryPayloadSchema.parse({
+      status: 'awaiting_input',
+      entries: [
+        { kind: 'user', text: 'do it' },
+        { kind: 'message', text: 'working' },
+        { kind: 'tool', toolName: 'Read', input: { path: 'README.md' } },
+        { kind: 'permission', requestId: 'req_1', toolName: 'Write', input: {}, decision: 'allow' },
+      ],
+    });
+    expect(parsed.status).toBe('awaiting_input');
+    expect(parsed.entries).toHaveLength(4);
+  });
+
+  it('accepts an empty transcript (a not-live session)', () => {
+    expect(
+      sessionHistoryPayloadSchema.safeParse({ status: 'offline_paused', entries: [] }).success,
+    ).toBe(true);
+  });
+
+  it('rejects a permission entry with an unknown decision', () => {
+    const result = sessionHistoryPayloadSchema.safeParse({
+      status: 'running',
+      entries: [
+        { kind: 'permission', requestId: 'r', toolName: 'X', input: {}, decision: 'maybe' },
+      ],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an entry with an unknown kind', () => {
+    const result = sessionHistoryPayloadSchema.safeParse({
+      status: 'running',
+      entries: [{ kind: 'diff', text: 'x' }],
+    });
+    expect(result.success).toBe(false);
   });
 });

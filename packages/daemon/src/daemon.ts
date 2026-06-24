@@ -9,10 +9,14 @@ import {
   parseEnvelope,
   permissionDecisionPayloadSchema,
   sessionLaunchPayloadSchema,
+  sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   type Envelope,
   type MessageType,
   type PermissionDecisionPayload,
+  type SessionHistoryEntry,
+  type SessionHistoryPayload,
+  type SessionStatusName,
 } from '@telecode/protocol';
 
 import {
@@ -62,6 +66,38 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const sdkSessions = new Map<string, string>();
   // Telecode sessions with a turn in flight (one turn at a time per session).
   const activeRuns = new Set<string>();
+  // The live transcript + status the daemon holds for each session (architecture invariant #3/#7: the
+  // session lives on the laptop). A reopened browser re-attaches with `session.subscribe` and we backfill
+  // this as `session.history` — so the relay never needs the plaintext (E2E-consistent in Phase 3). Kept
+  // for the daemon's lifetime; a daemon restart loses it (Phase 4 resilience), reported as offline.
+  // TODO(Phase 4): evict done/error records after a TTL so a long-lived daemon doesn't grow unbounded.
+  const sessionRecords = new Map<
+    string,
+    { status: SessionStatusName; transcript: SessionHistoryEntry[] }
+  >();
+
+  /** The record for a session, created on first use. */
+  function recordFor(sessionId: string): {
+    status: SessionStatusName;
+    transcript: SessionHistoryEntry[];
+  } {
+    let existing = sessionRecords.get(sessionId);
+    if (!existing) {
+      existing = { status: 'starting', transcript: [] };
+      sessionRecords.set(sessionId, existing);
+    }
+    return existing;
+  }
+
+  /** Append an entry to a session's transcript (no-op when the envelope carries no session id). */
+  function record(sessionId: string | undefined, entry: SessionHistoryEntry): void {
+    if (sessionId !== undefined) recordFor(sessionId).transcript.push(entry);
+  }
+
+  /** Set a session's tracked status (no-op when the envelope carries no session id). */
+  function setStatus(sessionId: string | undefined, status: SessionStatusName): void {
+    if (sessionId !== undefined) recordFor(sessionId).status = status;
+  }
 
   /** Send an envelope on the daemon's channel, carrying the session id when present. */
   function sendForSession(source: Envelope, type: MessageType, payload: unknown): void {
@@ -88,6 +124,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
     request: PermissionRequest,
   ): Promise<PermissionDecision> {
     const requestId = randomUUID();
+    record(source.session_id, {
+      kind: 'permission',
+      requestId,
+      toolName: request.toolName,
+      input: request.input,
+      decision: 'pending',
+    });
+    setStatus(source.session_id, 'awaiting_input');
     return new Promise<PermissionDecision>((resolve) => {
       pendingPermissions.set(requestId, resolve);
       log.info(
@@ -135,8 +179,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
         canUseTool: (request) => requestPermission(envelope, request),
         onEvent: (event) => {
           if (event.type === 'message') {
+            record(sessionId, { kind: 'message', text: event.text });
             sendForSession(envelope, 'agent.message', { text: event.text });
           } else {
+            record(sessionId, { kind: 'tool', toolName: event.toolName, input: event.input });
             sendForSession(envelope, 'agent.tool_use', {
               toolName: event.toolName,
               input: event.input,
@@ -149,9 +195,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
         sdkSessions.set(sessionId, result.sessionId);
       }
       log.info({ deviceId: options.deviceId, sessionId }, 'daemon: turn ended');
+      setStatus(sessionId, 'done');
       sendForSession(envelope, 'session.ended', { status: 'done' });
     } catch (err) {
       log.error({ err, sessionId }, 'daemon: turn failed');
+      setStatus(sessionId, 'error');
       sendForSession(envelope, 'session.ended', {
         status: 'error',
         error: err instanceof Error ? err.message : 'unknown error',
@@ -180,6 +228,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
       { deviceId: options.deviceId, sessionId: envelope.session_id },
       'daemon: session launch received',
     );
+    record(envelope.session_id, { kind: 'user', text: launch.data.prompt });
+    setStatus(envelope.session_id, 'running');
     sendForSession(envelope, 'session.started', {});
     await runTurn(envelope, launch.data.prompt);
   }
@@ -201,6 +251,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return;
     }
     log.info({ deviceId: options.deviceId, sessionId }, 'daemon: follow-up received');
+    record(sessionId, { kind: 'user', text: message.data.text });
+    setStatus(sessionId, 'running');
     await runTurn(envelope, message.data.text, resume);
   }
 
@@ -249,6 +301,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
         void runFollowUp(envelope);
         return;
       }
+      case 'session.subscribe': {
+        if (!sessionSubscribePayloadSchema.safeParse(envelope.payload).success) {
+          log.warn(
+            { deviceId: options.deviceId },
+            'daemon: dropped session.subscribe with invalid payload',
+          );
+          return;
+        }
+        // Reopen = reconnect: backfill the live transcript the daemon holds for this session. A daemon
+        // that doesn't hold it (e.g. after a restart) can't backfill — report it not-live so the UI
+        // falls back to the registry status instead of showing a phantom transcript.
+        const sessionId = envelope.session_id;
+        const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
+        const payload: SessionHistoryPayload = rec
+          ? { status: rec.status, entries: rec.transcript }
+          : { status: 'offline_paused', entries: [] };
+        log.info(
+          { deviceId: options.deviceId, sessionId, known: rec !== undefined },
+          'daemon: session subscribe — backfilling history',
+        );
+        sendForSession(envelope, 'session.history', payload);
+        return;
+      }
       case 'permission.decision': {
         const decision = permissionDecisionPayloadSchema.safeParse(envelope.payload);
         if (!decision.success) {
@@ -267,6 +342,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
           return;
         }
         pendingPermissions.delete(decision.data.requestId);
+        // Record the verdict on the gate so a later backfill shows it decided, and resume the session.
+        // In-place on the daemon's own mutable record (single-threaded; no await between find and write).
+        const sessionId = envelope.session_id;
+        if (sessionId !== undefined) {
+          const entry = sessionRecords
+            .get(sessionId)
+            ?.transcript.find(
+              (e): e is Extract<SessionHistoryEntry, { kind: 'permission' }> =>
+                e.kind === 'permission' && e.requestId === decision.data.requestId,
+            );
+          if (entry) entry.decision = decision.data.behavior;
+          setStatus(sessionId, 'running');
+        }
         log.info(
           {
             deviceId: options.deviceId,

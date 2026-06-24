@@ -100,6 +100,51 @@ describe('session reducer', () => {
     expect(state.entries).toHaveLength(0);
   });
 
+  it('rebuilds the transcript from session.history on reconnect (backfill)', () => {
+    const state = applyEnvelope(
+      initialSessionState,
+      frame('session.history', {
+        status: 'awaiting_input',
+        entries: [
+          { kind: 'user', text: 'do it' },
+          { kind: 'message', text: 'Working' },
+          {
+            kind: 'permission',
+            requestId: 'req_1',
+            toolName: 'Read',
+            input: { path: 'README.md' },
+            decision: 'allow',
+          },
+          { kind: 'tool', toolName: 'Read', input: { path: 'README.md' } },
+          {
+            kind: 'permission',
+            requestId: 'req_2',
+            toolName: 'Write',
+            input: { path: 'x' },
+            decision: 'pending',
+          },
+        ],
+      }),
+    );
+    expect(state.sessionId).toBe(SESSION);
+    expect(state.status).toBe('awaiting_input');
+    expect(state.entries.map((e) => e.kind)).toEqual([
+      'user',
+      'message',
+      'permission',
+      'tool',
+      'permission',
+    ]);
+    // The resolved gate shows decided (no buttons); the still-open gate stays actionable.
+    const perms = state.entries.filter((e) => e.kind === 'permission');
+    expect(perms.map((e) => e.kind === 'permission' && e.decision)).toEqual([
+      'approved',
+      'pending',
+    ]);
+    expect(pendingPermission(state)?.kind).toBe('permission');
+    expect(new Set(state.entries.map((e) => e.id)).size).toBe(5); // stable, unique keys
+  });
+
   it('starts from an idle initial state', () => {
     expect(initialSessionState.status).toBe('idle');
     expect(initialSessionState.entries).toHaveLength(0);
