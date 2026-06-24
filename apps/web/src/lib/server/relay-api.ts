@@ -43,12 +43,32 @@ export interface RelaySession {
   endedAt: Date | null;
 }
 
-/** Mint a login session for a verified identity (service-secret guarded). */
-export async function createRelaySession(identity: ProviderIdentity): Promise<CreatedSession> {
+/** A provider's OAuth access token, forwarded to the relay for at-rest storage (never to the browser). */
+export interface OAuthTokenInput {
+  accessToken: string;
+  scope?: string;
+}
+
+/**
+ * Mint a login session for a verified identity (service-secret guarded). When the provider granted an
+ * OAuth access token, it is forwarded here so the relay can persist it (encrypted) for later use.
+ */
+export async function createRelaySession(
+  identity: ProviderIdentity,
+  oauth?: OAuthTokenInput,
+): Promise<CreatedSession> {
   const res = await fetch(`${RELAY_HTTP_URL}/auth/session`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-telecode-service-secret': SERVICE_SECRET },
-    body: JSON.stringify(identity),
+    body: JSON.stringify({
+      ...identity,
+      ...(oauth
+        ? {
+            oauthAccessToken: oauth.accessToken,
+            ...(oauth.scope ? { oauthScope: oauth.scope } : {}),
+          }
+        : {}),
+    }),
   });
   if (!res.ok) {
     throw new Error(`relay /auth/session failed: ${res.status}`);

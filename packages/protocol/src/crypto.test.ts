@@ -1,6 +1,14 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 
-import { generateKeyPair, open, ready, seal } from './crypto';
+import {
+  generateKeyPair,
+  generateSecretKey,
+  open,
+  openSecret,
+  ready,
+  seal,
+  sealSecret,
+} from './crypto';
 
 describe('crypto (libsodium crypto_box round-trip)', () => {
   beforeAll(async () => {
@@ -45,5 +53,44 @@ describe('crypto (libsodium crypto_box round-trip)', () => {
     };
 
     await expect(open(tampered, browser.publicKey, daemon.privateKey)).rejects.toThrow();
+  });
+});
+
+describe('secretbox (symmetric at-rest encryption)', () => {
+  it('generates a 32-byte secret key', () => {
+    expect(generateSecretKey()).toHaveLength(32);
+  });
+
+  it('seals and opens with the same key, hiding the plaintext', async () => {
+    const key = generateSecretKey();
+
+    const sealed = await sealSecret('gho_secret_access_token', key);
+    expect(sealed.ciphertext).not.toContain('gho_secret_access_token');
+    expect(sealed.nonce).not.toBe('');
+
+    expect(await openSecret(sealed, key)).toBe('gho_secret_access_token');
+  });
+
+  it('uses a fresh nonce per seal (same plaintext + key → different ciphertext)', async () => {
+    const key = generateSecretKey();
+    const a = await sealSecret('same', key);
+    const b = await sealSecret('same', key);
+    expect(a.nonce).not.toBe(b.nonce);
+    expect(a.ciphertext).not.toBe(b.ciphertext);
+  });
+
+  it('fails to open with the wrong key', async () => {
+    const sealed = await sealSecret('secret', generateSecretKey());
+    await expect(openSecret(sealed, generateSecretKey())).rejects.toThrow();
+  });
+
+  it('fails to open tampered ciphertext', async () => {
+    const key = generateSecretKey();
+    const sealed = await sealSecret('secret', key);
+    const tampered = {
+      ...sealed,
+      ciphertext: sealed.ciphertext.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A')),
+    };
+    await expect(openSecret(tampered, key)).rejects.toThrow();
   });
 });

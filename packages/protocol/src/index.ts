@@ -20,7 +20,17 @@ export {
 } from './envelope';
 export type { MessageType, Envelope, EchoPayload, PeerRole, HelloPayload } from './envelope';
 
-export { ready, generateKeyPair, seal, open, encodeKey, decodeKey } from './crypto';
+export {
+  ready,
+  generateKeyPair,
+  seal,
+  open,
+  encodeKey,
+  decodeKey,
+  generateSecretKey,
+  sealSecret,
+  openSecret,
+} from './crypto';
 export type { KeyPair, SealedMessage } from './crypto';
 
 export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';

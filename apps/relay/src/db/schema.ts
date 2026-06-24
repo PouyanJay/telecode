@@ -104,8 +104,30 @@ export const authSessions = pgTable(
   }),
 );
 
+/**
+ * The user's OAuth access token (e.g. GitHub with `repo` scope), encrypted at rest. One row per user
+ * (PK = user_id). The token is a secret only the relay's trusted owner path touches — to list repos on
+ * the user's behalf — so, like {@link authSessions}, RLS is enabled with NO policy (deny-all to the
+ * user-scoped `telecode_app` role); it is never exposed to the browser. The plaintext token is never
+ * stored: `access_token_cipher`/`access_token_nonce` hold a `secretbox`-sealed value (see
+ * `@telecode/protocol` `sealSecret`).
+ */
+export const oauthTokens = pgTable('oauth_tokens', {
+  userId: uuid('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  accessTokenCipher: text('access_token_cipher').notNull(),
+  accessTokenNonce: text('access_token_nonce').notNull(),
+  /** Space-separated OAuth scopes granted with this token (e.g. `repo read:user`). */
+  scope: text('scope'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
+export type OAuthToken = typeof oauthTokens.$inferSelect;
+export type NewOAuthToken = typeof oauthTokens.$inferInsert;
 export type AuthSession = typeof authSessions.$inferSelect;
 export type NewAuthSession = typeof authSessions.$inferInsert;
 export type Device = typeof devices.$inferSelect;

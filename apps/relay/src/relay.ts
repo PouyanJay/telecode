@@ -13,6 +13,7 @@ import {
 
 import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
+import { type OAuthTokenStore } from './auth/oauth-token-store';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceListRoute } from './registry/device-routes';
@@ -41,6 +42,12 @@ export interface RelayOptions {
    */
   readonly auth?: { readonly service: AuthService; readonly serviceSecret: string };
   /**
+   * Stores the user's OAuth access token encrypted at rest (requires `auth`). When provided, an access
+   * token sent on `/auth/session` is persisted, and `/me/repos` is exposed (lists the user's GitHub
+   * repos). Optional so deployments without a token-encryption key simply omit repo listing.
+   */
+  readonly oauthTokenStore?: OAuthTokenStore;
+  /**
    * Device registry (Postgres-backed). When provided (with `auth` for the service secret), the relay
    * exposes the device-authorization endpoints — `/device/approve` persists the device under the
    * server-derived user — and requires every `daemon` peer to present a valid device token on `hello`
@@ -68,6 +75,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   const sessionRegistry = options.sessionRegistry;
   const authService = options.auth?.service;
   const deviceRegistry = options.deviceRegistry;
+  const oauthTokenStore = options.oauthTokenStore;
 
   function broadcastToBrowsers(channel: string, frame: string): void {
     const set = browsers.get(channel);
@@ -202,7 +210,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   // OAuth-session + channel-token endpoints (web → relay, server-to-server).
   if (options.auth) {
-    registerAuthRoutes(app, options.auth.service, { serviceSecret: options.auth.serviceSecret });
+    registerAuthRoutes(app, options.auth.service, {
+      serviceSecret: options.auth.serviceSecret,
+      ...(oauthTokenStore ? { tokenStore: oauthTokenStore } : {}),
+    });
     // The web lists the user's devices to pick the channel its browser should watch.
     if (deviceRegistry) {
       registerDeviceListRoute(app, options.auth.service, deviceRegistry);

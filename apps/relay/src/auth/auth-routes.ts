@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 
 import { bearerToken } from './bearer';
 import { constantTimeEquals } from './secret-compare';
-import { type AuthService, providerIdentitySchema } from './auth-service';
+import { type AuthService, createSessionRequestSchema } from './auth-service';
+import { type OAuthTokenStore } from './oauth-token-store';
 
 /**
  * Relay HTTP auth endpoints, all called server-to-server by the SvelteKit web tier (the browser never
@@ -12,6 +13,8 @@ import { type AuthService, providerIdentitySchema } from './auth-service';
  */
 export interface AuthRoutesOptions {
   readonly serviceSecret: string;
+  /** When present, an OAuth access token on `/auth/session` is persisted (encrypted) for the user. */
+  readonly tokenStore?: OAuthTokenStore;
 }
 
 export function registerAuthRoutes(
@@ -25,11 +28,21 @@ export function registerAuthRoutes(
     if (typeof secret !== 'string' || !constantTimeEquals(secret, options.serviceSecret)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    const parsed = providerIdentitySchema.safeParse(request.body);
+    const parsed = createSessionRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_request' });
     }
-    const session = await auth.createSession(parsed.data);
+    const { oauthAccessToken, oauthScope, ...identity } = parsed.data;
+    const session = await auth.createSession(identity);
+    // Persist the OAuth token (encrypted) so the relay can later act on the user's behalf (e.g. list
+    // repos). Never logged, never returned to the browser.
+    if (oauthAccessToken && options.tokenStore) {
+      await options.tokenStore.storeToken({
+        userId: session.userId,
+        accessToken: oauthAccessToken,
+        ...(oauthScope !== undefined ? { scope: oauthScope } : {}),
+      });
+    }
     return reply.send({
       token: session.token,
       user_id: session.userId,
