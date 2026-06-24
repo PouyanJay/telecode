@@ -1,8 +1,23 @@
-import { and, eq } from 'drizzle-orm';
+import { type SessionStatusName } from '@telecode/protocol';
+import { and, desc, eq } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
 import { sessions } from '../db/schema';
 import { withUserContext } from '../db/user-context';
+
+/**
+ * A user's session as the relay can see it — routing metadata only (never the opaque launch payload).
+ * Powers the dashboard list and reconnect; the daemon backfills the actual transcript on subscribe.
+ */
+export interface SessionSummary {
+  readonly id: string;
+  readonly deviceId: string;
+  readonly title: string | null;
+  readonly status: SessionStatusName;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+  readonly endedAt: Date | null;
+}
 
 /**
  * The relay's view of the session registry: it persists only routing metadata it can see on the
@@ -13,6 +28,8 @@ import { withUserContext } from '../db/user-context';
 export interface SessionRegistry {
   /** Insert a new `starting` session for the user/device and return its generated id. */
   createSession(input: { userId: string; deviceId: string }): Promise<string>;
+  /** List the user's sessions, newest first (RLS-scoped). Powers the dashboard list + reconnect. */
+  listByUser(userId: string): Promise<SessionSummary[]>;
   /** Flip a session to `running` once the daemon reports it started. No-op if the row isn't the user's. */
   markRunning(input: { userId: string; sessionId: string }): Promise<void>;
   /** Flip a session to `awaiting_input` while a tool request blocks on a human decision. No-op if not the user's. */
@@ -47,6 +64,28 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
           throw new Error('session insert returned no row');
         }
         return row.id;
+      });
+    },
+
+    async listByUser(userId): Promise<SessionSummary[]> {
+      return withUserContext(db, userId, async (scoped) => {
+        return (
+          scoped
+            .select({
+              id: sessions.id,
+              deviceId: sessions.deviceId,
+              title: sessions.title,
+              status: sessions.status,
+              createdAt: sessions.createdAt,
+              updatedAt: sessions.updatedAt,
+              endedAt: sessions.endedAt,
+            })
+            .from(sessions)
+            // Defense in depth: RLS already scopes to the user; the explicit predicate keeps the read
+            // correct even if the policy is toggled off (as some tests do), matching `setStatus`.
+            .where(eq(sessions.userId, userId))
+            .orderBy(desc(sessions.createdAt))
+        );
       });
     },
 
