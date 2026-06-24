@@ -7,7 +7,8 @@ import { helloPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '
 
 import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
-import { createDeviceAuthService, registerDeviceAuthRoutes } from './device-auth';
+import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
+import { type DeviceRegistry } from './registry/device-registry';
 import { type SessionRegistry } from './registry/session-registry';
 
 /**
@@ -31,6 +32,13 @@ export interface RelayOptions {
    * `hello` whose `sub` matches the envelope's `user_id`. Optional so the Phase 0 echo path needs no auth.
    */
   readonly auth?: { readonly service: AuthService; readonly serviceSecret: string };
+  /**
+   * Device registry (Postgres-backed). When provided (with `auth` for the service secret), the relay
+   * exposes the device-authorization endpoints — `/device/approve` persists the device under the
+   * server-derived user — and requires every `daemon` peer to present a valid device token on `hello`
+   * whose device matches the envelope's `(user_id, device_id)`. Optional so the echo path needs no DB.
+   */
+  readonly deviceRegistry?: DeviceRegistry;
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -51,6 +59,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   const browsers = new Map<string, Set<WebSocket>>();
   const sessionRegistry = options.sessionRegistry;
   const authService = options.auth?.service;
+  const deviceRegistry = options.deviceRegistry;
 
   function broadcastToBrowsers(channel: string, frame: string): void {
     const set = browsers.get(channel);
@@ -115,11 +124,15 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   app.get('/healthz', async () => ({ status: 'ok' }));
 
-  // Device Authorization Grant endpoints (/device/code, /device/token, /device/approve).
-  const deviceAuth = createDeviceAuthService({
-    verificationUri: options.verificationUri ?? 'http://127.0.0.1:8080/activate',
-  });
-  registerDeviceAuthRoutes(app, deviceAuth);
+  // Device Authorization Grant endpoints — persisted, server-derived approval. Registered only when a
+  // device registry + the shared service secret are configured (the echo path needs neither).
+  if (deviceRegistry && options.auth) {
+    const deviceAuth = createDeviceAuthService({
+      verificationUri: options.verificationUri ?? 'http://127.0.0.1:5173/activate',
+      registry: deviceRegistry,
+    });
+    registerDeviceAuthRoutes(app, deviceAuth, options.auth.serviceSecret);
+  }
 
   // OAuth-session + channel-token endpoints (web → relay, server-to-server).
   if (options.auth) {
@@ -163,6 +176,19 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           const tokenUserId = token ? await authService.verifyChannelToken(token) : null;
           if (tokenUserId === null || tokenUserId !== envelope.user_id) {
             log.warn({ channel }, 'relay: rejected browser hello (invalid channel token)');
+            socket.close(4001, 'unauthorized');
+            return;
+          }
+        }
+
+        // A daemon must present its device token; the resolved device must match the envelope's
+        // (user_id, device_id) and not be revoked. This is the laptop-side execution boundary.
+        if (role === 'daemon' && deviceRegistry) {
+          const device = token
+            ? await deviceRegistry.findActiveByTokenHash(hashDeviceToken(token))
+            : null;
+          if (!device || device.userId !== envelope.user_id || device.id !== envelope.device_id) {
+            log.warn({ channel }, 'relay: rejected daemon hello (invalid device token)');
             socket.close(4001, 'unauthorized');
             return;
           }

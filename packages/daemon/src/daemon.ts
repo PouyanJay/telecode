@@ -19,6 +19,8 @@ export interface DaemonOptions {
   readonly relayUrl: string;
   readonly userId: string;
   readonly deviceId: string;
+  /** Device token presented on `hello`; the relay verifies it when device auth is configured. */
+  readonly deviceToken?: string;
   readonly logger?: Logger;
 }
 
@@ -117,7 +119,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
                 type: 'hello',
                 userId: options.userId,
                 deviceId: options.deviceId,
-                payload: { role: 'daemon' },
+                payload: {
+                  role: 'daemon',
+                  ...(options.deviceToken !== undefined ? { token: options.deviceToken } : {}),
+                },
               }),
             ),
           );

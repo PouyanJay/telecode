@@ -3,6 +3,7 @@ import { pino } from 'pino';
 import { createAuthService } from './auth/auth-service';
 import { createDb } from './db/client';
 import { loadDotenv } from './db/load-env';
+import { createDeviceRegistry } from './registry/device-registry';
 import { createSessionRegistry } from './registry/session-registry';
 import { buildRelay } from './relay';
 
@@ -31,6 +32,7 @@ const app = await buildRelay({
           service: createAuthService({ db: dbHandle, channelTokenSecret }),
           serviceSecret,
         },
+        deviceRegistry: createDeviceRegistry(dbHandle),
       }
     : {}),
 });

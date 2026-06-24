@@ -78,6 +78,7 @@
     <p class="sub">
       Pair a device with <code>npx telecode</code>, then launch a session to watch an agent work here.
     </p>
+    <p class="activate"><a href="/activate">Activate a device →</a></p>
   </div>
 </main>
 
@@ -178,5 +179,12 @@
     border-radius: var(--radius-sm);
     background: var(--bg-muted);
     color: var(--text);
+  }
+  .activate {
+    margin: var(--space-4) 0 0;
+  }
+  .activate a {
+    color: var(--accent);
+    font-weight: 500;
   }
 </style>

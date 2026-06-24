@@ -72,6 +72,19 @@ export async function mintChannelToken(sessionToken: string): Promise<string | n
   return body.channel_token;
 }
 
+/**
+ * Approve a pending device pairing for the authenticated user (server-derived). Service-secret guarded;
+ * the relay binds the device to `userId` — the client never supplies it. Resolves true on success.
+ */
+export async function approveDevice(userCode: string, userId: string): Promise<boolean> {
+  const res = await fetch(`${RELAY_HTTP_URL}/device/approve`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-telecode-service-secret': SERVICE_SECRET },
+    body: JSON.stringify({ user_code: userCode, user_id: userId }),
+  });
+  return res.ok;
+}
+
 /** Revoke a session (logout). Best-effort. */
 export async function destroyRelaySession(sessionToken: string): Promise<void> {
   await fetch(`${RELAY_HTTP_URL}/auth/session`, {

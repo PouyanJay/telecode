@@ -49,6 +49,16 @@ function fromBase64(value: string): Uint8Array {
   return bytes;
 }
 
+/** Encode a key (e.g. an X25519 public key) as base64 for the wire / storage. */
+export function encodeKey(key: Uint8Array): string {
+  return toBase64(key);
+}
+
+/** Decode a base64 key back into bytes. */
+export function decodeKey(value: string): Uint8Array {
+  return fromBase64(value);
+}
+
 /** No-op for tweetnacl (no async init); kept for API symmetry with WASM backends. */
 export async function ready(): Promise<void> {}
 

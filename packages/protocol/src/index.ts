@@ -20,11 +20,11 @@ export {
 } from './envelope';
 export type { MessageType, Envelope, EchoPayload, PeerRole, HelloPayload } from './envelope';
 
-export { ready, generateKeyPair, seal, open } from './crypto';
+export { ready, generateKeyPair, seal, open, encodeKey, decodeKey } from './crypto';
 export type { KeyPair, SealedMessage } from './crypto';
 
-export { deviceCodeResponseSchema, pollResultSchema } from './device-auth';
-export type { DeviceCodeResponse, PollResult } from './device-auth';
+export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';
+export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device-auth';
 
 export {
   permissionModeSchema,
