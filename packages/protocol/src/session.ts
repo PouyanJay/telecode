@@ -19,11 +19,20 @@ export const sessionLaunchPayloadSchema = z.object({
   permissionMode: permissionModeSchema.optional(),
   /** Optional user-facing label. */
   title: z.string().min(1).optional(),
+  /**
+   * Client-generated correlation id, echoed back on `session.started`, so the launching browser can
+   * match the relay-minted `session_id` to *its* launch (the relay assigns the id; the browser can't
+   * choose it). Opaque to the relay.
+   */
+  clientRef: z.string().min(1).optional(),
 });
 export type SessionLaunchPayload = z.infer<typeof sessionLaunchPayloadSchema>;
 
-/** Payload for `session.started` (daemon → web): the session is now running. The id is on the envelope. */
-export const sessionStartedPayloadSchema = z.object({});
+/**
+ * Payload for `session.started` (daemon → web): the session is now running. The id is on the envelope;
+ * `clientRef` echoes the launch's correlation id so the launching browser can pair its request to the id.
+ */
+export const sessionStartedPayloadSchema = z.object({ clientRef: z.string().optional() });
 export type SessionStartedPayload = z.infer<typeof sessionStartedPayloadSchema>;
 
 /** Session lifecycle states; mirrors the `sessions.status` column. */

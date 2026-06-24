@@ -230,7 +230,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     );
     record(envelope.session_id, { kind: 'user', text: launch.data.prompt });
     setStatus(envelope.session_id, 'running');
-    sendForSession(envelope, 'session.started', {});
+    // Echo the launch's correlation id so the launching browser can pair the relay-minted session id.
+    sendForSession(
+      envelope,
+      'session.started',
+      launch.data.clientRef !== undefined ? { clientRef: launch.data.clientRef } : {},
+    );
     await runTurn(envelope, launch.data.prompt);
   }
 
