@@ -14,7 +14,9 @@
 #     REUSED untouched (no kill/relaunch).
 #   - Auto port: if a default port is held by a FOREIGN process, the service
 #     relocates to the next free port instead of killing it or failing. The web
-#     is told the relay's actual URL so they always match.
+#     is told the relay's actual URL — both the browser's WS endpoint
+#     (PUBLIC_TELECODE_RELAY_URL) and the web server's HTTP endpoint
+#     (RELAY_HTTP_URL) — so all three always agree on a relocated relay.
 #   - Only our own processes are ever stopped (tracked via .run-state/).
 
 set -euo pipefail
@@ -220,6 +222,7 @@ else
   relay_port="$(recorded_port relay)"; relay_port="${relay_port:-$RELAY_PORT_DEFAULT}"
 fi
 RELAY_WS="ws://127.0.0.1:${relay_port}/ws"
+RELAY_HTTP="http://127.0.0.1:${relay_port}"
 
 # --- Daemon -----------------------------------------------------------------
 ui::step 3 4 "Daemon (Agent SDK supervisor)"
@@ -254,7 +257,11 @@ if [ "$WANT_WEB" = "1" ]; then
   else
     stop_service web
     web_port="$(resolve_port "$WEB_PORT_DEFAULT" web)"
-    start_service "web" "cd apps/web && exec env PUBLIC_TELECODE_RELAY_URL=${RELAY_WS} ./node_modules/.bin/vite dev --port ${web_port} --strictPort --host 127.0.0.1"
+    # PUBLIC_… is the browser's WS endpoint; RELAY_HTTP_URL is the web server's
+    # endpoint for /device/approve + /channel-token. Both must point at the
+    # actual relay port — pending pairing codes are in-memory per relay instance,
+    # so a stale RELAY_HTTP_URL (from .env) would hit the wrong relay and break pairing.
+    start_service "web" "cd apps/web && exec env PUBLIC_TELECODE_RELAY_URL=${RELAY_WS} RELAY_HTTP_URL=${RELAY_HTTP} ./node_modules/.bin/vite dev --port ${web_port} --strictPort --host 127.0.0.1"
     echo "$web_port" >"${RUN_STATE}/web.port"
     if wait_http "http://127.0.0.1:${web_port}" 60; then
       ui::ok "web up on ${web_port} (pid $(cat ${RUN_STATE}/web.pid))"

@@ -7,6 +7,7 @@
 
   import Composer from '$lib/components/Composer.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
+  import { pairingInstructions } from '$lib/pairing-instructions';
   import { createRelayConnection } from '$lib/relay-client';
   import type { ConnectionStatus, RelayConnection } from '$lib/relay-client';
   import {
@@ -146,7 +147,8 @@
       <p class="eyebrow">NO DEVICE PAIRED</p>
       <h1>Pair a device to begin</h1>
       <p class="sub">
-        Run <code>npx telecode</code> on your machine, then activate it here to launch and steer agents.
+        Run <code>{pairingInstructions.command}</code> on your machine, then activate it here to launch and
+        steer agents.
       </p>
       <p class="activate"><a href="/activate">Activate a device →</a></p>
     </div>

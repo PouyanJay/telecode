@@ -2,6 +2,8 @@
   import { enhance } from '$app/forms';
   import { Button } from '@telecode/ui';
 
+  import { pairingInstructions } from '$lib/pairing-instructions';
+
   import type { ActionData } from './$types';
 
   let { form }: { form: ActionData } = $props();
@@ -20,7 +22,13 @@
     <p class="eyebrow">PAIR A DEVICE</p>
     <h1 id="activate-title">Activate a device</h1>
     <p class="sub">
-      Run <code>npx telecode</code> on your machine, then enter the code it shows to bind it to your account.
+      {#if pairingInstructions.codeLocation}
+        Run <code>{pairingInstructions.command}</code> on your machine, then enter the pairing code from
+        <code>{pairingInstructions.codeLocation}</code> to bind it to your account.
+      {:else}
+        Run <code>{pairingInstructions.command}</code> on your machine, then enter the code it shows to bind
+        it to your account.
+      {/if}
     </p>
 
     {#if form?.activated}
