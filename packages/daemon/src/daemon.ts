@@ -169,7 +169,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
   async function runSession(envelope: Envelope): Promise<void> {
     const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
     if (!launch.success) {
-      log.warn({ device: options.deviceId }, 'daemon: dropped session.launch with invalid payload');
+      // The relay already minted a `starting` row; fail it cleanly so it can't stick at `starting`.
+      log.warn(
+        { device: options.deviceId },
+        'daemon: rejected session.launch with invalid payload',
+      );
+      sendForSession(envelope, 'session.ended', {
+        status: 'error',
+        error: 'invalid launch payload',
+      });
       return;
     }
     log.info(

@@ -91,7 +91,26 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       });
       log.info({ channel, sessionId }, 'relay: session launching');
       if (!daemon) {
-        log.warn({ channel, sessionId }, 'relay: no daemon registered for channel');
+        // The device is offline: fail the row (so it never sticks at `starting`) and tell the
+        // watching browsers, instead of leaving the launch silently orphaned.
+        log.warn({ channel, sessionId }, 'relay: no daemon registered — failing launch (offline)');
+        await sessionRegistry.markEnded({
+          userId: envelope.user_id,
+          sessionId,
+          status: 'error',
+        });
+        broadcastToBrowsers(
+          channel,
+          JSON.stringify(
+            makeEnvelope({
+              type: 'session.ended',
+              userId: envelope.user_id,
+              deviceId: envelope.device_id,
+              sessionId,
+              payload: { status: 'error', error: 'device offline' },
+            }),
+          ),
+        );
         return;
       }
       // Stamp the generated session_id (envelope metadata) and forward; the payload passes through untouched.

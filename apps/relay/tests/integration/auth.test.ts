@@ -2,6 +2,7 @@ import type { AddressInfo } from 'node:net';
 
 import { makeEnvelope, parseEnvelope } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
+import { SignJWT } from 'jose';
 import { Pool } from 'pg';
 import { pino } from 'pino';
 import WebSocket from 'ws';
@@ -92,6 +93,23 @@ describe('relay auth: sessions, channel tokens, and WS gating', () => {
       expect(await auth.verifyChannelToken(channelToken)).toBe(session.userId);
       expect(await auth.verifyChannelToken(`${channelToken}x`)).toBeNull();
       expect(await auth.verifyChannelToken('garbage')).toBeNull();
+    });
+
+    it('rejects an expired channel token', async () => {
+      // Forge a correctly-signed, correctly-audienced token that already expired a minute ago.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const expired = await new SignJWT({})
+        .setProtectedHeader({ alg: 'HS256' })
+        .setSubject('u_expired')
+        .setAudience('telecode-relay')
+        .setIssuedAt(nowSec - 120)
+        .setExpirationTime(nowSec - 60)
+        .sign(new TextEncoder().encode(CHANNEL_SECRET));
+      expect(await auth.verifyChannelToken(expired)).toBeNull();
+
+      // Sanity: a freshly minted token from the same service still verifies.
+      const fresh = await auth.mintChannelToken('u_fresh');
+      expect(await auth.verifyChannelToken(fresh)).toBe('u_fresh');
     });
   });
 

@@ -111,6 +111,28 @@ describe('RLS isolation across the registries', () => {
     expect(truth.rows[0]?.title).toBeNull();
   });
 
+  it("forbids deleting another user's session (row is invisible)", async () => {
+    const created = await withUserContext(handle, userA, async (db) => {
+      const [row] = await db
+        .insert(sessions)
+        .values({ userId: userA, deviceId: deviceA })
+        .returning();
+      return row;
+    });
+
+    const deleted = await withUserContext(handle, userB, (db) =>
+      db.delete(sessions).where(eq(sessions.id, created!.id)).returning(),
+    );
+    expect(deleted).toHaveLength(0);
+
+    // The row survives — B could not see, let alone delete, A's session.
+    const truth = await admin.query<{ n: string }>(
+      'select count(*)::text as n from sessions where id = $1',
+      [created!.id],
+    );
+    expect(truth.rows[0]?.n).toBe('1');
+  });
+
   it('scopes device visibility to the owner', async () => {
     const aDevices = await withUserContext(handle, userA, (db) => db.select().from(devices));
     expect(aDevices).toHaveLength(1);
