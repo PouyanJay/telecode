@@ -8,6 +8,27 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # Postgres for the relay's integration tests (registries + RLS + auth). The tests apply the
+    # Drizzle migrations themselves; we only provide the database. Connects as the superuser
+    # `postgres`, which can SET ROLE telecode_app for the RLS-enforcement path.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: telecode_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/telecode_test
+
     steps:
       - uses: actions/checkout@v4
 

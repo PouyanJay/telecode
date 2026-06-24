@@ -61,7 +61,16 @@ function waitForLog(child: ChildProcess, needle: string, timeoutMs = 30_000): Pr
 }
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
-  const relay = runTs('apps/relay/src/main.ts', { RELAY_PORT, LOG_LEVEL: 'error' });
+  // The Phase 0 echo walking skeleton runs the relay in echo-only mode (no DB, no auth). Empty values
+  // override any repo `.env` so the tokenless echo browser is not rejected; the authenticated session
+  // flow gets its own e2e with the real web UI.
+  const relay = runTs('apps/relay/src/main.ts', {
+    RELAY_PORT,
+    LOG_LEVEL: 'error',
+    DATABASE_URL: '',
+    CHANNEL_TOKEN_SECRET: '',
+    RELAY_SERVICE_SECRET: '',
+  });
   await waitForHealth(RELAY_HEALTH);
 
   const daemon = runTs('packages/daemon/src/main.ts', {
