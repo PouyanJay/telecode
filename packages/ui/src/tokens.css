@@ -86,6 +86,9 @@
   --space-12: 48px;
   --space-16: 64px;
 
+  /* Layout — the centered app/content column width (topbar content, session console, docs prose). */
+  --width-content: 56rem;
+
   /* Radius / shadow / motion */
   --radius-sm: 3px;
   --radius-md: 5px;

@@ -123,21 +123,23 @@
 </svelte:head>
 
 <header class="topbar hairline-b">
-  <div class="brand">
-    <span class="mark" aria-hidden="true"></span>
-    <span class="name">telecode</span>
-    {#if device}
-      <span class="sep" aria-hidden="true">/</span>
-      <span class="device" title={device.name}>{device.name}</span>
-    {/if}
-  </div>
+  <div class="bar-inner">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="name">telecode</span>
+      {#if device}
+        <span class="sep" aria-hidden="true">/</span>
+        <span class="device" title={device.name}>{device.name}</span>
+      {/if}
+    </div>
 
-  <div class="right">
-    <StatusDot tone={connDisplay.tone} label={connDisplay.label} aria-live="polite" />
-    <span class="user" title={user?.email ?? undefined}>{user?.displayName ?? 'Account'}</span>
-    <form method="POST" action="?/logout" use:enhance>
-      <Button type="submit" variant="ghost" size="sm">Sign out</Button>
-    </form>
+    <div class="right">
+      <StatusDot tone={connDisplay.tone} label={connDisplay.label} aria-live="polite" />
+      <span class="user" title={user?.email ?? undefined}>{user?.displayName ?? 'Account'}</span>
+      <form method="POST" action="?/logout" use:enhance>
+        <Button type="submit" variant="ghost" size="sm">Sign out</Button>
+      </form>
+    </div>
   </div>
 </header>
 
@@ -192,13 +194,20 @@
 
 <style>
   .topbar {
+    height: 48px;
+    padding: 0 var(--space-4);
+    background: var(--surface);
+  }
+  /* The bar spans full width (background + hairline), but its content aligns to the same
+     centered column as the session console below it. */
+  .bar-inner {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
-    height: 48px;
-    padding: 0 var(--space-4);
-    background: var(--surface);
+    height: 100%;
+    max-width: var(--width-content);
+    margin-inline: auto;
   }
   .brand {
     display: flex;
@@ -292,8 +301,12 @@
     font-weight: 500;
   }
 
-  /* Session view */
+  /* Session view — a centered console column on wide screens (full-bleed on mobile), so the
+     band, transcript, and composer align with each other instead of stretching edge to edge. */
   .session {
+    width: 100%;
+    max-width: var(--width-content);
+    margin-inline: auto;
     display: flex;
     flex-direction: column;
     min-height: 0;
