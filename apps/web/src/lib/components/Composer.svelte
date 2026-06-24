@@ -2,8 +2,9 @@
   import { Button } from '@telecode/ui';
 
   /**
-   * The sticky session composer (enterprise-ui §forms): a prompt box that launches a session or sends a
-   * follow-up to steer it (the page chooses, and sets `submitLabel`). Enter inserts a newline;
+   * The session composer (enterprise-ui §forms): a prompt box that launches a session or sends a
+   * follow-up to steer it (the page chooses, and sets `submitLabel`). The page positions it — centered
+   * with the heading when idle, docked at the bottom once a transcript exists. Enter inserts a newline;
    * ⌘/Ctrl+Enter submits (the prompt is free-form, often multi-line). Submit stays enabled until
    * submission starts; while a turn is running the composer is disabled rather than swallowing input.
    */
@@ -39,7 +40,7 @@
   }
 </script>
 
-<form class="composer hairline-t" onsubmit={handleSubmit} aria-label="Send to the session">
+<form class="composer" onsubmit={handleSubmit} aria-label="Send to the session">
   <label class="sr-only" for="prompt">Prompt</label>
   <textarea
     id="prompt"
@@ -50,24 +51,28 @@
     rows="1"
     disabled={disabledReason !== undefined}
     autocomplete="off"
-    aria-describedby="composer-hint"
+    aria-keyshortcuts="Meta+Enter Control+Enter"
   ></textarea>
-  <div class="side">
-    <Button type="submit" variant="primary" size="lg" loading={isBusy} disabled={isBlocked}>
-      {submitLabel}
-    </Button>
-    <span id="composer-hint" class="hint">⌘↵ to send</span>
-  </div>
+  <Button
+    type="submit"
+    variant="primary"
+    size="lg"
+    loading={isBusy}
+    disabled={isBlocked}
+    title="Send (⌘↵)"
+  >
+    {submitLabel}
+  </Button>
 </form>
 
 <style>
+  /* Flat by design: no surface/border of its own (that read as a "halo"). The textarea carries the
+     only input affordance; the page positions and pads the composer (centered when empty, docked when
+     a transcript exists). Button (lg, 40px) and a single-row textarea (40px) bottom-align cleanly. */
   .composer {
     display: flex;
     align-items: flex-end;
     gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-    padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
-    background: var(--surface);
   }
   textarea {
     flex: 1;
@@ -94,18 +99,6 @@
   textarea:disabled {
     opacity: 0.6;
     cursor: not-allowed;
-  }
-  .side {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-1);
-  }
-  .hint {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-muted);
-    white-space: nowrap;
   }
   .sr-only {
     position: absolute;

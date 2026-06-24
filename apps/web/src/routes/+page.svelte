@@ -167,12 +167,19 @@
       </div>
 
       {#if session.entries.length === 0}
+        <!-- Empty state: the composer sits with the heading as one centered "start" block,
+             not glued to the bottom of an empty page. -->
         <div class="ready">
-          <p class="eyebrow">READY</p>
-          <h1>Launch a session on {device.name}</h1>
-          <p class="sub">
-            Describe a task below. You’ll watch the agent work and approve each consequential action.
-          </p>
+          <div class="ready-inner">
+            <div class="ready-copy">
+              <p class="eyebrow">READY</p>
+              <h1>Launch a session on {device.name}</h1>
+              <p class="sub">
+                Describe a task below. You’ll watch the agent work and approve each consequential action.
+              </p>
+            </div>
+            {@render composer()}
+          </div>
         </div>
       {:else}
         <Transcript
@@ -180,17 +187,23 @@
           onapprove={() => decide('allow')}
           onreject={() => decide('deny')}
         />
+        <!-- Active state: the composer docks at the bottom, chat-style, above the transcript. -->
+        <div class="dock hairline-t">
+          {@render composer()}
+        </div>
       {/if}
-
-      <Composer
-        {isBusy}
-        submitLabel={composerLabel}
-        placeholder={composerPlaceholder}
-        onsend={submitPrompt}
-      />
     </section>
   {/if}
 </main>
+
+{#snippet composer()}
+  <Composer
+    {isBusy}
+    submitLabel={composerLabel}
+    placeholder={composerPlaceholder}
+    onsend={submitPrompt}
+  />
+{/snippet}
 
 <style>
   .topbar {
@@ -331,8 +344,26 @@
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    text-align: center;
     padding: var(--space-8) var(--space-4);
     overflow-y: auto;
+  }
+  .ready-inner {
+    width: 100%;
+    max-width: 34rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+  }
+  .ready-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    text-align: center;
+  }
+
+  /* Docked composer (active session) — flat, aligned to the transcript's horizontal inset. */
+  .dock {
+    padding: var(--space-3) var(--space-4);
+    padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
   }
 </style>
