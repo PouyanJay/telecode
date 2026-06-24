@@ -40,11 +40,20 @@ export interface SessionToken {
   readonly expiresAt: Date;
 }
 
+export interface SessionUser {
+  readonly id: string;
+  readonly displayName: string | null;
+  readonly email: string | null;
+  readonly avatarUrl: string | null;
+}
+
 export interface AuthService {
   /** Upsert the user for a verified provider identity and open a login session. */
   createSession(identity: ProviderIdentity): Promise<SessionToken>;
   /** Resolve the user id for a raw session token, or null if unknown/expired. */
   validateSession(token: string): Promise<string | null>;
+  /** Resolve the full user for a raw session token, or null if unknown/expired. */
+  getSessionUser(token: string): Promise<SessionUser | null>;
   /** Revoke a login session (logout). Idempotent. */
   destroySession(token: string): Promise<void>;
   /** Mint a short-lived channel token for a validated user to present on the relay WS. */
@@ -123,6 +132,26 @@ export function createAuthService(options: AuthServiceOptions): AuthService {
         )
         .limit(1);
       return row?.userId ?? null;
+    },
+
+    async getSessionUser(token): Promise<SessionUser | null> {
+      const [row] = await db.db
+        .select({
+          id: users.id,
+          displayName: users.displayName,
+          email: users.email,
+          avatarUrl: users.avatarUrl,
+        })
+        .from(authSessions)
+        .innerJoin(users, eq(users.id, authSessions.userId))
+        .where(
+          and(
+            eq(authSessions.tokenHash, hashToken(token)),
+            gt(authSessions.expiresAt, new Date(now())),
+          ),
+        )
+        .limit(1);
+      return row ?? null;
     },
 
     async destroySession(token): Promise<void> {

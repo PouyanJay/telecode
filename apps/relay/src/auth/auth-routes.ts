@@ -50,6 +50,24 @@ export function registerAuthRoutes(
     });
   });
 
+  // Web → relay: resolve the current user from a session (for the web's hooks.server session load).
+  app.get('/auth/me', async (request, reply) => {
+    const token = bearerToken(request);
+    if (!token) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const user = await auth.getSessionUser(token);
+    if (!user) {
+      return reply.code(401).send({ error: 'invalid_session' });
+    }
+    return reply.send({
+      id: user.id,
+      display_name: user.displayName,
+      email: user.email,
+      avatar_url: user.avatarUrl,
+    });
+  });
+
   // Web → relay: exchange a valid session for a short-lived channel token (for the browser WS).
   app.post('/channel-token', async (request, reply) => {
     const token = bearerToken(request);

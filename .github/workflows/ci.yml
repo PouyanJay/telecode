@@ -50,6 +50,30 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+
+    # The auth e2e drives the real relay (with auth + a database); global-setup applies migrations.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: telecode_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/telecode_test
+      CHANNEL_TOKEN_SECRET: ci-channel-token-secret-not-a-real-secret
+      RELAY_SERVICE_SECRET: ci-relay-service-secret-not-a-real-secret
+      RELAY_HTTP_URL: http://127.0.0.1:8080
+      PUBLIC_TELECODE_RELAY_URL: ws://127.0.0.1:8080/ws
+      APP_URL: http://127.0.0.1:5173
+
     steps:
       - uses: actions/checkout@v4
 
@@ -67,5 +91,5 @@ jobs:
       - name: Install Playwright browser
         run: pnpm --filter @telecode/web exec playwright install --with-deps chromium
 
-      - name: Run e2e (browser -> relay -> daemon -> browser)
+      - name: Run e2e (sign-in -> relay-connected, through the real stack)
         run: pnpm --filter @telecode/web test:e2e

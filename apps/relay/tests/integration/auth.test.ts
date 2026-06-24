@@ -154,6 +154,27 @@ describe('relay auth: sessions, channel tokens, and WS gating', () => {
       expect(out.statusCode).toBe(204);
       expect(await auth.validateSession(token)).toBeNull();
     });
+
+    it('resolves the current user via /auth/me', async () => {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/auth/session',
+        headers: { 'x-telecode-service-secret': SERVICE_SECRET },
+        payload: { ...DEV_IDENTITY, displayName: 'Alice', email: 'alice@example.com' },
+      });
+      const token = created.json<{ token: string }>().token;
+
+      const me = await app.inject({
+        method: 'GET',
+        url: '/auth/me',
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(me.statusCode).toBe(200);
+      expect(me.json()).toMatchObject({ display_name: 'Alice', email: 'alice@example.com' });
+
+      const unauth = await app.inject({ method: 'GET', url: '/auth/me' });
+      expect(unauth.statusCode).toBe(401);
+    });
   });
 
   describe('WS hello gating', () => {

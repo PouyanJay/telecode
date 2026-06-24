@@ -1,92 +1,51 @@
-import { echoPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
+import { makeEnvelope, parseEnvelope } from '@telecode/protocol';
 
 /**
- * Minimal browser-side relay client for the Phase 0 walking skeleton. Dials out to the relay,
- * announces itself as a `browser` for `(userId, deviceId)`, and round-trips an `echo`. The real
- * session client (subscribe/stream/permission decisions) is built in later phases.
+ * Browser-side relay connection. It dials out to the relay and authenticates the `hello` with a
+ * short-lived channel token (minted by the web backend from the session cookie). Phase 1 reports
+ * connection status; streaming session messages layer on in later tasks.
  */
-export interface RelayClientOptions {
+export type ConnectionStatus = 'connecting' | 'connected' | 'error';
+
+export interface RelayConnectionOptions {
   readonly relayUrl: string;
   readonly userId: string;
   readonly deviceId: string;
-  /** How long to wait for hello.ack / echo.reply before rejecting. */
-  readonly timeoutMs?: number;
+  readonly channelToken: string;
+  readonly onStatus: (status: ConnectionStatus) => void;
 }
 
-export interface RelayClient {
-  connect(): Promise<void>;
-  echo(text: string): Promise<string>;
+export interface RelayConnection {
   close(): void;
 }
 
-export function createRelayClient(options: RelayClientOptions): RelayClient {
-  const timeoutMs = options.timeoutMs ?? 5000;
-  let socket: WebSocket | null = null;
+export function createRelayConnection(options: RelayConnectionOptions): RelayConnection {
+  let socket: WebSocket | null = new WebSocket(options.relayUrl);
+  options.onStatus('connecting');
 
-  function send(envelope: Envelope): void {
-    socket?.send(JSON.stringify(envelope));
-  }
+  socket.addEventListener('open', () => {
+    socket?.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'hello',
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload: { role: 'browser', token: options.channelToken },
+        }),
+      ),
+    );
+  });
+
+  socket.addEventListener('message', (event: MessageEvent<string>) => {
+    if (parseEnvelope(JSON.parse(event.data) as unknown).type === 'hello.ack') {
+      options.onStatus('connected');
+    }
+  });
+
+  socket.addEventListener('error', () => options.onStatus('error'));
+  socket.addEventListener('close', () => options.onStatus('error'));
 
   return {
-    connect(): Promise<void> {
-      return new Promise<void>((resolve, reject) => {
-        const ws = new WebSocket(options.relayUrl);
-        socket = ws;
-        const timer = setTimeout(() => reject(new Error('relay connection timed out')), timeoutMs);
-        ws.addEventListener('open', () => {
-          send(
-            makeEnvelope({
-              type: 'hello',
-              userId: options.userId,
-              deviceId: options.deviceId,
-              payload: { role: 'browser' },
-            }),
-          );
-        });
-        ws.addEventListener('message', (event: MessageEvent<string>) => {
-          if (parseEnvelope(JSON.parse(event.data)).type === 'hello.ack') {
-            clearTimeout(timer);
-            resolve();
-          }
-        });
-        ws.addEventListener('error', () => {
-          clearTimeout(timer);
-          reject(new Error('relay connection error'));
-        });
-      });
-    },
-
-    echo(text: string): Promise<string> {
-      return new Promise<string>((resolve, reject) => {
-        const ws = socket;
-        if (ws === null) {
-          reject(new Error('not connected'));
-          return;
-        }
-        const onMessage = (event: MessageEvent<string>): void => {
-          const envelope = parseEnvelope(JSON.parse(event.data));
-          if (envelope.type === 'echo.reply') {
-            clearTimeout(timer);
-            ws.removeEventListener('message', onMessage);
-            resolve(echoPayloadSchema.parse(envelope.payload).text);
-          }
-        };
-        const timer = setTimeout(() => {
-          ws.removeEventListener('message', onMessage);
-          reject(new Error('echo timed out'));
-        }, timeoutMs);
-        ws.addEventListener('message', onMessage);
-        send(
-          makeEnvelope({
-            type: 'echo',
-            userId: options.userId,
-            deviceId: options.deviceId,
-            payload: { text },
-          }),
-        );
-      });
-    },
-
     close(): void {
       socket?.close();
       socket = null;
