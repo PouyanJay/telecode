@@ -69,23 +69,21 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
 
     async listByUser(userId): Promise<SessionSummary[]> {
       return withUserContext(db, userId, async (scoped) => {
-        return (
-          scoped
-            .select({
-              id: sessions.id,
-              deviceId: sessions.deviceId,
-              title: sessions.title,
-              status: sessions.status,
-              createdAt: sessions.createdAt,
-              updatedAt: sessions.updatedAt,
-              endedAt: sessions.endedAt,
-            })
-            .from(sessions)
-            // Defense in depth: RLS already scopes to the user; the explicit predicate keeps the read
-            // correct even if the policy is toggled off (as some tests do), matching `setStatus`.
-            .where(eq(sessions.userId, userId))
-            .orderBy(desc(sessions.createdAt))
-        );
+        return await scoped
+          .select({
+            id: sessions.id,
+            deviceId: sessions.deviceId,
+            title: sessions.title,
+            status: sessions.status,
+            createdAt: sessions.createdAt,
+            updatedAt: sessions.updatedAt,
+            endedAt: sessions.endedAt,
+          })
+          .from(sessions)
+          // Defense in depth: RLS already scopes to the user; the explicit predicate keeps the read
+          // correct even if the policy is toggled off (as some tests do), matching `setStatus`.
+          .where(eq(sessions.userId, userId))
+          .orderBy(desc(sessions.createdAt));
       });
     },
 

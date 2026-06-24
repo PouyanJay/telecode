@@ -17,6 +17,7 @@ import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } fr
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceListRoute } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
+import { registerSessionListRoute } from './registry/session-routes';
 
 /**
  * The relay / control plane. Both the daemon and the browser dial *out* to it (loopback in
@@ -205,6 +206,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // The web lists the user's devices to pick the channel its browser should watch.
     if (deviceRegistry) {
       registerDeviceListRoute(app, options.auth.service, deviceRegistry);
+    }
+    // The dashboard + reconnect list the user's sessions (status, device, title).
+    if (sessionRegistry) {
+      registerSessionListRoute(app, options.auth.service, sessionRegistry);
     }
   }
 
