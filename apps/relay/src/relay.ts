@@ -14,6 +14,8 @@ import {
 import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
 import { type OAuthTokenStore } from './auth/oauth-token-store';
+import { createGithubClient, type GithubClient } from './github/github-client';
+import { registerRepoListRoute } from './github/repo-routes';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceListRoute } from './registry/device-routes';
@@ -54,6 +56,8 @@ export interface RelayOptions {
    * whose device matches the envelope's `(user_id, device_id)`. Optional so the echo path needs no DB.
    */
   readonly deviceRegistry?: DeviceRegistry;
+  /** GitHub API client for `/me/repos`. Defaults to the real HTTP client; tests inject a fake. */
+  readonly githubClient?: GithubClient;
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -221,6 +225,15 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // The dashboard + reconnect list the user's sessions (status, device, title).
     if (sessionRegistry) {
       registerSessionListRoute(app, options.auth.service, sessionRegistry);
+    }
+    // The launch picker lists the user's GitHub repos (only when a token store is configured).
+    if (oauthTokenStore) {
+      registerRepoListRoute(
+        app,
+        options.auth.service,
+        oauthTokenStore,
+        options.githubClient ?? createGithubClient(),
+      );
     }
   }
 

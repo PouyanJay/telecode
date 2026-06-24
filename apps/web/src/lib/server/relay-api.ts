@@ -147,6 +147,58 @@ export async function listSessions(sessionToken: string): Promise<RelaySession[]
   }));
 }
 
+/** A GitHub repo the user can launch a session against (for the launch picker). */
+export interface RelayRepo {
+  id: number;
+  fullName: string;
+  name: string;
+  owner: string;
+  private: boolean;
+  defaultBranch: string;
+}
+
+/** The user's repos plus whether they've linked a GitHub token (`connected: false` → prompt to link). */
+export interface RepoList {
+  connected: boolean;
+  repos: RelayRepo[];
+}
+
+/**
+ * List the user's GitHub repos for the launch picker (session-token authed). The relay calls GitHub with
+ * the user's stored token; this only ever sees repo metadata. Returns not-connected + empty on any error
+ * (no token linked, GitHub unavailable) so the UI degrades cleanly.
+ */
+export async function listRepos(sessionToken: string): Promise<RepoList> {
+  const res = await fetch(`${RELAY_HTTP_URL}/me/repos`, {
+    headers: { authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) {
+    return { connected: false, repos: [] };
+  }
+  const body = (await res.json()) as {
+    connected: boolean;
+    repos: {
+      id: number;
+      full_name: string;
+      name: string;
+      owner: string;
+      private: boolean;
+      default_branch: string;
+    }[];
+  };
+  return {
+    connected: body.connected,
+    repos: body.repos.map((repo) => ({
+      id: repo.id,
+      fullName: repo.full_name,
+      name: repo.name,
+      owner: repo.owner,
+      private: repo.private,
+      defaultBranch: repo.default_branch,
+    })),
+  };
+}
+
 /** Exchange a session token for a short-lived channel token, or null if the session is invalid. */
 export async function mintChannelToken(sessionToken: string): Promise<string | null> {
   const res = await fetch(`${RELAY_HTTP_URL}/channel-token`, {
