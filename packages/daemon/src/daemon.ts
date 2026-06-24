@@ -16,6 +16,7 @@ import {
   type PermissionDecisionPayload,
   type SessionHistoryEntry,
   type SessionHistoryPayload,
+  type SessionLaunchPayload,
   type SessionStatusName,
 } from '@telecode/protocol';
 
@@ -25,6 +26,7 @@ import {
   type PermissionRequest,
 } from './agent-adapter';
 import { createClaudeAgentAdapter } from './claude-agent-adapter';
+import { type RepoManager } from './sessions/repo-manager';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
 /**
@@ -45,11 +47,19 @@ export interface DaemonOptions {
   /** Agent runtime. Defaults to the real Claude Agent SDK adapter; tests inject a fake. */
   readonly agentAdapter?: AgentAdapter;
   /**
-   * Cuts a git worktree per session (Phase 2). When provided, each session's agent runs in its own
-   * worktree cwd so parallel agents never clobber each other's files. Omitted (e.g. no repo configured)
-   * falls back to the daemon's own cwd — the Phase-1 behavior.
+   * Cuts a git worktree per session (Phase 2). When provided, a session that resolves a repo runs in its
+   * own worktree cwd so parallel agents never clobber each other's files. Omitted falls back to the
+   * daemon's own cwd — the Phase-1 behavior.
    */
   readonly worktreeManager?: WorktreeManager;
+  /** Clones the repo a launch selects, on demand (Task 8). Required for `session.launch` to carry a repo. */
+  readonly repoManager?: RepoManager;
+  /**
+   * A local repo to use when a launch carries no `repo` (e.g. `TELECODE_REPO`). Lets sessions run in a
+   * worktree off a fixed local checkout without GitHub; omitted means a repo-less launch runs in the
+   * daemon cwd.
+   */
+  readonly defaultRepoPath?: string;
   readonly logger?: Logger;
 }
 
@@ -64,6 +74,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const log = options.logger ?? pino({ name: 'daemon' });
   const agentAdapter = options.agentAdapter ?? createClaudeAgentAdapter({ logger: log });
   const worktreeManager = options.worktreeManager;
+  const repoManager = options.repoManager;
+  const defaultRepoPath = options.defaultRepoPath;
   let socket: WebSocket | null = null;
 
   // Tool requests the agent is blocked on, keyed by the correlation id we send to the browser; each is
@@ -225,35 +237,57 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
   }
 
-  /** Returned by {@link prepareWorktree} when prep failed and the session was already ended with error. */
-  const FAILED = Symbol('worktree-failed');
+  /** Returned by {@link prepareWorkspace} when prep failed and the session was already ended with error. */
+  const FAILED = Symbol('workspace-failed');
 
   /**
-   * Ensure the session's git worktree exists and return its path as the agent cwd, caching it so every
-   * turn reuses it. Returns `undefined` when no worktree manager is configured (run in the daemon cwd —
-   * Phase 1). On failure it ends the session with an error and returns {@link FAILED} so the launch aborts.
+   * Resolve the on-disk repo a session runs against: clone the launch's `repo` on demand (Task 8), or use
+   * the daemon's configured `defaultRepoPath` (a local checkout). `undefined` means run in the daemon cwd.
    */
-  async function prepareWorktree(envelope: Envelope): Promise<string | undefined | typeof FAILED> {
+  async function resolveRepoPath(launch: SessionLaunchPayload): Promise<string | undefined> {
+    if (launch.repo && repoManager) {
+      return repoManager.ensureClone(launch.repo);
+    }
+    return defaultRepoPath;
+  }
+
+  /**
+   * Prepare the session's workspace — clone its repo (if any) then cut its git worktree — and return the
+   * worktree path as the agent cwd, caching it so every turn reuses it. Returns `undefined` to run in the
+   * daemon cwd (no worktree manager, or no repo resolved). On failure it ends the session with an error and
+   * returns {@link FAILED} so the launch aborts (it must never stick at `starting`).
+   */
+  async function prepareWorkspace(
+    envelope: Envelope,
+    launch: SessionLaunchPayload,
+  ): Promise<string | undefined | typeof FAILED> {
     const sessionId = envelope.session_id;
     if (!worktreeManager || sessionId === undefined) return undefined;
     try {
-      const worktree = await worktreeManager.ensureWorktree(sessionId);
+      const repoPath = await resolveRepoPath(launch);
+      if (repoPath === undefined) return undefined;
+      const worktree = await worktreeManager.ensureWorktree(sessionId, repoPath);
       sessionCwds.set(sessionId, worktree.path);
-      // Log the branch, never the worktree path (a local fs path — kept out of log sinks).
+      // Log owner/name + branch only — never the clone URL or local paths (kept out of log sinks).
       log.info(
-        { deviceId: options.deviceId, sessionId, branch: worktree.branch },
-        'daemon: session worktree ready',
+        {
+          deviceId: options.deviceId,
+          sessionId,
+          branch: worktree.branch,
+          ...(launch.repo ? { repo: `${launch.repo.owner}/${launch.repo.name}` } : {}),
+        },
+        'daemon: session workspace ready',
       );
       return worktree.path;
     } catch (err) {
       log.error(
         { err, deviceId: options.deviceId, sessionId },
-        'daemon: failed to prepare worktree',
+        'daemon: failed to prepare workspace',
       );
       setStatus(sessionId, 'error');
       sendForSession(envelope, 'session.ended', {
         status: 'error',
-        error: 'failed to prepare session worktree',
+        error: 'failed to prepare session workspace',
       });
       return FAILED;
     }
@@ -278,9 +312,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
       { deviceId: options.deviceId, sessionId: envelope.session_id },
       'daemon: session launch received',
     );
-    // Cut this session's git worktree (if configured) before any agent work, so parallel sessions never
-    // share a cwd. A failure here fails the launch cleanly — it must never stick at `starting`.
-    const cwd = await prepareWorktree(envelope);
+    // Prepare this session's workspace (clone-on-demand + worktree) before any agent work, so parallel
+    // sessions never share a cwd. A failure here fails the launch cleanly — it must never stick at `starting`.
+    const cwd = await prepareWorkspace(envelope, launch.data);
     if (cwd === FAILED) return;
     record(envelope.session_id, { kind: 'user', text: launch.data.prompt });
     setStatus(envelope.session_id, 'running');

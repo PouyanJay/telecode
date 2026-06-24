@@ -4,6 +4,7 @@ import {
   agentPermissionRequestPayloadSchema,
   permissionDecisionPayloadSchema,
   sessionHistoryPayloadSchema,
+  sessionLaunchPayloadSchema,
   userMessagePayloadSchema,
 } from './session';
 
@@ -91,6 +92,57 @@ describe('permissionDecisionPayloadSchema', () => {
   it('rejects a decision without a correlation id', () => {
     const result = permissionDecisionPayloadSchema.safeParse({ behavior: 'allow' });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('sessionLaunchPayloadSchema: repo selection (Task 8)', () => {
+  it('parses a launch carrying a repo to clone on demand', () => {
+    const parsed = sessionLaunchPayloadSchema.parse({
+      prompt: 'fix the bug',
+      repo: {
+        owner: 'octocat',
+        name: 'hello-world',
+        cloneUrl: 'https://github.com/octocat/hello-world.git',
+      },
+    });
+    expect(parsed.repo).toEqual({
+      owner: 'octocat',
+      name: 'hello-world',
+      cloneUrl: 'https://github.com/octocat/hello-world.git',
+    });
+  });
+
+  it('parses a launch with no repo (repo is optional)', () => {
+    const parsed = sessionLaunchPayloadSchema.parse({ prompt: 'just chat' });
+    expect(parsed.repo).toBeUndefined();
+  });
+
+  it('rejects a repo whose owner/name is not a safe path segment', () => {
+    for (const segment of ['..', '.', 'has/slash', 'bad space', '']) {
+      expect(
+        sessionLaunchPayloadSchema.safeParse({
+          prompt: 'x',
+          repo: { owner: segment, name: 'ok', cloneUrl: 'https://example.com/r.git' },
+        }).success,
+        `owner ${JSON.stringify(segment)} must be rejected`,
+      ).toBe(false);
+      expect(
+        sessionLaunchPayloadSchema.safeParse({
+          prompt: 'x',
+          repo: { owner: 'ok', name: segment, cloneUrl: 'https://example.com/r.git' },
+        }).success,
+        `name ${JSON.stringify(segment)} must be rejected`,
+      ).toBe(false);
+    }
+  });
+
+  it('rejects a repo with an empty clone url', () => {
+    expect(
+      sessionLaunchPayloadSchema.safeParse({
+        prompt: 'x',
+        repo: { owner: 'ok', name: 'ok', cloneUrl: '' },
+      }).success,
+    ).toBe(false);
   });
 });
 

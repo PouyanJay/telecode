@@ -7,6 +7,7 @@ import { pino } from 'pino';
 import { loadCredentials, saveCredentials } from './credentials';
 import { createDaemon } from './daemon';
 import { pairDevice } from './pairing';
+import { createGitRepoManager } from './sessions/repo-manager';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
 
 /**
@@ -47,15 +48,15 @@ if (!credentials) {
   log.info({ deviceId: credentials.deviceId }, 'daemon: paired; credentials saved');
 }
 
-// Give each session its own git worktree when a local repo is configured (Phase 2). Until repo
-// selection lands (Task 8), the repo is pointed at by `TELECODE_REPO`; without it, sessions run in the
-// daemon's own cwd (Phase-1 behavior). Worktrees default to `~/.telecode/worktrees` (plan A-3).
-const repoPath = process.env.TELECODE_REPO;
-const worktreesRoot =
-  process.env.TELECODE_WORKTREES_ROOT ?? join(homedir(), '.telecode', 'worktrees');
-const worktreeManager = repoPath
-  ? createGitWorktreeManager({ repoPath, worktreesRoot, logger: log })
-  : undefined;
+// Each session runs in its own git worktree (Phase 2): a launch's GitHub repo is cloned on demand
+// (Task 8), or a fixed local checkout via `TELECODE_REPO` is used; a launch with neither runs in the
+// daemon's own cwd. Clones live under `~/.telecode/repos`, worktrees under `~/.telecode/worktrees` (A-3).
+const telecodeHome = join(homedir(), '.telecode');
+const reposRoot = process.env.TELECODE_REPOS_ROOT ?? join(telecodeHome, 'repos');
+const worktreesRoot = process.env.TELECODE_WORKTREES_ROOT ?? join(telecodeHome, 'worktrees');
+const repoManager = createGitRepoManager({ reposRoot, logger: log });
+const worktreeManager = createGitWorktreeManager({ worktreesRoot, logger: log });
+const defaultRepoPath = process.env.TELECODE_REPO;
 
 const daemon = createDaemon({
   relayUrl: relayWsUrl,
@@ -63,7 +64,9 @@ const daemon = createDaemon({
   deviceId: credentials.deviceId,
   deviceToken: credentials.deviceToken,
   logger: log,
-  ...(worktreeManager ? { worktreeManager } : {}),
+  worktreeManager,
+  repoManager,
+  ...(defaultRepoPath ? { defaultRepoPath } : {}),
 });
 
 try {

@@ -38,6 +38,7 @@ export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device
 
 export {
   permissionModeSchema,
+  sessionRepoSchema,
   sessionLaunchPayloadSchema,
   sessionStartedPayloadSchema,
   SESSION_STATUSES,
@@ -55,6 +56,7 @@ export {
 } from './session';
 export type {
   PermissionModeName,
+  SessionRepo,
   SessionLaunchPayload,
   SessionStartedPayload,
   SessionStatusName,

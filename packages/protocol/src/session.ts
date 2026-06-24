@@ -11,9 +11,37 @@ import { z } from 'zod';
 export const permissionModeSchema = z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']);
 export type PermissionModeName = z.infer<typeof permissionModeSchema>;
 
+/**
+ * A safe path segment for a repo owner/name: it becomes part of the daemon's on-disk clone cache path
+ * (`~/.telecode/repos/<owner>/<name>`), so it is constrained to GitHub-valid characters and may not be a
+ * traversal segment (`.`/`..`) — validated at the wire boundary so a crafted launch can't escape the cache.
+ */
+const repoPathSegmentSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9._-]+$/)
+  .refine((value) => value !== '.' && value !== '..', {
+    message: 'must not be a traversal segment',
+  });
+
+/**
+ * Payload for the `repo` a session runs in (Phase 2 Task 8): the daemon clones it on demand (using the
+ * laptop's own git credentials — the relay's GitHub token never travels here) and cuts the session's
+ * worktree from it. `cloneUrl` is the repo's public clone URL (from the repo listing).
+ */
+export const sessionRepoSchema = z.object({
+  owner: repoPathSegmentSchema,
+  name: repoPathSegmentSchema,
+  cloneUrl: z.string().min(1).max(500),
+});
+export type SessionRepo = z.infer<typeof sessionRepoSchema>;
+
 /** Payload for `session.launch` (web → daemon): parameters to start one new agent session. */
 export const sessionLaunchPayloadSchema = z.object({
   prompt: z.string().min(1),
+  /** GitHub repo to clone-on-demand and run in; omitted runs in the daemon's configured/default cwd. */
+  repo: sessionRepoSchema.optional(),
   /** Working directory for the session (single cwd in Phase 1; git worktrees in Phase 2). */
   cwd: z.string().min(1).optional(),
   permissionMode: permissionModeSchema.optional(),

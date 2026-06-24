@@ -21,11 +21,12 @@ export interface SessionWorktree {
  */
 export interface WorktreeManager {
   /**
-   * Create the worktree for a session (or return the existing one — idempotent, so a follow-up turn
-   * reuses it without disturbing in-progress work). The worktree and its branch are **kept** when the
-   * session ends; nothing here ever removes them (agent work is never auto-deleted).
+   * Create the worktree for a session off `repoPath` (or return the existing one — idempotent, so a
+   * follow-up turn reuses it without disturbing in-progress work). `repoPath` is per call because each
+   * session may target a different repo (cloned on demand — Task 8). The worktree and its branch are
+   * **kept** when the session ends; nothing here ever removes them (agent work is never auto-deleted).
    */
-  ensureWorktree(sessionId: string): Promise<SessionWorktree>;
+  ensureWorktree(sessionId: string, repoPath: string): Promise<SessionWorktree>;
 }
 
 /** Raised when git fails to prepare a worktree, with the underlying error chained as `cause`. */
@@ -37,8 +38,6 @@ export class WorktreeError extends Error {
 }
 
 export interface GitWorktreeManagerOptions {
-  /** Local git repository the worktrees are cut from (a clone in Phase 2 — see Task 8). */
-  readonly repoPath: string;
   /** Directory that holds the per-session worktrees, e.g. `~/.telecode/worktrees` (plan A-3). */
   readonly worktreesRoot: string;
   readonly logger?: Logger;
@@ -46,7 +45,6 @@ export interface GitWorktreeManagerOptions {
 
 export function createGitWorktreeManager(options: GitWorktreeManagerOptions): WorktreeManager {
   const log = options.logger ?? pino({ name: 'worktree-manager' });
-  const repoPath = resolve(options.repoPath);
   const worktreesRoot = resolve(options.worktreesRoot);
 
   async function pathExists(path: string): Promise<boolean> {
@@ -59,7 +57,7 @@ export function createGitWorktreeManager(options: GitWorktreeManagerOptions): Wo
   }
 
   return {
-    async ensureWorktree(sessionId): Promise<SessionWorktree> {
+    async ensureWorktree(sessionId, repoPath): Promise<SessionWorktree> {
       // Full session id for the directory (collision-free); the plan's short id for the branch label.
       const path = resolve(worktreesRoot, sessionId);
       const branch = `telecode/${sessionId.slice(0, 8)}`;
@@ -74,7 +72,7 @@ export function createGitWorktreeManager(options: GitWorktreeManagerOptions): Wo
       try {
         // `worktree add -b <branch> <path> HEAD`: new branch off the repo's HEAD, checked out at `path`.
         // execFile (not a shell) with an args array — no string interpolation into a command line.
-        await run('git', ['-C', repoPath, 'worktree', 'add', '-b', branch, path, 'HEAD']);
+        await run('git', ['-C', resolve(repoPath), 'worktree', 'add', '-b', branch, path, 'HEAD']);
       } catch (cause) {
         throw new WorktreeError(`failed to create git worktree for session ${sessionId}`, {
           cause,

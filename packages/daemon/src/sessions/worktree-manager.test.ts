@@ -49,10 +49,10 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
   it('creates a worktree at <root>/<sessionId> on a telecode/<short> branch off the repo', async () => {
     const repoPath = await makeRepo();
     const worktreesRoot = await tempDir('telecode-worktrees-');
-    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+    const manager = createGitWorktreeManager({ worktreesRoot });
     const sessionId = randomUUID();
 
-    const worktree = await manager.ensureWorktree(sessionId);
+    const worktree = await manager.ensureWorktree(sessionId, repoPath);
 
     expect(worktree.path).toBe(join(worktreesRoot, sessionId));
     expect(worktree.branch).toBe(`telecode/${sessionId.slice(0, 8)}`);
@@ -74,13 +74,13 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
   it('is idempotent: a second ensure for the same session reuses the worktree and its contents', async () => {
     const repoPath = await makeRepo();
     const worktreesRoot = await tempDir('telecode-worktrees-');
-    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+    const manager = createGitWorktreeManager({ worktreesRoot });
     const sessionId = randomUUID();
 
-    const first = await manager.ensureWorktree(sessionId);
+    const first = await manager.ensureWorktree(sessionId, repoPath);
     await writeFile(join(first.path, 'agent-output.txt'), 'work in progress');
 
-    const second = await manager.ensureWorktree(sessionId);
+    const second = await manager.ensureWorktree(sessionId, repoPath);
 
     expect(second).toEqual(first);
     // The reuse must not wipe the agent's in-progress work.
@@ -90,12 +90,12 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
   it('isolates each session in its own worktree (files do not leak across sessions)', async () => {
     const repoPath = await makeRepo();
     const worktreesRoot = await tempDir('telecode-worktrees-');
-    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+    const manager = createGitWorktreeManager({ worktreesRoot });
     const sessionA = randomUUID();
     const sessionB = randomUUID();
 
-    const a = await manager.ensureWorktree(sessionA);
-    const b = await manager.ensureWorktree(sessionB);
+    const a = await manager.ensureWorktree(sessionA, repoPath);
+    const b = await manager.ensureWorktree(sessionB, repoPath);
     await writeFile(join(a.path, 'only-in-a.txt'), 'a');
 
     expect(b.path).not.toBe(a.path);
@@ -108,8 +108,8 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
   it('surfaces a clear error when the repo path is not a git repository', async () => {
     const repoPath = await tempDir('telecode-not-a-repo-');
     const worktreesRoot = await tempDir('telecode-worktrees-');
-    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+    const manager = createGitWorktreeManager({ worktreesRoot });
 
-    await expect(manager.ensureWorktree(randomUUID())).rejects.toThrow(/worktree/i);
+    await expect(manager.ensureWorktree(randomUUID(), repoPath)).rejects.toThrow(/worktree/i);
   });
 });
