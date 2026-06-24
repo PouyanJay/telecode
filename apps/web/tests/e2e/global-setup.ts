@@ -44,7 +44,9 @@ function migrate(): Promise<void> {
       env: process.env,
       stdio: 'ignore',
     });
-    child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(`db:migrate exited ${code}`))));
+    child.once('exit', (code) =>
+      code === 0 ? resolve() : reject(new Error(`db:migrate exited ${code}`)),
+    );
     child.once('error', reject);
   });
 }
