@@ -2,6 +2,7 @@ import { makeEnvelope, type Envelope } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
 import {
+  appendUserMessage,
   applyEnvelope,
   initialSessionState,
   markDeciding,
@@ -102,5 +103,18 @@ describe('session reducer', () => {
   it('starts from an idle initial state', () => {
     expect(initialSessionState.status).toBe('idle');
     expect(initialSessionState.entries).toHaveLength(0);
+  });
+
+  it('appends the human’s own messages (launch prompt + follow-ups) interleaved with the agent', () => {
+    let state = appendUserMessage(startingState(), 'build it');
+    state = applyEnvelope(state, frame('session.started', {}));
+    state = applyEnvelope(state, frame('agent.message', { text: 'on it' }));
+    state = appendUserMessage(state, 'now add tests');
+
+    expect(state.entries.map((e) => e.kind)).toEqual(['user', 'message', 'user']);
+    const [first, , third] = state.entries;
+    expect(first?.kind === 'user' && first.text).toBe('build it');
+    expect(third?.kind === 'user' && third.text).toBe('now add tests');
+    expect(new Set(state.entries.map((e) => e.id)).size).toBe(3); // stable, unique keys
   });
 });

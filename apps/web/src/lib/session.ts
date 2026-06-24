@@ -21,6 +21,7 @@ export type SessionStatus = SessionStatusName | 'idle';
 export type DecisionState = 'pending' | 'approving' | 'rejecting' | 'approved' | 'rejected';
 
 export type TranscriptEntry =
+  | { readonly kind: 'user'; readonly id: string; readonly text: string }
   | { readonly kind: 'message'; readonly id: string; readonly text: string }
   | {
       readonly kind: 'tool';
@@ -154,6 +155,15 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
     default:
       return base;
   }
+}
+
+/** Append the human's own message (the launch prompt or a follow-up) to the transcript. */
+export function appendUserMessage(state: SessionState, text: string): SessionState {
+  return {
+    ...state,
+    entries: [...state.entries, { kind: 'user', id: `e${state.seq}`, text }],
+    seq: state.seq + 1,
+  };
 }
 
 /** Mark a permission request as decided locally (in-flight) the instant the human acts. */

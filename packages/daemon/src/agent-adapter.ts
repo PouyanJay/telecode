@@ -33,6 +33,11 @@ export type AgentEvent =
 export interface AgentRunOptions {
   readonly canUseTool: CanUseTool;
   readonly onEvent: (event: AgentEvent) => void;
+  /**
+   * Resume a prior agent conversation for a follow-up turn (from {@link AgentRunResult.sessionId} of an
+   * earlier run). Omitted on the first turn of a session.
+   */
+  readonly resume?: string;
 }
 
 export interface AgentRunResult {
@@ -40,10 +45,20 @@ export interface AgentRunResult {
   readonly intercepted: PermissionRequest[];
   readonly allowed: string[];
   readonly denied: string[];
+  /** The agent conversation id to {@link AgentRunOptions.resume} for the next (follow-up) turn. */
+  readonly sessionId?: string;
 }
 
 export interface AgentAdapter {
   run(prompt: string, options: AgentRunOptions): Promise<AgentRunResult>;
+}
+
+/** Test hooks for {@link createFakeAgentAdapter}. */
+export interface FakeAgentAdapterOptions {
+  /** The conversation id every run reports (so the daemon can thread `resume` across turns). */
+  readonly sessionId?: string;
+  /** Invoked once per `run` with the turn's prompt + the `resume` id it was called with. */
+  readonly onRun?: (call: { prompt: string; resume?: string }) => void;
 }
 
 /**
@@ -51,9 +66,17 @@ export interface AgentAdapter {
  * stream straight through `onEvent`; tool_use events are gated through `canUseTool` first and only
  * streamed when allowed — proving both the streaming and the allow/deny contracts the real adapter honors.
  */
-export function createFakeAgentAdapter(events: AgentEvent[]): AgentAdapter {
+export function createFakeAgentAdapter(
+  events: AgentEvent[],
+  options: FakeAgentAdapterOptions = {},
+): AgentAdapter {
+  const sessionId = options.sessionId ?? 'fake-session';
   return {
-    async run(_prompt: string, { canUseTool, onEvent }: AgentRunOptions): Promise<AgentRunResult> {
+    async run(
+      prompt: string,
+      { canUseTool, onEvent, resume }: AgentRunOptions,
+    ): Promise<AgentRunResult> {
+      options.onRun?.({ prompt, ...(resume !== undefined ? { resume } : {}) });
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
       const denied: string[] = [];
@@ -76,7 +99,7 @@ export function createFakeAgentAdapter(events: AgentEvent[]): AgentAdapter {
           denied.push(event.toolName);
         }
       }
-      return { intercepted, allowed, denied };
+      return { intercepted, allowed, denied, sessionId };
     },
   };
 }

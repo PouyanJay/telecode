@@ -91,3 +91,11 @@ export const permissionDecisionPayloadSchema = z.discriminatedUnion('behavior', 
   }),
 ]);
 export type PermissionDecisionPayload = z.infer<typeof permissionDecisionPayloadSchema>;
+
+/**
+ * Payload for `user.message` (web → daemon): a follow-up instruction the human sends to steer an
+ * already-launched session. The daemon resumes the same agent conversation for the next turn (the
+ * session id is on the envelope).
+ */
+export const userMessagePayloadSchema = z.object({ text: z.string().min(1) });
+export type UserMessagePayload = z.infer<typeof userMessagePayloadSchema>;

@@ -149,6 +149,20 @@ test('launches a session, streams it, and runs the gated tool once approved', as
   await expect(page.getByText('DONE')).toBeVisible();
 });
 
+test('sends a follow-up that resumes the session for a second turn', async ({ page }) => {
+  await signInAndLaunch(page, 'Add a hello line to the README');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  // With a session live, the composer steers it: a follow-up appears in the transcript and the agent
+  // responds in a second turn.
+  await page.getByLabel('Prompt').fill('now write a test too');
+  await page.getByRole('button', { name: 'Send' }).click();
+
+  await expect(page.getByText('now write a test too')).toBeVisible();
+  await expect(page.getByText('Following up as requested')).toBeVisible();
+});
+
 test('rejects the gated tool and the session finishes without running it', async ({ page }) => {
   await signInAndLaunch(page, 'Try to overwrite a file');
 

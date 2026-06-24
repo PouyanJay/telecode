@@ -33,6 +33,30 @@ describe('AgentAdapter: streaming + permission interception (canUseTool)', () =>
     ]);
   });
 
+  it('reports its conversation id and the resume id it was run with (follow-up turns)', async () => {
+    const calls: { prompt: string; resume?: string }[] = [];
+    const adapter = createFakeAgentAdapter([{ type: 'message', text: 'ok' }], {
+      sessionId: 'sdk-1',
+      onRun: (call) => calls.push(call),
+    });
+
+    const first = await adapter.run('initial', {
+      canUseTool: async () => ({ behavior: 'allow' }),
+      onEvent: () => undefined,
+    });
+    const resume = first.sessionId;
+    expect(resume).toBe('sdk-1');
+    if (resume === undefined) throw new Error('expected a session id');
+
+    await adapter.run('follow-up', {
+      canUseTool: async () => ({ behavior: 'allow' }),
+      onEvent: () => undefined,
+      resume,
+    });
+
+    expect(calls).toEqual([{ prompt: 'initial' }, { prompt: 'follow-up', resume: 'sdk-1' }]);
+  });
+
   it('passes the tool input through to the decision function', async () => {
     const seen: Record<string, unknown>[] = [];
     const adapter = createFakeAgentAdapter([

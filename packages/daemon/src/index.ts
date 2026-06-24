@@ -14,6 +14,7 @@ export type {
   AgentRunOptions,
   AgentRunResult,
   CanUseTool,
+  FakeAgentAdapterOptions,
   PermissionDecision,
   PermissionRequest,
 } from './agent-adapter';

@@ -28,6 +28,8 @@ export interface RelayConnectionOptions {
 export interface RelayConnection {
   /** Launch a new agent session on the watched device. The relay mints the `session_id`. */
   launch(payload: SessionLaunchPayload): void;
+  /** Send a follow-up instruction to steer an existing session (resumes its agent conversation). */
+  sendUserMessage(sessionId: string, text: string): void;
   /** Send the human's verdict for a pending `agent.permission_request` on `sessionId`. */
   decide(sessionId: string, decision: PermissionDecisionPayload): void;
   close(): void;
@@ -38,7 +40,7 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   options.onStatus('connecting');
 
   function send(
-    type: 'session.launch' | 'permission.decision',
+    type: 'session.launch' | 'permission.decision' | 'user.message',
     payload: unknown,
     sessionId?: string,
   ): void {
@@ -88,6 +90,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   return {
     launch(payload: SessionLaunchPayload): void {
       send('session.launch', payload);
+    },
+    sendUserMessage(sessionId: string, text: string): void {
+      send('user.message', { text }, sessionId);
     },
     decide(sessionId: string, decision: PermissionDecisionPayload): void {
       send('permission.decision', decision, sessionId);

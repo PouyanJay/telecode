@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { agentPermissionRequestPayloadSchema, permissionDecisionPayloadSchema } from './session';
+import {
+  agentPermissionRequestPayloadSchema,
+  permissionDecisionPayloadSchema,
+  userMessagePayloadSchema,
+} from './session';
 
 /**
  * The human-in-the-loop permission messages (Task 6). `agent.permission_request` (daemon → web) carries
@@ -86,5 +90,15 @@ describe('permissionDecisionPayloadSchema', () => {
   it('rejects a decision without a correlation id', () => {
     const result = permissionDecisionPayloadSchema.safeParse({ behavior: 'allow' });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('userMessagePayloadSchema', () => {
+  it('parses a follow-up instruction', () => {
+    expect(userMessagePayloadSchema.parse({ text: 'now add tests' }).text).toBe('now add tests');
+  });
+
+  it('rejects an empty follow-up', () => {
+    expect(userMessagePayloadSchema.safeParse({ text: '' }).success).toBe(false);
   });
 });

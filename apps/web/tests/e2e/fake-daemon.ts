@@ -10,8 +10,9 @@ import {
  * A deterministic stand-in daemon for the session-view e2e. It speaks the wire protocol directly (no
  * Agent SDK, no model call) so the browser drives a real relay round-trip: on `session.launch` it streams
  * a message, then a `Write` tool gated behind `agent.permission_request`, and on the human's
- * `permission.decision` it runs the tool only when allowed (honoring an edited input), then finishes.
- * Run as a child process by the session e2e; reads its identity from the environment.
+ * `permission.decision` it runs the tool only when allowed (honoring an edited input), then finishes. A
+ * `user.message` follow-up streams a short second turn. Run as a child process by the session e2e; reads
+ * its identity from the environment.
  */
 function required(name: string): string {
   const value = process.env[name];
@@ -86,6 +87,14 @@ socket.addEventListener('message', (event: MessageEvent) => {
       );
     }
     send('agent.message', { text: 'Finished' }, sid);
+    send('session.ended', { status: 'done' }, sid);
+    return;
+  }
+
+  if (envelope.type === 'user.message') {
+    // A follow-up turn — resume the conversation with a short, ungated response.
+    const sid = envelope.session_id;
+    send('agent.message', { text: 'Following up as requested' }, sid);
     send('session.ended', { status: 'done' }, sid);
   }
 });

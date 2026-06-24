@@ -10,6 +10,7 @@
   import { createRelayConnection } from '$lib/relay-client';
   import type { ConnectionStatus, RelayConnection } from '$lib/relay-client';
   import {
+    appendUserMessage,
     applyEnvelope,
     initialSessionState,
     markDeciding,
@@ -57,6 +58,12 @@
       session.status === 'running' ||
       session.status === 'awaiting_input',
   );
+  // Once a session is launched, the composer steers it with follow-ups; before that, it launches.
+  const isFollowUp = $derived(session.sessionId !== null);
+  const composerLabel = $derived(isFollowUp ? 'Send' : 'Launch');
+  const composerPlaceholder = $derived(
+    isFollowUp ? 'Send a follow-up instruction…' : 'Describe a task for the agent…',
+  );
 
   onMount(() => {
     void (async () => {
@@ -84,10 +91,17 @@
     return () => connection?.close();
   });
 
-  function launch(prompt: string): void {
+  /** Launch a new session, or — once one exists — send a follow-up to steer it. */
+  function submitPrompt(text: string): void {
     if (!connection || !device) return;
-    session = startingState();
-    connection.launch({ prompt });
+    if (session.sessionId === null) {
+      session = appendUserMessage(startingState(), text);
+      connection.launch({ prompt: text });
+    } else {
+      const sessionId = session.sessionId;
+      session = { ...appendUserMessage(session, text), status: 'running' };
+      connection.sendUserMessage(sessionId, text);
+    }
   }
 
   function decide(behavior: 'allow' | 'deny'): void {
@@ -164,7 +178,12 @@
         />
       {/if}
 
-      <Composer {busy} onlaunch={launch} />
+      <Composer
+        {busy}
+        submitLabel={composerLabel}
+        placeholder={composerPlaceholder}
+        onsend={submitPrompt}
+      />
     </section>
   {/if}
 </main>

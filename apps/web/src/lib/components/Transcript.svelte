@@ -51,7 +51,12 @@
 >
   {#each entries as entry (entry.id)}
     <div class="entry">
-      {#if entry.kind === 'message'}
+      {#if entry.kind === 'user'}
+        <div class="from-user">
+          <p class="who">YOU</p>
+          <p class="message">{entry.text}</p>
+        </div>
+      {:else if entry.kind === 'message'}
         <p class="who">AGENT</p>
         <p class="message">{entry.text}</p>
       {:else if entry.kind === 'tool'}
@@ -91,6 +96,14 @@
   }
   .entry {
     animation: enter var(--dur) var(--ease);
+  }
+  /* The human's own messages read as a distinct, quieter rail — the agent's output is the focus. */
+  .from-user {
+    padding-left: var(--space-3);
+    border-left: 2px solid var(--border-strong);
+  }
+  .from-user .message {
+    color: var(--text-secondary);
   }
   .who {
     margin: 0 0 var(--space-1);

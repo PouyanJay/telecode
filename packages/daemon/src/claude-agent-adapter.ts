@@ -36,10 +36,14 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
   const log = options.logger ?? pino({ name: 'claude-agent-adapter' });
 
   return {
-    async run(prompt: string, { canUseTool, onEvent }: AgentRunOptions): Promise<AgentRunResult> {
+    async run(
+      prompt: string,
+      { canUseTool, onEvent, resume }: AgentRunOptions,
+    ): Promise<AgentRunResult> {
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
       const denied: string[] = [];
+      let sessionId: string | undefined;
 
       const sdkCanUseTool = async (
         toolName: string,
@@ -63,12 +67,17 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           permissionMode: options.permissionMode ?? 'default',
           maxTurns: options.maxTurns ?? 4,
           settingSources: options.settingSources ?? [],
+          ...(resume ? { resume } : {}),
           ...(options.model ? { model: options.model } : {}),
           ...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
         },
       });
 
       for await (const message of session) {
+        // Capture the conversation id so the daemon can resume this session for a follow-up turn.
+        if (message.type === 'system' && message.subtype === 'init') {
+          sessionId = message.session_id;
+        }
         // Map SDK assistant messages onto our streamed event contract. canUseTool above records
         // every interception; tool_use blocks here are the (allowed) tools the agent actually ran.
         if (message.type === 'assistant') {
@@ -87,8 +96,8 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
         log.debug({ type: message.type }, 'agent message');
       }
 
-      log.debug({ intercepted: intercepted.length }, 'agent session complete');
-      return { intercepted, allowed, denied };
+      log.debug({ intercepted: intercepted.length, sessionId }, 'agent session complete');
+      return { intercepted, allowed, denied, ...(sessionId ? { sessionId } : {}) };
     },
   };
 }

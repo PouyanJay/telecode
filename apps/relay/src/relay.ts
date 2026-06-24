@@ -109,15 +109,19 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       );
       return;
     }
-    // A human's verdict resumes the run: flip the row back to `running` before forwarding the decision
-    // to the daemon (so the persisted status never lags the daemon unblocking). Type-only — the relay
-    // stays payload-blind, which keeps this correct once the payload is E2E ciphertext in Phase 3.
-    if (envelope.type === 'permission.decision' && sessionRegistry && envelope.session_id) {
+    // A human action resumes the session — a permission verdict, or a `user.message` follow-up that
+    // starts a new turn. Flip the row back to `running` before forwarding (so the persisted status never
+    // lags the daemon). Type-only — the relay stays payload-blind, correct under E2E ciphertext (Phase 3).
+    if (
+      (envelope.type === 'permission.decision' || envelope.type === 'user.message') &&
+      sessionRegistry &&
+      envelope.session_id
+    ) {
       await sessionRegistry.markRunning({
         userId: envelope.user_id,
         sessionId: envelope.session_id,
       });
-      log.info({ channel, sessionId: envelope.session_id }, 'relay: session resumed by decision');
+      log.info({ channel, sessionId: envelope.session_id }, 'relay: session resumed');
     }
     if (daemon) {
       daemon.send(text);

@@ -9,6 +9,7 @@ import {
   parseEnvelope,
   permissionDecisionPayloadSchema,
   sessionLaunchPayloadSchema,
+  userMessagePayloadSchema,
   type Envelope,
   type MessageType,
   type PermissionDecisionPayload,
@@ -24,10 +25,11 @@ import { createClaudeAgentAdapter } from './claude-agent-adapter';
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
  * reaches in), announces itself for `(userId, deviceId)`, and supervises work for that
- * device. On `session.launch` it runs an {@link AgentAdapter} session and streams `agent.message`
- * / `agent.tool_use` up, then `session.ended`. Every consequential tool the agent wants to run is
- * routed through the human-in-the-loop gate: the daemon forwards it as `agent.permission_request` and
- * blocks `canUseTool` until the matching `permission.decision` returns from the browser.
+ * device. On `session.launch` it runs an {@link AgentAdapter} turn and streams `agent.message`
+ * / `agent.tool_use` up, then `session.ended`; a `user.message` follow-up resumes the same agent
+ * conversation for another turn. Every consequential tool the agent wants to run is routed through the
+ * human-in-the-loop gate: the daemon forwards it as `agent.permission_request` and blocks `canUseTool`
+ * until the matching `permission.decision` returns from the browser.
  */
 export interface DaemonOptions {
   readonly relayUrl: string;
@@ -56,6 +58,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // resolved when its matching `permission.decision` returns. Single-session in Phase 1, but keyed so it
   // stays correct as sessions multiply.
   const pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
+  // The agent conversation id per telecode session, so a `user.message` follow-up resumes the same chat.
+  const sdkSessions = new Map<string, string>();
+  // Telecode sessions with a turn in flight (one turn at a time per session).
+  const activeRuns = new Set<string>();
 
   /** Send an envelope on the daemon's channel, carrying the session id when present. */
   function sendForSession(source: Envelope, type: MessageType, payload: unknown): void {
@@ -111,21 +117,24 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return { behavior: 'deny', message: payload.message ?? 'Denied by the operator' };
   }
 
-  /** Run an agent session for a `session.launch` and stream its activity up to the web. */
-  async function runSession(envelope: Envelope): Promise<void> {
-    const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
-    if (!launch.success) {
-      log.warn({ device: options.deviceId }, 'daemon: dropped session.launch with invalid payload');
+  /**
+   * Run one agent turn (the initial prompt or a follow-up) and stream its activity up, then end the
+   * turn with `session.ended`. `resume` continues a prior agent conversation. The returned conversation
+   * id is stored so the next `user.message` follow-up resumes this same session. One turn at a time per
+   * session — a follow-up that races an in-flight turn is dropped (the UI also blocks it).
+   */
+  async function runTurn(envelope: Envelope, prompt: string, resume?: string): Promise<void> {
+    const sid = envelope.session_id;
+    if (sid !== undefined && activeRuns.has(sid)) {
+      log.warn(
+        { device: options.deviceId, sessionId: sid },
+        'daemon: turn already running; dropped',
+      );
       return;
     }
-    log.info(
-      { device: options.deviceId, sessionId: envelope.session_id },
-      'daemon: session launch received',
-    );
-    sendForSession(envelope, 'session.started', {});
-
+    if (sid !== undefined) activeRuns.add(sid);
     try {
-      await agentAdapter.run(launch.data.prompt, {
+      const result = await agentAdapter.run(prompt, {
         // Every tool the agent wants to run is gated through the browser (the human-in-the-loop hook).
         canUseTool: (request) => requestPermission(envelope, request),
         onEvent: (event) => {
@@ -138,19 +147,57 @@ export function createDaemon(options: DaemonOptions): Daemon {
             });
           }
         },
+        ...(resume !== undefined ? { resume } : {}),
       });
-      log.info(
-        { device: options.deviceId, sessionId: envelope.session_id },
-        'daemon: session ended',
-      );
+      if (sid !== undefined && result.sessionId !== undefined) {
+        sdkSessions.set(sid, result.sessionId);
+      }
+      log.info({ device: options.deviceId, sessionId: sid }, 'daemon: turn ended');
       sendForSession(envelope, 'session.ended', { status: 'done' });
     } catch (err) {
-      log.error({ err, sessionId: envelope.session_id }, 'daemon: session run failed');
+      log.error({ err, sessionId: sid }, 'daemon: turn failed');
       sendForSession(envelope, 'session.ended', {
         status: 'error',
         error: err instanceof Error ? err.message : 'unknown error',
       });
+    } finally {
+      if (sid !== undefined) activeRuns.delete(sid);
     }
+  }
+
+  /** Launch a new session: announce it started, then run the first turn. */
+  async function runSession(envelope: Envelope): Promise<void> {
+    const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
+    if (!launch.success) {
+      log.warn({ device: options.deviceId }, 'daemon: dropped session.launch with invalid payload');
+      return;
+    }
+    log.info(
+      { device: options.deviceId, sessionId: envelope.session_id },
+      'daemon: session launch received',
+    );
+    sendForSession(envelope, 'session.started', {});
+    await runTurn(envelope, launch.data.prompt);
+  }
+
+  /** Run a follow-up turn for an existing session by resuming its agent conversation. */
+  async function runFollowUp(envelope: Envelope): Promise<void> {
+    const message = userMessagePayloadSchema.safeParse(envelope.payload);
+    if (!message.success) {
+      log.warn({ device: options.deviceId }, 'daemon: dropped user.message with invalid payload');
+      return;
+    }
+    const sid = envelope.session_id;
+    const resume = sid !== undefined ? sdkSessions.get(sid) : undefined;
+    if (resume === undefined) {
+      log.warn(
+        { device: options.deviceId, sessionId: sid },
+        'daemon: no agent conversation to resume for follow-up',
+      );
+      return;
+    }
+    log.info({ device: options.deviceId, sessionId: sid }, 'daemon: follow-up received');
+    await runTurn(envelope, message.data.text, resume);
   }
 
   function handleMessage(raw: Buffer, onReady: () => void): void {
@@ -191,6 +238,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       }
       case 'session.launch': {
         void runSession(envelope);
+        return;
+      }
+      case 'user.message': {
+        void runFollowUp(envelope);
         return;
       }
       case 'permission.decision': {

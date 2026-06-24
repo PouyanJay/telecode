@@ -2,51 +2,61 @@
   import { Button } from '@telecode/ui';
 
   /**
-   * The sticky session composer (enterprise-ui §forms): a prompt box that launches one agent session.
-   * Enter inserts a newline; ⌘/Ctrl+Enter submits (the prompt is free-form, often multi-line). Submit
-   * stays enabled until submission starts; while a session is active the composer is disabled with a
-   * clear reason rather than silently swallowing input. Phase 1 launches only — follow-ups are Task 8.
+   * The sticky session composer (enterprise-ui §forms): a prompt box that launches a session or sends a
+   * follow-up to steer it (the page chooses, and sets `submitLabel`). Enter inserts a newline;
+   * ⌘/Ctrl+Enter submits (the prompt is free-form, often multi-line). Submit stays enabled until
+   * submission starts; while a turn is running the composer is disabled rather than swallowing input.
    */
   let {
     busy = false,
     disabledReason,
-    onlaunch,
-  }: { busy?: boolean; disabledReason?: string; onlaunch: (prompt: string) => void } = $props();
+    submitLabel = 'Launch',
+    placeholder = 'Describe a task for the agent…',
+    onsend,
+  }: {
+    busy?: boolean;
+    disabledReason?: string;
+    submitLabel?: string;
+    placeholder?: string;
+    onsend: (text: string) => void;
+  } = $props();
 
   let prompt = $state('');
   const blocked = $derived(busy || disabledReason !== undefined);
 
-  function submit(event: Event): void {
+  function handleSubmit(event: Event): void {
     event.preventDefault();
     const trimmed = prompt.trim();
     if (!trimmed || blocked) return;
-    onlaunch(trimmed);
+    onsend(trimmed);
     prompt = '';
   }
 
   function onkeydown(event: KeyboardEvent): void {
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-      submit(event);
+      handleSubmit(event);
     }
   }
 </script>
 
-<form class="composer hairline-t" onsubmit={submit} aria-label="Launch a session">
+<form class="composer hairline-t" onsubmit={handleSubmit} aria-label="Send to the session">
   <label class="sr-only" for="prompt">Prompt</label>
   <textarea
     id="prompt"
     name="prompt"
     bind:value={prompt}
     onkeydown={onkeydown}
-    placeholder={disabledReason ?? 'Describe a task for the agent…'}
+    placeholder={disabledReason ?? placeholder}
     rows="1"
     disabled={disabledReason !== undefined}
     autocomplete="off"
     aria-describedby="composer-hint"
   ></textarea>
   <div class="side">
-    <Button type="submit" variant="primary" size="lg" loading={busy} disabled={blocked}>Launch</Button>
-    <span id="composer-hint" class="hint">⌘↵ to launch</span>
+    <Button type="submit" variant="primary" size="lg" loading={busy} disabled={blocked}>
+      {submitLabel}
+    </Button>
+    <span id="composer-hint" class="hint">⌘↵ to send</span>
   </div>
 </form>
 
