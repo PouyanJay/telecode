@@ -38,6 +38,11 @@ export interface AgentRunOptions {
    * earlier run). Omitted on the first turn of a session.
    */
   readonly resume?: string;
+  /**
+   * Working directory the agent runs in — the session's git worktree (Phase 2). Omitted falls back to
+   * the daemon's own cwd. The daemon derives this path; it is never taken from an untrusted client.
+   */
+  readonly cwd?: string;
 }
 
 export interface AgentRunResult {

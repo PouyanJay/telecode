@@ -1,0 +1,115 @@
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { createGitWorktreeManager } from './worktree-manager';
+
+const run = promisify(execFile);
+
+/** Temp dirs created per test, removed in afterEach so the suite leaves no trace under tmp. */
+const tempDirs: string[] = [];
+
+async function tempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+/** A real, committed git repo to cut worktrees from (worktree add needs a resolvable HEAD). */
+async function makeRepo(): Promise<string> {
+  const dir = await tempDir('telecode-repo-');
+  await run('git', ['-C', dir, 'init', '-q', '-b', 'main']);
+  await run('git', ['-C', dir, 'config', 'user.email', 'test@telecode.dev']);
+  await run('git', ['-C', dir, 'config', 'user.name', 'Telecode Test']);
+  await writeFile(join(dir, 'README.md'), '# repo\n');
+  await run('git', ['-C', dir, 'add', '.']);
+  await run('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+  return dir;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe('WorktreeManager: a git worktree per session off a local repo', () => {
+  it('creates a worktree at <root>/<sessionId> on a telecode/<short> branch off the repo', async () => {
+    const repoPath = await makeRepo();
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+    const sessionId = randomUUID();
+
+    const worktree = await manager.ensureWorktree(sessionId);
+
+    expect(worktree.path).toBe(join(worktreesRoot, sessionId));
+    expect(worktree.branch).toBe(`telecode/${sessionId.slice(0, 8)}`);
+    // It is a real checkout of the repo, on its own branch.
+    expect(await exists(join(worktree.path, 'README.md'))).toBe(true);
+    const { stdout: branch } = await run('git', [
+      '-C',
+      worktree.path,
+      'rev-parse',
+      '--abbrev-ref',
+      'HEAD',
+    ]);
+    expect(branch.trim()).toBe(worktree.branch);
+    // Git registers it as a worktree of the repo.
+    const { stdout: list } = await run('git', ['-C', repoPath, 'worktree', 'list', '--porcelain']);
+    expect(list).toContain(worktree.path);
+  });
+
+  it('is idempotent: a second ensure for the same session reuses the worktree and its contents', async () => {
+    const repoPath = await makeRepo();
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+    const sessionId = randomUUID();
+
+    const first = await manager.ensureWorktree(sessionId);
+    await writeFile(join(first.path, 'agent-output.txt'), 'work in progress');
+
+    const second = await manager.ensureWorktree(sessionId);
+
+    expect(second).toEqual(first);
+    // The reuse must not wipe the agent's in-progress work.
+    expect(await readFile(join(second.path, 'agent-output.txt'), 'utf8')).toBe('work in progress');
+  });
+
+  it('isolates each session in its own worktree (files do not leak across sessions)', async () => {
+    const repoPath = await makeRepo();
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+    const sessionA = randomUUID();
+    const sessionB = randomUUID();
+
+    const a = await manager.ensureWorktree(sessionA);
+    const b = await manager.ensureWorktree(sessionB);
+    await writeFile(join(a.path, 'only-in-a.txt'), 'a');
+
+    expect(b.path).not.toBe(a.path);
+    expect(b.branch).not.toBe(a.branch);
+    expect(await exists(join(a.path, 'only-in-a.txt'))).toBe(true);
+    expect(await exists(join(b.path, 'only-in-a.txt'))).toBe(false);
+    expect(await exists(join(repoPath, 'only-in-a.txt'))).toBe(false);
+  });
+
+  it('surfaces a clear error when the repo path is not a git repository', async () => {
+    const repoPath = await tempDir('telecode-not-a-repo-');
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ repoPath, worktreesRoot });
+
+    await expect(manager.ensureWorktree(randomUUID())).rejects.toThrow(/worktree/i);
+  });
+});

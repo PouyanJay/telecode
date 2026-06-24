@@ -1,4 +1,5 @@
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
+import { join } from 'node:path';
 
 import { encodeKey, generateKeyPair } from '@telecode/protocol';
 import { pino } from 'pino';
@@ -6,6 +7,7 @@ import { pino } from 'pino';
 import { loadCredentials, saveCredentials } from './credentials';
 import { createDaemon } from './daemon';
 import { pairDevice } from './pairing';
+import { createGitWorktreeManager } from './sessions/worktree-manager';
 
 /**
  * Daemon entry point (`npx telecode`). On first run it pairs this device (prints a code to enter in the
@@ -45,12 +47,23 @@ if (!credentials) {
   log.info({ deviceId: credentials.deviceId }, 'daemon: paired; credentials saved');
 }
 
+// Give each session its own git worktree when a local repo is configured (Phase 2). Until repo
+// selection lands (Task 8), the repo is pointed at by `TELECODE_REPO`; without it, sessions run in the
+// daemon's own cwd (Phase-1 behavior). Worktrees default to `~/.telecode/worktrees` (plan A-3).
+const repoPath = process.env.TELECODE_REPO;
+const worktreesRoot =
+  process.env.TELECODE_WORKTREES_ROOT ?? join(homedir(), '.telecode', 'worktrees');
+const worktreeManager = repoPath
+  ? createGitWorktreeManager({ repoPath, worktreesRoot, logger: log })
+  : undefined;
+
 const daemon = createDaemon({
   relayUrl: relayWsUrl,
   userId: credentials.userId,
   deviceId: credentials.deviceId,
   deviceToken: credentials.deviceToken,
   logger: log,
+  ...(worktreeManager ? { worktreeManager } : {}),
 });
 
 try {

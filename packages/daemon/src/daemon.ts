@@ -25,6 +25,7 @@ import {
   type PermissionRequest,
 } from './agent-adapter';
 import { createClaudeAgentAdapter } from './claude-agent-adapter';
+import { type WorktreeManager } from './sessions/worktree-manager';
 
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
@@ -43,6 +44,12 @@ export interface DaemonOptions {
   readonly deviceToken?: string;
   /** Agent runtime. Defaults to the real Claude Agent SDK adapter; tests inject a fake. */
   readonly agentAdapter?: AgentAdapter;
+  /**
+   * Cuts a git worktree per session (Phase 2). When provided, each session's agent runs in its own
+   * worktree cwd so parallel agents never clobber each other's files. Omitted (e.g. no repo configured)
+   * falls back to the daemon's own cwd — the Phase-1 behavior.
+   */
+  readonly worktreeManager?: WorktreeManager;
   readonly logger?: Logger;
 }
 
@@ -56,6 +63,7 @@ export interface Daemon {
 export function createDaemon(options: DaemonOptions): Daemon {
   const log = options.logger ?? pino({ name: 'daemon' });
   const agentAdapter = options.agentAdapter ?? createClaudeAgentAdapter({ logger: log });
+  const worktreeManager = options.worktreeManager;
   let socket: WebSocket | null = null;
 
   // Tool requests the agent is blocked on, keyed by the correlation id we send to the browser; each is
@@ -64,6 +72,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
   // The agent conversation id per telecode session, so a `user.message` follow-up resumes the same chat.
   const sdkSessions = new Map<string, string>();
+  // The worktree cwd each session runs in, so every turn (launch + follow-ups) uses the same one.
+  const sessionCwds = new Map<string, string>();
   // Telecode sessions with a turn in flight (one turn at a time per session).
   const activeRuns = new Set<string>();
   // The live transcript + status the daemon holds for each session (architecture invariant #3/#7: the
@@ -167,7 +177,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * id is stored so the next `user.message` follow-up resumes this same session. One turn at a time per
    * session — a follow-up that races an in-flight turn is dropped (the UI also blocks it).
    */
-  async function runTurn(envelope: Envelope, prompt: string, resume?: string): Promise<void> {
+  async function runTurn(
+    envelope: Envelope,
+    prompt: string,
+    resume?: string,
+    cwd?: string,
+  ): Promise<void> {
     const sessionId = envelope.session_id;
     if (sessionId !== undefined && activeRuns.has(sessionId)) {
       log.warn({ deviceId: options.deviceId, sessionId }, 'daemon: turn already running; dropped');
@@ -177,6 +192,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     try {
       const result = await agentAdapter.run(prompt, {
         canUseTool: (request) => requestPermission(envelope, request),
+        ...(cwd !== undefined ? { cwd } : {}),
         onEvent: (event) => {
           if (event.type === 'message') {
             record(sessionId, { kind: 'message', text: event.text });
@@ -209,6 +225,40 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
   }
 
+  /** Returned by {@link prepareWorktree} when prep failed and the session was already ended with error. */
+  const FAILED = Symbol('worktree-failed');
+
+  /**
+   * Ensure the session's git worktree exists and return its path as the agent cwd, caching it so every
+   * turn reuses it. Returns `undefined` when no worktree manager is configured (run in the daemon cwd —
+   * Phase 1). On failure it ends the session with an error and returns {@link FAILED} so the launch aborts.
+   */
+  async function prepareWorktree(envelope: Envelope): Promise<string | undefined | typeof FAILED> {
+    const sessionId = envelope.session_id;
+    if (!worktreeManager || sessionId === undefined) return undefined;
+    try {
+      const worktree = await worktreeManager.ensureWorktree(sessionId);
+      sessionCwds.set(sessionId, worktree.path);
+      // Log the branch, never the worktree path (a local fs path — kept out of log sinks).
+      log.info(
+        { deviceId: options.deviceId, sessionId, branch: worktree.branch },
+        'daemon: session worktree ready',
+      );
+      return worktree.path;
+    } catch (err) {
+      log.error(
+        { err, deviceId: options.deviceId, sessionId },
+        'daemon: failed to prepare worktree',
+      );
+      setStatus(sessionId, 'error');
+      sendForSession(envelope, 'session.ended', {
+        status: 'error',
+        error: 'failed to prepare session worktree',
+      });
+      return FAILED;
+    }
+  }
+
   /** Launch a new session: announce it started, then run the first turn. */
   async function runSession(envelope: Envelope): Promise<void> {
     const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
@@ -228,6 +278,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       { deviceId: options.deviceId, sessionId: envelope.session_id },
       'daemon: session launch received',
     );
+    // Cut this session's git worktree (if configured) before any agent work, so parallel sessions never
+    // share a cwd. A failure here fails the launch cleanly — it must never stick at `starting`.
+    const cwd = await prepareWorktree(envelope);
+    if (cwd === FAILED) return;
     record(envelope.session_id, { kind: 'user', text: launch.data.prompt });
     setStatus(envelope.session_id, 'running');
     // Echo the launch's correlation id so the launching browser can pair the relay-minted session id.
@@ -236,7 +290,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       'session.started',
       launch.data.clientRef !== undefined ? { clientRef: launch.data.clientRef } : {},
     );
-    await runTurn(envelope, launch.data.prompt);
+    await runTurn(envelope, launch.data.prompt, undefined, cwd);
   }
 
   /** Run a follow-up turn for an existing session by resuming its agent conversation. */
@@ -258,7 +312,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     log.info({ deviceId: options.deviceId, sessionId }, 'daemon: follow-up received');
     record(sessionId, { kind: 'user', text: message.data.text });
     setStatus(sessionId, 'running');
-    await runTurn(envelope, message.data.text, resume);
+    // Reuse the session's worktree cwd (set on launch) so the follow-up turn runs in the same place.
+    const cwd = sessionId !== undefined ? sessionCwds.get(sessionId) : undefined;
+    await runTurn(envelope, message.data.text, resume, cwd);
   }
 
   function handleMessage(raw: Buffer, onReady: () => void): void {

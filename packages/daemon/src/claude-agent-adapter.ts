@@ -45,7 +45,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
   return {
     async run(
       prompt: string,
-      { canUseTool, onEvent, resume }: AgentRunOptions,
+      { canUseTool, onEvent, resume, cwd }: AgentRunOptions,
     ): Promise<AgentRunResult> {
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
@@ -74,6 +74,8 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           permissionMode: options.permissionMode ?? 'default',
           maxTurns: options.maxTurns ?? 4,
           settingSources: options.settingSources ?? [],
+          // Run in the session's worktree so parallel agents never clobber each other's files.
+          ...(cwd ? { cwd } : {}),
           ...(resume ? { resume } : {}),
           ...(options.model ? { model: options.model } : {}),
           ...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
