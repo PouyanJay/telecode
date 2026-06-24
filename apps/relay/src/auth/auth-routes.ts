@@ -1,0 +1,81 @@
+import type { FastifyInstance } from 'fastify';
+
+import { bearerToken } from './bearer';
+import { constantTimeEquals } from './secret-compare';
+import { type AuthService, providerIdentitySchema } from './auth-service';
+
+/**
+ * Relay HTTP auth endpoints, all called server-to-server by the SvelteKit web tier (the browser never
+ * calls these directly — it holds an httpOnly cookie). `/auth/session` is guarded by a shared service
+ * secret (only the web backend knows it); the others are authorized by the bearer session token the web
+ * reads from that cookie.
+ */
+export interface AuthRoutesOptions {
+  readonly serviceSecret: string;
+}
+
+export function registerAuthRoutes(
+  app: FastifyInstance,
+  auth: AuthService,
+  options: AuthRoutesOptions,
+): void {
+  // Web → relay: mint a login session for a verified OAuth identity (service-secret guarded).
+  app.post('/auth/session', async (request, reply) => {
+    const secret = request.headers['x-telecode-service-secret'];
+    if (typeof secret !== 'string' || !constantTimeEquals(secret, options.serviceSecret)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const parsed = providerIdentitySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request' });
+    }
+    const session = await auth.createSession(parsed.data);
+    return reply.send({
+      token: session.token,
+      user_id: session.userId,
+      expires_at: session.expiresAt.toISOString(),
+    });
+  });
+
+  // Web → relay: resolve the current user from a session (for the web's hooks.server session load).
+  app.get('/auth/me', async (request, reply) => {
+    const token = bearerToken(request);
+    if (!token) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const user = await auth.getSessionUser(token);
+    if (!user) {
+      return reply.code(401).send({ error: 'invalid_session' });
+    }
+    return reply.send({
+      id: user.id,
+      display_name: user.displayName,
+      email: user.email,
+      avatar_url: user.avatarUrl,
+    });
+  });
+
+  // Web → relay: exchange a valid session for a short-lived channel token (for the browser WS).
+  app.post('/channel-token', async (request, reply) => {
+    const token = bearerToken(request);
+    if (!token) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const userId = await auth.validateSession(token);
+    if (!userId) {
+      return reply.code(401).send({ error: 'invalid_session' });
+    }
+    const channelToken = await auth.mintChannelToken(userId);
+    return reply.send({ channel_token: channelToken, user_id: userId });
+  });
+
+  // Web → relay: revoke a session (logout).
+  app.delete('/auth/session', async (request, reply) => {
+    const token = bearerToken(request);
+    if (!token) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    await auth.destroySession(token);
+    return reply.code(204).send();
+  });
+}

@@ -66,8 +66,15 @@ export type EchoPayload = z.infer<typeof echoPayloadSchema>;
 export const peerRoleSchema = z.enum(['daemon', 'browser']);
 export type PeerRole = z.infer<typeof peerRoleSchema>;
 
-/** Payload for `hello` — a peer announcing its role when it connects to the relay. */
-export const helloPayloadSchema = z.object({ role: peerRoleSchema });
+/**
+ * Payload for `hello` — a peer announcing its role when it connects to the relay. `token` carries the
+ * caller's credential: a short-lived channel token for a `browser`, and (from Phase 1 pairing) a device
+ * token for a `daemon`. Optional so the Phase 0 echo path still connects without auth.
+ */
+export const helloPayloadSchema = z.object({
+  role: peerRoleSchema,
+  token: z.string().min(1).optional(),
+});
 export type HelloPayload = z.infer<typeof helloPayloadSchema>;
 
 /** Validate an inbound value as an Envelope, throwing `ZodError` on mismatch. */

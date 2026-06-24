@@ -1,55 +1,76 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
-import type { DeviceCodeResponse, PollResult } from '@telecode/protocol';
+import {
+  deviceCodeRequestSchema,
+  type DeviceCodeResponse,
+  type PollResult,
+} from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-/**
- * Device Authorization Grant (RFC 8628), self-contained for Phase 0: the relay issues device/user
- * codes and a device token directly. Real GitHub/Google OAuth + the web `/activate` screen + X25519
- * pubkey registration land in later phases — this spike only proves the round-trip:
- *   daemon → POST /device/code → (user approves) → daemon polls /device/token → device token issued.
- *
- * Phase 0 uses JSON bodies and a 200 `authorization_pending` status for simplicity; the strict
- * RFC form-encoding + 400 error codes can come with the real provider.
- */
+import { constantTimeEquals } from './auth/secret-compare';
+import { type DeviceRegistry } from './registry/device-registry';
 
+/**
+ * Device Authorization Grant (RFC 8628). On approval the device is **persisted** to the registry under
+ * the approving user (the raw token is returned once; only its SHA-256 hash is stored). Approval is
+ * server-derived: `/device/approve` is called server-to-server by the web tier (service-secret guarded)
+ * with the *authenticated* user's id — the client never supplies a user_id, closing the spike's hole.
+ *
+ * Pending (pre-approval) codes live in memory with a short TTL; only the approved device is persisted.
+ */
 const USER_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no ambiguous 0/O/1/I
 
 export interface DeviceAuthOptions {
   verificationUri: string;
+  registry: DeviceRegistry;
   expiresInMs?: number;
   intervalSec?: number;
   now?: () => number;
 }
 
 export interface DeviceAuthService {
-  requestCode(): DeviceCodeResponse;
+  requestCode(input: { name?: string; publicKey?: string }): DeviceCodeResponse;
   poll(deviceCode: string): PollResult;
-  approve(userCode: string, userId: string): boolean;
+  /** Persist + bind the device to `userId` (server-derived). Resolves true if the code was valid. */
+  approve(userCode: string, userId: string): Promise<boolean>;
 }
 
 interface PendingRecord {
   userCode: string;
   expiresAt: number;
+  name?: string;
+  publicKey?: string;
   approved: boolean;
   userId?: string;
+  deviceId?: string;
   deviceToken?: string;
 }
 
 function generateUserCode(): string {
+  // Reject bytes at/above the largest multiple of the alphabet length so `% length` stays unbiased.
+  const maxUnbiased = 256 - (256 % USER_CODE_ALPHABET.length);
   const segment = (): string => {
-    let out = '';
-    for (const byte of randomBytes(4)) {
-      out += USER_CODE_ALPHABET.charAt(byte % USER_CODE_ALPHABET.length);
+    let chars = '';
+    while (chars.length < 4) {
+      for (const byte of randomBytes(8)) {
+        if (chars.length >= 4) break;
+        if (byte < maxUnbiased)
+          chars += USER_CODE_ALPHABET.charAt(byte % USER_CODE_ALPHABET.length);
+      }
     }
-    return out;
+    return chars;
   };
   return `${segment()}-${segment()}`;
 }
 
+/** SHA-256 hex hash of a device token. The raw token is never persisted. */
+export function hashDeviceToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
 export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthService {
-  const now = options.now ?? (() => Date.now());
+  const now = options.now ?? ((): number => Date.now());
   const expiresInMs = options.expiresInMs ?? 5 * 60_000;
   const intervalSec = options.intervalSec ?? 1;
   const byDeviceCode = new Map<string, PendingRecord>();
@@ -65,10 +86,17 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
   }
 
   return {
-    requestCode(): DeviceCodeResponse {
+    requestCode({ name, publicKey }): DeviceCodeResponse {
       const deviceCode = randomUUID();
       const userCode = generateUserCode();
-      byDeviceCode.set(deviceCode, { userCode, expiresAt: now() + expiresInMs, approved: false });
+      const record: PendingRecord = {
+        userCode,
+        expiresAt: now() + expiresInMs,
+        approved: false,
+      };
+      if (name !== undefined) record.name = name;
+      if (publicKey !== undefined) record.publicKey = publicKey;
+      byDeviceCode.set(deviceCode, record);
       userCodeToDeviceCode.set(userCode, deviceCode);
       return {
         device_code: deviceCode,
@@ -79,25 +107,50 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       };
     },
 
-    poll(deviceCode: string): PollResult {
+    poll(deviceCode): PollResult {
       const record = byDeviceCode.get(deviceCode);
       if (!record || expired(deviceCode, record)) {
         return { status: 'expired' };
       }
-      if (record.approved && record.deviceToken !== undefined && record.userId !== undefined) {
-        return { status: 'approved', device_token: record.deviceToken, user_id: record.userId };
+      if (
+        record.approved &&
+        record.deviceToken !== undefined &&
+        record.userId !== undefined &&
+        record.deviceId !== undefined
+      ) {
+        const result: PollResult = {
+          status: 'approved',
+          device_token: record.deviceToken,
+          user_id: record.userId,
+          device_id: record.deviceId,
+        };
+        // One-time delivery: consume the record so the raw token doesn't linger in memory for the
+        // full TTL and a re-poll can't re-read it.
+        byDeviceCode.delete(deviceCode);
+        userCodeToDeviceCode.delete(record.userCode);
+        return result;
       }
       return { status: 'authorization_pending' };
     },
 
-    approve(userCode: string, userId: string): boolean {
+    async approve(userCode, userId): Promise<boolean> {
       const deviceCode = userCodeToDeviceCode.get(userCode);
       if (deviceCode === undefined) return false;
       const record = byDeviceCode.get(deviceCode);
       if (!record || expired(deviceCode, record)) return false;
+      if (record.approved) return true; // idempotent
+
+      const rawToken = `dt_${randomBytes(24).toString('base64url')}`;
+      const deviceId = await options.registry.createDevice({
+        userId,
+        name: record.name ?? 'device',
+        deviceTokenHash: hashDeviceToken(rawToken),
+        ...(record.publicKey !== undefined ? { publicKey: record.publicKey } : {}),
+      });
       record.approved = true;
       record.userId = userId;
-      record.deviceToken = `dt_${randomBytes(24).toString('base64url')}`;
+      record.deviceId = deviceId;
+      record.deviceToken = rawToken;
       return true;
     },
   };
@@ -109,9 +162,22 @@ const approveRequestSchema = z.object({
   user_id: z.string().min(1),
 });
 
-/** Register the device-authorization HTTP endpoints on the relay. */
-export function registerDeviceAuthRoutes(app: FastifyInstance, service: DeviceAuthService): void {
-  app.post('/device/code', async () => service.requestCode());
+/** Register the device-authorization endpoints. `/device/approve` is service-secret guarded. */
+export function registerDeviceAuthRoutes(
+  app: FastifyInstance,
+  service: DeviceAuthService,
+  serviceSecret: string,
+): void {
+  app.post('/device/code', async (request, reply) => {
+    const parsed = deviceCodeRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request' });
+    }
+    return service.requestCode({
+      ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+      ...(parsed.data.public_key !== undefined ? { publicKey: parsed.data.public_key } : {}),
+    });
+  });
 
   app.post('/device/token', async (request, reply) => {
     const parsed = tokenRequestSchema.safeParse(request.body);
@@ -122,11 +188,15 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, service: DeviceAu
   });
 
   app.post('/device/approve', async (request, reply) => {
+    const secret = request.headers['x-telecode-service-secret'];
+    if (typeof secret !== 'string' || !constantTimeEquals(secret, serviceSecret)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
     const parsed = approveRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_request' });
     }
-    if (!service.approve(parsed.data.user_code, parsed.data.user_id)) {
+    if (!(await service.approve(parsed.data.user_code, parsed.data.user_id))) {
       return reply.code(404).send({ error: 'invalid_user_code' });
     }
     return { ok: true };

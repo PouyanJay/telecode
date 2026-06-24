@@ -1,0 +1,151 @@
+/**
+ * telecode design tokens — the single source of truth (consumed by apps/web and the docs site).
+ * Dark-first, instrument/terminal house style: deep ink panels, hairline dividers, amber accent used
+ * as a scalpel, Geist + Geist Mono. Components reference the SEMANTIC tokens (--bg, --text, --border,
+ * --accent, --space-*, …), never raw ink scales or hex. A light theme re-maps the same semantic tokens
+ * under [data-theme='light'] and costs nothing per component.
+ *
+ * Fonts are self-hosted (no third-party request; works offline in the PWA).
+ */
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+
+:root {
+  /* ── Dark-first ink ramp — deep, slightly cool near-black ─────────────────── */
+  --ink-0: #090a0c;
+  --ink-50: #0f1115;
+  --ink-100: #13161b;
+  --ink-200: #1a1e24;
+  --ink-300: #232831;
+  --ink-line: #1d2127;
+  --ink-line-strong: #2a2f38;
+  --frame-top: #262b33;
+
+  /* Text on ink */
+  --text: #e9ebee;
+  --text-secondary: #8a909b;
+  --text-muted: #565c66;
+  --text-on-accent: #0a0b0d;
+
+  /* ── ONE signature accent — AMBER, used as a scalpel only ──────────────────── */
+  --accent: #e8a33d;
+  --accent-hover: #f0b257;
+  --accent-press: #d4922f;
+  --accent-soft: #16140d;
+  --accent-ring: #e8a33d;
+
+  /* Status — muted, reserved meanings (dot + UPPERCASE MONO label, never a saturated pill) */
+  --success: #56a585;
+  --success-soft: #13241c;
+  --warning: #c0974a;
+  --warning-soft: #27210f;
+  --danger: #d2726a;
+  --danger-soft: #2a1714;
+
+  /* ── SEMANTIC tokens — components use ONLY these ───────────────────────────── */
+  --bg: var(--ink-0);
+  --bg-subtle: var(--ink-50);
+  --bg-muted: var(--ink-100);
+  --surface: var(--ink-50);
+  --surface-raised: var(--ink-100);
+  --border: var(--ink-line);
+  --border-strong: var(--ink-line-strong);
+  --focus-ring: var(--accent-ring);
+
+  --primary: var(--accent);
+  --primary-text: var(--text-on-accent);
+  --neutral: #eceef1;
+  --neutral-text: #0a0b0d;
+
+  /* Typography */
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
+
+  --text-xs: 0.75rem;
+  --lh-xs: 1.5;
+  --text-sm: 0.8125rem;
+  --lh-sm: 1.5;
+  --text-base: 0.9375rem;
+  --lh-base: 1.55;
+  --text-lg: 1.125rem;
+  --lh-lg: 1.4;
+  --text-xl: 1.375rem;
+  --lh-xl: 1.3;
+  --text-2xl: 1.75rem;
+  --lh-2xl: 1.2;
+
+  /* Spacing (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Radius / shadow / motion */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 7px;
+  --radius-xl: 10px;
+  --radius-full: 9999px;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+
+  --z-base: 0;
+  --z-sticky: 1100;
+  --z-overlay: 1200;
+  --z-modal: 1300;
+  --z-toast: 1500;
+
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 260ms;
+}
+
+[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-subtle: #f7f8fa;
+  --bg-muted: #eef0f4;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --border: #e2e5ea;
+  --border-strong: #cbd0d9;
+  --text: #12151c;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+  --accent: #c8860f;
+  --accent-hover: #a86f0a;
+  --accent-press: #8a5b08;
+  --accent-soft: #fbf2dd;
+  --text-on-accent: #ffffff;
+  --success: #3f9d76;
+  --warning: #bb8a36;
+  --danger: #cb4a40;
+  --neutral: #12151c;
+  --neutral-text: #ffffff;
+}
+
+/* Hairline dividers — render crisply at the device's smallest line. */
+.hairline-b {
+  border-bottom: 1px solid var(--border);
+}
+.hairline-t {
+  border-top: 1px solid var(--border);
+}
+@media (min-resolution: 2dppx) {
+  .hairline-b {
+    border-bottom-width: 0.5px;
+  }
+  .hairline-t {
+    border-top-width: 0.5px;
+  }
+}

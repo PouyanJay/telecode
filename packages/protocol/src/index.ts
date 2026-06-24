@@ -20,8 +20,36 @@ export {
 } from './envelope';
 export type { MessageType, Envelope, EchoPayload, PeerRole, HelloPayload } from './envelope';
 
-export { ready, generateKeyPair, seal, open } from './crypto';
+export { ready, generateKeyPair, seal, open, encodeKey, decodeKey } from './crypto';
 export type { KeyPair, SealedMessage } from './crypto';
 
-export { deviceCodeResponseSchema, pollResultSchema } from './device-auth';
-export type { DeviceCodeResponse, PollResult } from './device-auth';
+export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';
+export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device-auth';
+
+export {
+  permissionModeSchema,
+  sessionLaunchPayloadSchema,
+  sessionStartedPayloadSchema,
+  SESSION_STATUSES,
+  sessionStatusSchema,
+  agentMessagePayloadSchema,
+  agentToolUsePayloadSchema,
+  sessionEndedPayloadSchema,
+  sessionStatusPayloadSchema,
+  agentPermissionRequestPayloadSchema,
+  permissionDecisionPayloadSchema,
+  userMessagePayloadSchema,
+} from './session';
+export type {
+  PermissionModeName,
+  SessionLaunchPayload,
+  SessionStartedPayload,
+  SessionStatusName,
+  AgentMessagePayload,
+  AgentToolUsePayload,
+  SessionEndedPayload,
+  SessionStatusPayload,
+  AgentPermissionRequestPayload,
+  PermissionDecisionPayload,
+  UserMessagePayload,
+} from './session';

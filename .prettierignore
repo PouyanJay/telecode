@@ -6,3 +6,5 @@
 .claude/
 .memory/
 pnpm-lock.yaml
+# Drizzle-generated migration journal/snapshots (committed, but managed by drizzle-kit)
+**/db/migrations/meta/**

@@ -8,6 +8,10 @@ import { pino, type Logger } from 'pino';
  */
 export interface PairDeviceOptions {
   readonly relayHttpUrl: string;
+  /** Human label for this device (defaults to the hostname). */
+  readonly name?: string;
+  /** This device's X25519 public key (base64), registered at pairing for E2E in Phase 3. */
+  readonly publicKey?: string;
   readonly intervalMs?: number;
   readonly maxAttempts?: number;
   /** Invoked with the user code to display/enter. Awaited before polling begins. */
@@ -18,12 +22,20 @@ export interface PairDeviceOptions {
 export interface DeviceCredentials {
   readonly deviceToken: string;
   readonly userId: string;
+  readonly deviceId: string;
 }
 
 export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCredentials> {
   const log = options.logger ?? pino({ name: 'daemon:pair' });
 
-  const codeRes = await fetch(`${options.relayHttpUrl}/device/code`, { method: 'POST' });
+  const codeRes = await fetch(`${options.relayHttpUrl}/device/code`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ...(options.name !== undefined ? { name: options.name } : {}),
+      ...(options.publicKey !== undefined ? { public_key: options.publicKey } : {}),
+    }),
+  });
   if (!codeRes.ok) {
     throw new Error(`device/code request failed: ${codeRes.status}`);
   }
@@ -48,8 +60,12 @@ export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCred
     });
     const result = pollResultSchema.parse(await tokenRes.json());
     if (result.status === 'approved') {
-      log.info({ userId: result.user_id }, 'daemon: device paired');
-      return { deviceToken: result.device_token, userId: result.user_id };
+      log.info({ userId: result.user_id, deviceId: result.device_id }, 'daemon: device paired');
+      return {
+        deviceToken: result.device_token,
+        userId: result.user_id,
+        deviceId: result.device_id,
+      };
     }
     if (result.status === 'expired') {
       throw new Error('device code expired before approval');

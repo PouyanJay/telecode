@@ -6,6 +6,13 @@ import { z } from 'zod';
  * interfaces, no `as` casts across the HTTP boundary.
  */
 
+/** Body the daemon sends to `POST /device/code` — a human label and its X25519 public key (base64). */
+export const deviceCodeRequestSchema = z.object({
+  name: z.string().min(1).optional(),
+  public_key: z.string().min(1).optional(),
+});
+export type DeviceCodeRequest = z.infer<typeof deviceCodeRequestSchema>;
+
 export const deviceCodeResponseSchema = z.object({
   device_code: z.string().min(1),
   user_code: z.string().min(1),
@@ -22,6 +29,7 @@ export const pollResultSchema = z.discriminatedUnion('status', [
     status: z.literal('approved'),
     device_token: z.string().min(1),
     user_id: z.string().min(1),
+    device_id: z.string().min(1),
   }),
 ]);
 export type PollResult = z.infer<typeof pollResultSchema>;

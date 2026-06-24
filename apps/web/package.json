@@ -14,7 +14,9 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@telecode/protocol": "workspace:*"
+    "@telecode/protocol": "workspace:*",
+    "@telecode/ui": "workspace:^",
+    "arctic": "^3.7.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.1",

@@ -9,7 +9,14 @@
       "dependsOn": ["^build"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "passThroughEnv": [
+        "DATABASE_URL",
+        "CHANNEL_TOKEN_SECRET",
+        "RELAY_SERVICE_SECRET",
+        "ANTHROPIC_API_KEY",
+        "LOG_LEVEL"
+      ]
     },
     "lint": {},
     "dev": {

@@ -26,11 +26,15 @@ export function waitForEnvelope(
   });
 }
 
-/** Open a browser-role connection to the relay and wait until it is registered (hello.ack). */
+/**
+ * Open a browser-role connection to the relay and wait until it is registered (hello.ack). When the
+ * relay enforces auth, pass the short-lived channel `token` to authenticate the `hello`.
+ */
 export async function connectBrowser(
   relayUrl: string,
   userId: string,
   deviceId: string,
+  token?: string,
 ): Promise<WebSocket> {
   const socket = new WebSocket(relayUrl);
   await new Promise<void>((resolve, reject) => {
@@ -39,7 +43,14 @@ export async function connectBrowser(
   });
   const ack = waitForEnvelope(socket, (e) => e.type === 'hello.ack');
   socket.send(
-    JSON.stringify(makeEnvelope({ type: 'hello', userId, deviceId, payload: { role: 'browser' } })),
+    JSON.stringify(
+      makeEnvelope({
+        type: 'hello',
+        userId,
+        deviceId,
+        payload: { role: 'browser', ...(token !== undefined ? { token } : {}) },
+      }),
+    ),
   );
   await ack;
   return socket;
