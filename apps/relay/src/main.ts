@@ -1,5 +1,6 @@
 import { pino } from 'pino';
 
+import { createAuthService } from './auth/auth-service';
 import { createDb } from './db/client';
 import { loadDotenv } from './db/load-env';
 import { createSessionRegistry } from './registry/session-registry';
@@ -11,12 +12,27 @@ const log = pino({ name: 'relay', level: process.env.LOG_LEVEL ?? 'info' });
 const port = Number(process.env.RELAY_PORT ?? 8080);
 
 const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
-  log.warn('relay: DATABASE_URL not set — session registry disabled (echo-only mode)');
+const channelTokenSecret = process.env.CHANNEL_TOKEN_SECRET;
+const serviceSecret = process.env.RELAY_SERVICE_SECRET;
+
+const dbHandle = databaseUrl ? createDb(databaseUrl, log) : undefined;
+if (!dbHandle) {
+  log.warn('relay: DATABASE_URL not set — session registry + auth disabled (echo-only mode)');
+} else if (!channelTokenSecret || !serviceSecret) {
+  log.warn('relay: CHANNEL_TOKEN_SECRET / RELAY_SERVICE_SECRET not set — auth endpoints disabled');
 }
+
 const app = await buildRelay({
   logger: log,
-  ...(databaseUrl ? { sessionRegistry: createSessionRegistry(createDb(databaseUrl, log)) } : {}),
+  ...(dbHandle ? { sessionRegistry: createSessionRegistry(dbHandle) } : {}),
+  ...(dbHandle && channelTokenSecret && serviceSecret
+    ? {
+        auth: {
+          service: createAuthService({ db: dbHandle, channelTokenSecret }),
+          serviceSecret,
+        },
+      }
+    : {}),
 });
 
 try {

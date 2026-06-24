@@ -10,5 +10,8 @@ export default defineConfig({
     setupFiles: ['./tests/setup.ts'],
     testTimeout: 20000,
     hookTimeout: 30000,
+    // Integration tests share one Postgres; run test files sequentially so per-file `truncate`
+    // resets never race across parallel workers.
+    fileParallelism: false,
   },
 });

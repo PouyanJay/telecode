@@ -5,6 +5,8 @@ import type { WebSocket } from 'ws';
 
 import { helloPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
 
+import { type AuthService } from './auth/auth-service';
+import { registerAuthRoutes } from './auth/auth-routes';
 import { createDeviceAuthService, registerDeviceAuthRoutes } from './device-auth';
 import { type SessionRegistry } from './registry/session-registry';
 
@@ -23,6 +25,12 @@ export interface RelayOptions {
    * and flips it to `running` on `session.started`. Optional so the Phase 0 echo path needs no DB.
    */
   readonly sessionRegistry?: SessionRegistry;
+  /**
+   * Auth service + the shared service secret. When provided, the relay exposes the `/auth/*` and
+   * `/channel-token` endpoints and requires every `browser` peer to present a valid channel token on
+   * `hello` whose `sub` matches the envelope's `user_id`. Optional so the Phase 0 echo path needs no auth.
+   */
+  readonly auth?: { readonly service: AuthService; readonly serviceSecret: string };
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -42,6 +50,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   const daemons = new Map<string, WebSocket>();
   const browsers = new Map<string, Set<WebSocket>>();
   const sessionRegistry = options.sessionRegistry;
+  const authService = options.auth?.service;
 
   function broadcastToBrowsers(channel: string, frame: string): void {
     const set = browsers.get(channel);
@@ -112,6 +121,11 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   });
   registerDeviceAuthRoutes(app, deviceAuth);
 
+  // OAuth-session + channel-token endpoints (web → relay, server-to-server).
+  if (options.auth) {
+    registerAuthRoutes(app, options.auth.service, { serviceSecret: options.auth.serviceSecret });
+  }
+
   app.get('/ws', { websocket: true }, (socket: WebSocket) => {
     const peer: PeerState = { role: 'unknown', channel: null };
 
@@ -141,7 +155,19 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           log.warn({ channel }, 'relay: dropped hello with invalid payload');
           return;
         }
-        const { role } = hello.data;
+        const { role, token } = hello.data;
+
+        // A browser must prove identity with a channel token whose subject is the envelope user.
+        // This is the boundary that stops a browser from acting as another user.
+        if (role === 'browser' && authService) {
+          const tokenUserId = token ? await authService.verifyChannelToken(token) : null;
+          if (tokenUserId === null || tokenUserId !== envelope.user_id) {
+            log.warn({ channel }, 'relay: rejected browser hello (invalid channel token)');
+            socket.close(4001, 'unauthorized');
+            return;
+          }
+        }
+
         peer.role = role;
         peer.channel = channel;
         if (role === 'daemon') {

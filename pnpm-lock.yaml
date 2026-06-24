@@ -50,6 +50,9 @@ importers:
       fastify:
         specifier: ^5.2.1
         version: 5.8.5
+      jose:
+        specifier: ^6.2.3
+        version: 6.2.3
       pg:
         specifier: ^8.22.0
         version: 8.22.0

@@ -90,8 +90,33 @@ export const sessions = pgTable(
   }),
 );
 
+/**
+ * Browser login sessions (distinct from agent `sessions`). The cookie holds a high-entropy random
+ * token; only its SHA-256 hash is stored here. Touched exclusively on the trusted relay auth path
+ * (owner connection, RLS-bypassing) — there is no user-scoped `telecode_app` access, so RLS is enabled
+ * with no policy (deny-all to the app role).
+ */
+export const authSessions = pgTable(
+  'auth_sessions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** SHA-256 hash (hex) of the session token; the raw token lives only in the browser cookie. */
+    tokenHash: text('token_hash').notNull().unique(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    userIdx: index('auth_sessions_user_id_idx').on(t.userId),
+  }),
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
+export type AuthSession = typeof authSessions.$inferSelect;
+export type NewAuthSession = typeof authSessions.$inferInsert;
 export type Device = typeof devices.$inferSelect;
 export type NewDevice = typeof devices.$inferInsert;
 export type Session = typeof sessions.$inferSelect;

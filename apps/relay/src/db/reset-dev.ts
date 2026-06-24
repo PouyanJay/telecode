@@ -29,6 +29,7 @@ try {
   // privilege issues when the relay connects as a non-superuser BYPASSRLS role.
   await pool.query('drop schema if exists drizzle cascade');
   await pool.query('drop table if exists public.sessions cascade');
+  await pool.query('drop table if exists public.auth_sessions cascade');
   await pool.query('drop table if exists public.devices cascade');
   await pool.query('drop table if exists public.users cascade');
 } finally {
