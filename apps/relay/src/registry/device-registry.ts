@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
 import { devices } from '../db/schema';
@@ -16,6 +16,13 @@ export interface DeviceRecord {
   readonly revokedAt: Date | null;
 }
 
+/** A user-facing device summary (the browser targets `id`; `name` is shown in the UI). */
+export interface ActiveDevice {
+  readonly id: string;
+  readonly name: string;
+  readonly lastSeenAt: Date | null;
+}
+
 export interface DeviceRegistry {
   /** Persist a paired device for the authenticated user; returns its generated id. */
   createDevice(input: {
@@ -26,6 +33,8 @@ export interface DeviceRegistry {
   }): Promise<string>;
   /** Resolve a non-revoked device by its token hash (daemon authentication), or null. */
   findActiveByTokenHash(tokenHash: string): Promise<DeviceRecord | null>;
+  /** List a user's non-revoked devices (newest first) under their RLS scope, for the web to target. */
+  findActiveByUser(userId: string): Promise<ActiveDevice[]>;
 }
 
 export function createDeviceRegistry(db: DbHandle): DeviceRegistry {
@@ -50,6 +59,16 @@ export function createDeviceRegistry(db: DbHandle): DeviceRegistry {
         .where(and(eq(devices.deviceTokenHash, tokenHash), isNull(devices.revokedAt)))
         .limit(1);
       return row ?? null;
+    },
+
+    async findActiveByUser(userId): Promise<ActiveDevice[]> {
+      return withUserContext(db, userId, async (scoped) =>
+        scoped
+          .select({ id: devices.id, name: devices.name, lastSeenAt: devices.lastSeenAt })
+          .from(devices)
+          .where(and(eq(devices.userId, userId), isNull(devices.revokedAt)))
+          .orderBy(desc(devices.createdAt)),
+      );
     },
   };
 }

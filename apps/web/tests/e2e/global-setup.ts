@@ -1,33 +1,18 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import path from 'node:path';
+
+import { loadRepoEnv, REPO_ROOT } from './env';
 
 /**
  * Boot the relay (with auth + a real database) for the e2e run. Playwright's `webServer` runs the
  * SvelteKit dev server; the relay is spawned here and gated on /healthz. Migrations are applied via the
  * relay's db:migrate CLI (a child process — we deliberately avoid importing the relay's server types
  * into the web's frontend typecheck). Locally the DB URL + secrets come from the repo `.env`; in CI they
- * come from the job environment.
+ * come from the job environment. The session e2e pairs its own device + fake daemon in its own setup.
  */
-const ROOT = path.resolve(process.cwd(), '../..');
+const ROOT = REPO_ROOT;
 const RELAY_PORT = '8080';
 const RELAY_HEALTH = `http://127.0.0.1:${RELAY_PORT}/healthz`;
-
-function loadRepoEnv(): void {
-  let text: string;
-  try {
-    text = readFileSync(path.join(ROOT, '.env'), 'utf8');
-  } catch {
-    return; // CI — env comes from the runner.
-  }
-  for (const line of text.split('\n')) {
-    const match = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim());
-    const key = match?.[1];
-    if (key && process.env[key] === undefined) {
-      process.env[key] = match?.[2] ?? '';
-    }
-  }
-}
 
 function runTs(relativePath: string, env: NodeJS.ProcessEnv): ChildProcess {
   return spawn(process.execPath, ['--import', 'tsx', path.join(ROOT, relativePath)], {

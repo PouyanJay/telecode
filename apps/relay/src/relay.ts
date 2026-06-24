@@ -15,6 +15,7 @@ import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { type DeviceRegistry } from './registry/device-registry';
+import { registerDeviceListRoute } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
 
 /**
@@ -172,6 +173,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // OAuth-session + channel-token endpoints (web → relay, server-to-server).
   if (options.auth) {
     registerAuthRoutes(app, options.auth.service, { serviceSecret: options.auth.serviceSecret });
+    // The web lists the user's devices to pick the channel its browser should watch.
+    if (deviceRegistry) {
+      registerDeviceListRoute(app, options.auth.service, deviceRegistry);
+    }
   }
 
   app.get('/ws', { websocket: true }, (socket: WebSocket) => {

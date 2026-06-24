@@ -1,7 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 
+import { bearerToken } from './bearer';
 import { type AuthService, providerIdentitySchema } from './auth-service';
 
 /**
@@ -18,13 +19,6 @@ function constantTimeEquals(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
-}
-
-function bearerToken(request: FastifyRequest): string | null {
-  const header = request.headers.authorization;
-  if (typeof header !== 'string') return null;
-  const match = /^Bearer (.+)$/.exec(header);
-  return match?.[1] ?? null;
 }
 
 export function registerAuthRoutes(

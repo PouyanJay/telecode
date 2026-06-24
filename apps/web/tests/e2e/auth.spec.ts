@@ -6,15 +6,15 @@ import { expect, test } from '@playwright/test';
  * obtains a channel token and connects to the relay's WS (relay verifies the channel token); sign-out
  * revokes the session.
  */
-test('dev sign-in reaches an authenticated, relay-connected session view', async ({ page }) => {
+test('dev sign-in reaches an authenticated, relay-connected landing', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveURL(/\/signin$/);
   await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Continue as developer' }).click();
 
-  // Authenticated landing.
-  await expect(page.getByRole('heading', { name: 'No sessions yet' })).toBeVisible();
+  // Authenticated landing (no longer on /signin), showing the signed-in user.
+  await expect(page).not.toHaveURL(/\/signin$/);
   await expect(page.getByText('Developer')).toBeVisible();
 
   // The browser minted a channel token and authenticated its relay WS connection.
@@ -24,7 +24,7 @@ test('dev sign-in reaches an authenticated, relay-connected session view', async
 test('sign out returns to the sign-in screen', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Continue as developer' }).click();
-  await expect(page.getByRole('heading', { name: 'No sessions yet' })).toBeVisible();
+  await expect(page.getByText('Developer')).toBeVisible();
 
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page).toHaveURL(/\/signin$/);

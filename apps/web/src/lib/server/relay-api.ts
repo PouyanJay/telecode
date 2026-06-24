@@ -23,6 +23,13 @@ export interface CreatedSession {
   expiresAt: Date;
 }
 
+/** A paired device the signed-in user owns; the browser watches its `(user_id, id)` channel. */
+export interface RelayDevice {
+  id: string;
+  name: string;
+  lastSeenAt: Date | null;
+}
+
 /** Mint a login session for a verified identity (service-secret guarded). */
 export async function createRelaySession(identity: ProviderIdentity): Promise<CreatedSession> {
   const res = await fetch(`${RELAY_HTTP_URL}/auth/session`, {
@@ -57,6 +64,24 @@ export async function getRelayUser(sessionToken: string): Promise<RelayUser | nu
     email: body.email,
     avatarUrl: body.avatar_url,
   };
+}
+
+/** List the user's active paired devices (session-token authed). Empty on any error. */
+export async function listDevices(sessionToken: string): Promise<RelayDevice[]> {
+  const res = await fetch(`${RELAY_HTTP_URL}/me/devices`, {
+    headers: { authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) {
+    return [];
+  }
+  const body = (await res.json()) as {
+    devices: { id: string; name: string; last_seen_at: string | null }[];
+  };
+  return body.devices.map((device) => ({
+    id: device.id,
+    name: device.name,
+    lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
+  }));
 }
 
 /** Exchange a session token for a short-lived channel token, or null if the session is invalid. */

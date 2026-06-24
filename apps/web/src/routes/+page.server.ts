@@ -1,15 +1,17 @@
 import { redirect } from '@sveltejs/kit';
 
-import { destroyRelaySession } from '$lib/server/relay-api';
+import { destroyRelaySession, listDevices } from '$lib/server/relay-api';
 import { clearSessionCookie, getSessionToken } from '$lib/server/session-cookie';
 
 import type { Actions, PageServerLoad } from './$types';
 
-export const load: PageServerLoad = ({ locals }) => {
+export const load: PageServerLoad = async ({ locals, cookies }) => {
   if (!locals.user) {
     redirect(303, '/signin');
   }
-  return { user: locals.user };
+  const token = getSessionToken(cookies);
+  const devices = token ? await listDevices(token) : [];
+  return { user: locals.user, devices };
 };
 
 export const actions: Actions = {
