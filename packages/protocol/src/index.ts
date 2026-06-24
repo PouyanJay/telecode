@@ -36,6 +36,8 @@ export {
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
   sessionStatusPayloadSchema,
+  agentPermissionRequestPayloadSchema,
+  permissionDecisionPayloadSchema,
 } from './session';
 export type {
   PermissionModeName,
@@ -46,4 +48,6 @@ export type {
   AgentToolUsePayload,
   SessionEndedPayload,
   SessionStatusPayload,
+  AgentPermissionRequestPayload,
+  PermissionDecisionPayload,
 } from './session';

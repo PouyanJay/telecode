@@ -108,6 +108,16 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       );
       return;
     }
+    // A human's verdict resumes the run: flip the row back to `running` before forwarding the decision
+    // to the daemon (so the persisted status never lags the daemon unblocking). Type-only — the relay
+    // stays payload-blind, which keeps this correct once the payload is E2E ciphertext in Phase 3.
+    if (envelope.type === 'permission.decision' && sessionRegistry && envelope.session_id) {
+      await sessionRegistry.markRunning({
+        userId: envelope.user_id,
+        sessionId: envelope.session_id,
+      });
+      log.info({ channel, sessionId: envelope.session_id }, 'relay: session resumed by decision');
+    }
     if (daemon) {
       daemon.send(text);
     } else {
@@ -132,6 +142,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           status,
         });
         log.info({ channel, sessionId: envelope.session_id, status }, 'relay: session ended');
+      } else if (envelope.type === 'agent.permission_request') {
+        // The run is blocked on a human decision: persist `awaiting_input` BEFORE broadcasting the
+        // request, so any browser that reacts to it already observes the paused status.
+        await sessionRegistry.markAwaitingInput({
+          userId: envelope.user_id,
+          sessionId: envelope.session_id,
+        });
+        log.info({ channel, sessionId: envelope.session_id }, 'relay: session awaiting input');
       }
     }
     broadcastToBrowsers(channel, text);

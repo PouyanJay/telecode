@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { createDaemon, createFakeAgentAdapter, type Daemon } from '@telecode/daemon';
 import {
   agentMessagePayloadSchema,
+  agentPermissionRequestPayloadSchema,
   agentToolUsePayloadSchema,
   makeEnvelope,
   parseEnvelope,
@@ -95,6 +96,22 @@ describe('agent streaming: launch → streamed messages/tool calls → ended', (
       browser.on('message', (raw: Buffer) => {
         const envelope = parseEnvelope(JSON.parse(raw.toString()));
         received.push(envelope);
+        // This test isn't about the gate (that's agent-permission.test.ts) — auto-approve any tool so
+        // the stream proceeds, but assert the request still appears in order.
+        if (envelope.type === 'agent.permission_request' && envelope.session_id) {
+          const request = agentPermissionRequestPayloadSchema.parse(envelope.payload);
+          browser.send(
+            JSON.stringify(
+              makeEnvelope({
+                type: 'permission.decision',
+                userId,
+                deviceId,
+                sessionId: envelope.session_id,
+                payload: { requestId: request.requestId, behavior: 'allow' },
+              }),
+            ),
+          );
+        }
         if (envelope.type === 'session.ended') resolve();
       });
       setTimeout(() => reject(new Error('timed out before session.ended')), 5000);
@@ -110,6 +127,7 @@ describe('agent streaming: launch → streamed messages/tool calls → ended', (
     expect(received.map((e) => e.type)).toEqual([
       'session.started',
       'agent.message',
+      'agent.permission_request',
       'agent.tool_use',
       'agent.message',
       'session.ended',

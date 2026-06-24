@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { pino, type Logger } from 'pino';
 import WebSocket from 'ws';
 
@@ -5,20 +7,27 @@ import {
   echoPayloadSchema,
   makeEnvelope,
   parseEnvelope,
+  permissionDecisionPayloadSchema,
   sessionLaunchPayloadSchema,
   type Envelope,
   type MessageType,
+  type PermissionDecisionPayload,
 } from '@telecode/protocol';
 
-import { type AgentAdapter, type PermissionDecision } from './agent-adapter';
+import {
+  type AgentAdapter,
+  type PermissionDecision,
+  type PermissionRequest,
+} from './agent-adapter';
 import { createClaudeAgentAdapter } from './claude-agent-adapter';
 
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
  * reaches in), announces itself for `(userId, deviceId)`, and supervises work for that
  * device. On `session.launch` it runs an {@link AgentAdapter} session and streams `agent.message`
- * / `agent.tool_use` up, then `session.ended`. The permission gate (forwarding `canUseTool` to the
- * browser) lands in the next task; here every tool is auto-allowed.
+ * / `agent.tool_use` up, then `session.ended`. Every consequential tool the agent wants to run is
+ * routed through the human-in-the-loop gate: the daemon forwards it as `agent.permission_request` and
+ * blocks `canUseTool` until the matching `permission.decision` returns from the browser.
  */
 export interface DaemonOptions {
   readonly relayUrl: string;
@@ -43,6 +52,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const agentAdapter = options.agentAdapter ?? createClaudeAgentAdapter({ logger: log });
   let socket: WebSocket | null = null;
 
+  // Tool requests the agent is blocked on, keyed by the correlation id we send to the browser; each is
+  // resolved when its matching `permission.decision` returns. Single-session in Phase 1, but keyed so it
+  // stays correct as sessions multiply.
+  const pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
+
   /** Send an envelope on the daemon's channel, carrying the session id when present. */
   function sendForSession(source: Envelope, type: MessageType, payload: unknown): void {
     socket?.send(
@@ -56,6 +70,45 @@ export function createDaemon(options: DaemonOptions): Daemon {
         }),
       ),
     );
+  }
+
+  /**
+   * The human-in-the-loop gate: forward a tool the agent wants to run to the browser as
+   * `agent.permission_request` and return a promise that resolves with the human's decision. The agent
+   * run is blocked on this promise until the matching `permission.decision` arrives.
+   */
+  function requestPermission(
+    source: Envelope,
+    request: PermissionRequest,
+  ): Promise<PermissionDecision> {
+    const requestId = randomUUID();
+    return new Promise<PermissionDecision>((resolve) => {
+      pendingPermissions.set(requestId, resolve);
+      log.info(
+        {
+          device: options.deviceId,
+          sessionId: source.session_id,
+          requestId,
+          tool: request.toolName,
+        },
+        'daemon: permission requested',
+      );
+      sendForSession(source, 'agent.permission_request', {
+        requestId,
+        toolName: request.toolName,
+        input: request.input,
+      });
+    });
+  }
+
+  /** Map a wire decision onto the adapter's internal contract (a deny always carries a message). */
+  function toPermissionDecision(payload: PermissionDecisionPayload): PermissionDecision {
+    if (payload.behavior === 'allow') {
+      return payload.updatedInput !== undefined
+        ? { behavior: 'allow', updatedInput: payload.updatedInput }
+        : { behavior: 'allow' };
+    }
+    return { behavior: 'deny', message: payload.message ?? 'Denied by the operator' };
   }
 
   /** Run an agent session for a `session.launch` and stream its activity up to the web. */
@@ -73,8 +126,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
     try {
       await agentAdapter.run(launch.data.prompt, {
-        // Task 6 forwards this to the browser; for now every tool is auto-allowed.
-        canUseTool: async (): Promise<PermissionDecision> => ({ behavior: 'allow' }),
+        // Every tool the agent wants to run is gated through the browser (the human-in-the-loop hook).
+        canUseTool: (request) => requestPermission(envelope, request),
         onEvent: (event) => {
           if (event.type === 'message') {
             sendForSession(envelope, 'agent.message', { text: event.text });
@@ -138,6 +191,35 @@ export function createDaemon(options: DaemonOptions): Daemon {
       }
       case 'session.launch': {
         void runSession(envelope);
+        return;
+      }
+      case 'permission.decision': {
+        const decision = permissionDecisionPayloadSchema.safeParse(envelope.payload);
+        if (!decision.success) {
+          log.warn(
+            { device: options.deviceId },
+            'daemon: dropped permission.decision with invalid payload',
+          );
+          return;
+        }
+        const resolve = pendingPermissions.get(decision.data.requestId);
+        if (!resolve) {
+          log.warn(
+            { device: options.deviceId, requestId: decision.data.requestId },
+            'daemon: no pending permission for decision',
+          );
+          return;
+        }
+        pendingPermissions.delete(decision.data.requestId);
+        log.info(
+          {
+            device: options.deviceId,
+            requestId: decision.data.requestId,
+            behavior: decision.data.behavior,
+          },
+          'daemon: permission decided',
+        );
+        resolve(toPermissionDecision(decision.data));
         return;
       }
       default:

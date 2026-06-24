@@ -59,3 +59,35 @@ export type SessionEndedPayload = z.infer<typeof sessionEndedPayloadSchema>;
 /** Payload for `session.status` (daemon → web): a status transition. */
 export const sessionStatusPayloadSchema = z.object({ status: sessionStatusSchema });
 export type SessionStatusPayload = z.infer<typeof sessionStatusPayloadSchema>;
+
+/**
+ * Payload for `agent.permission_request` (daemon → web): a consequential tool call the agent wants to
+ * run, paused at the {@link https://docs.claude.com SDK `canUseTool` gate} until a human decides. The
+ * `requestId` correlates this request with the human's {@link permissionDecisionPayloadSchema} reply.
+ */
+export const agentPermissionRequestPayloadSchema = z.object({
+  requestId: z.string().min(1),
+  toolName: z.string().min(1),
+  input: z.record(z.unknown()),
+});
+export type AgentPermissionRequestPayload = z.infer<typeof agentPermissionRequestPayloadSchema>;
+
+/**
+ * Payload for `permission.decision` (web → daemon): the human's verdict on a pending tool request,
+ * discriminated on `behavior`. `allow` may carry `updatedInput` (allow-with-edit — replaces the agent's
+ * proposed input); `deny` may carry a `message` surfaced back to the agent. The `requestId` ties the
+ * decision to its originating {@link agentPermissionRequestPayloadSchema}.
+ */
+export const permissionDecisionPayloadSchema = z.discriminatedUnion('behavior', [
+  z.object({
+    requestId: z.string().min(1),
+    behavior: z.literal('allow'),
+    updatedInput: z.record(z.unknown()).optional(),
+  }),
+  z.object({
+    requestId: z.string().min(1),
+    behavior: z.literal('deny'),
+    message: z.string().optional(),
+  }),
+]);
+export type PermissionDecisionPayload = z.infer<typeof permissionDecisionPayloadSchema>;

@@ -15,11 +15,27 @@ export interface SessionRegistry {
   createSession(input: { userId: string; deviceId: string }): Promise<string>;
   /** Flip a session to `running` once the daemon reports it started. No-op if the row isn't the user's. */
   markRunning(input: { userId: string; sessionId: string }): Promise<void>;
+  /** Flip a session to `awaiting_input` while a tool request blocks on a human decision. No-op if not the user's. */
+  markAwaitingInput(input: { userId: string; sessionId: string }): Promise<void>;
   /** Mark a session terminal (`done`/`error`) with an end timestamp. No-op if the row isn't the user's. */
   markEnded(input: { userId: string; sessionId: string; status: 'done' | 'error' }): Promise<void>;
 }
 
 export function createSessionRegistry(db: DbHandle): SessionRegistry {
+  /** Set a session's non-terminal status under the owner's RLS scope. No-op if the row isn't theirs. */
+  async function setStatus(
+    userId: string,
+    sessionId: string,
+    status: 'running' | 'awaiting_input',
+  ): Promise<void> {
+    await withUserContext(db, userId, async (scoped) => {
+      await scoped
+        .update(sessions)
+        .set({ status, updatedAt: new Date() })
+        .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
+    });
+  }
+
   return {
     async createSession({ userId, deviceId }): Promise<string> {
       return withUserContext(db, userId, async (scoped) => {
@@ -35,12 +51,11 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
     },
 
     async markRunning({ userId, sessionId }): Promise<void> {
-      await withUserContext(db, userId, async (scoped) => {
-        await scoped
-          .update(sessions)
-          .set({ status: 'running', updatedAt: new Date() })
-          .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
-      });
+      await setStatus(userId, sessionId, 'running');
+    },
+
+    async markAwaitingInput({ userId, sessionId }): Promise<void> {
+      await setStatus(userId, sessionId, 'awaiting_input');
     },
 
     async markEnded({ userId, sessionId, status }): Promise<void> {
