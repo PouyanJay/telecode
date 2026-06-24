@@ -18,7 +18,7 @@
   }: { entry: PermissionEntry; onapprove: () => void; onreject: () => void } = $props();
 
   const inputJson = $derived(JSON.stringify(entry.input, null, 2));
-  const inFlight = $derived(entry.decision === 'approving' || entry.decision === 'rejecting');
+  const isInFlight = $derived(entry.decision === 'approving' || entry.decision === 'rejecting');
 </script>
 
 <section class="gate" data-state={entry.decision} aria-label="Permission request">
@@ -34,7 +34,7 @@
       <Button variant="primary" onclick={onapprove}>Approve</Button>
       <Button variant="secondary" onclick={onreject}>Reject</Button>
     </div>
-  {:else if inFlight}
+  {:else if isInFlight}
     <p class="status-line" role="status">
       <span class="spinner" aria-hidden="true"></span>
       {entry.decision === 'approving' ? 'Approving…' : 'Rejecting…'}

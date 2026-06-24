@@ -45,10 +45,11 @@ describe('walking skeleton: browser -> relay -> daemon -> relay -> browser echo'
     const envelope = await reply;
     expect(envelope.payload).toEqual({ text: 'ping' });
 
-    // Log triangulation: the daemon must have logged handling this echo for this device.
-    expect(daemonLogs.some((line) => line.includes('echo received') && line.includes('ping'))).toBe(
-      true,
-    );
+    // Log triangulation by correlation id (never the plaintext payload — see CLAUDE.md logging rules):
+    // the daemon must have logged handling an echo for this device.
+    expect(
+      daemonLogs.some((line) => line.includes('echo received') && line.includes(DEVICE_ID)),
+    ).toBe(true);
 
     browser.close();
   });

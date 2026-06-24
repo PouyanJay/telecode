@@ -32,6 +32,13 @@ export interface ClaudeAgentAdapterOptions {
   readonly logger?: Logger;
 }
 
+/** The SDK types a tool block's `input` as `unknown`; narrow it to an object instead of casting blindly. */
+function toToolInput(input: unknown): Record<string, unknown> {
+  return typeof input === 'object' && input !== null && !Array.isArray(input)
+    ? (input as Record<string, unknown>)
+    : {};
+}
+
 export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}): AgentAdapter {
   const log = options.logger ?? pino({ name: 'claude-agent-adapter' });
 
@@ -88,7 +95,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
               onEvent({
                 type: 'tool_use',
                 toolName: block.name,
-                input: block.input as Record<string, unknown>,
+                input: toToolInput(block.input),
               });
             }
           }

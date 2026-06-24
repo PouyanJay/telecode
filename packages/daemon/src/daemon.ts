@@ -92,7 +92,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       pendingPermissions.set(requestId, resolve);
       log.info(
         {
-          device: options.deviceId,
+          deviceId: options.deviceId,
           sessionId: source.session_id,
           requestId,
           tool: request.toolName,
@@ -124,18 +124,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * session — a follow-up that races an in-flight turn is dropped (the UI also blocks it).
    */
   async function runTurn(envelope: Envelope, prompt: string, resume?: string): Promise<void> {
-    const sid = envelope.session_id;
-    if (sid !== undefined && activeRuns.has(sid)) {
-      log.warn(
-        { device: options.deviceId, sessionId: sid },
-        'daemon: turn already running; dropped',
-      );
+    const sessionId = envelope.session_id;
+    if (sessionId !== undefined && activeRuns.has(sessionId)) {
+      log.warn({ deviceId: options.deviceId, sessionId }, 'daemon: turn already running; dropped');
       return;
     }
-    if (sid !== undefined) activeRuns.add(sid);
+    if (sessionId !== undefined) activeRuns.add(sessionId);
     try {
       const result = await agentAdapter.run(prompt, {
-        // Every tool the agent wants to run is gated through the browser (the human-in-the-loop hook).
         canUseTool: (request) => requestPermission(envelope, request),
         onEvent: (event) => {
           if (event.type === 'message') {
@@ -149,19 +145,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
         },
         ...(resume !== undefined ? { resume } : {}),
       });
-      if (sid !== undefined && result.sessionId !== undefined) {
-        sdkSessions.set(sid, result.sessionId);
+      if (sessionId !== undefined && result.sessionId !== undefined) {
+        sdkSessions.set(sessionId, result.sessionId);
       }
-      log.info({ device: options.deviceId, sessionId: sid }, 'daemon: turn ended');
+      log.info({ deviceId: options.deviceId, sessionId }, 'daemon: turn ended');
       sendForSession(envelope, 'session.ended', { status: 'done' });
     } catch (err) {
-      log.error({ err, sessionId: sid }, 'daemon: turn failed');
+      log.error({ err, sessionId }, 'daemon: turn failed');
       sendForSession(envelope, 'session.ended', {
         status: 'error',
         error: err instanceof Error ? err.message : 'unknown error',
       });
     } finally {
-      if (sid !== undefined) activeRuns.delete(sid);
+      if (sessionId !== undefined) activeRuns.delete(sessionId);
     }
   }
 
@@ -171,7 +167,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (!launch.success) {
       // The relay already minted a `starting` row; fail it cleanly so it can't stick at `starting`.
       log.warn(
-        { device: options.deviceId },
+        { deviceId: options.deviceId },
         'daemon: rejected session.launch with invalid payload',
       );
       sendForSession(envelope, 'session.ended', {
@@ -181,7 +177,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return;
     }
     log.info(
-      { device: options.deviceId, sessionId: envelope.session_id },
+      { deviceId: options.deviceId, sessionId: envelope.session_id },
       'daemon: session launch received',
     );
     sendForSession(envelope, 'session.started', {});
@@ -192,19 +188,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
   async function runFollowUp(envelope: Envelope): Promise<void> {
     const message = userMessagePayloadSchema.safeParse(envelope.payload);
     if (!message.success) {
-      log.warn({ device: options.deviceId }, 'daemon: dropped user.message with invalid payload');
+      log.warn({ deviceId: options.deviceId }, 'daemon: dropped user.message with invalid payload');
       return;
     }
-    const sid = envelope.session_id;
-    const resume = sid !== undefined ? sdkSessions.get(sid) : undefined;
+    const sessionId = envelope.session_id;
+    const resume = sessionId !== undefined ? sdkSessions.get(sessionId) : undefined;
     if (resume === undefined) {
       log.warn(
-        { device: options.deviceId, sessionId: sid },
+        { deviceId: options.deviceId, sessionId },
         'daemon: no agent conversation to resume for follow-up',
       );
       return;
     }
-    log.info({ device: options.deviceId, sessionId: sid }, 'daemon: follow-up received');
+    log.info({ deviceId: options.deviceId, sessionId }, 'daemon: follow-up received');
     await runTurn(envelope, message.data.text, resume);
   }
 
@@ -219,18 +215,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
     switch (envelope.type) {
       case 'hello.ack': {
-        log.info({ device: options.deviceId }, 'daemon: registered with relay');
+        log.info({ deviceId: options.deviceId }, 'daemon: registered with relay');
         onReady();
         return;
       }
       case 'echo': {
         const echo = echoPayloadSchema.safeParse(envelope.payload);
         if (!echo.success) {
-          log.warn({ device: options.deviceId }, 'daemon: dropped echo with invalid payload');
+          log.warn({ deviceId: options.deviceId }, 'daemon: dropped echo with invalid payload');
           return;
         }
         const { text } = echo.data;
-        log.info({ device: options.deviceId, text }, 'daemon: echo received');
+        // Never log the payload text (CLAUDE.md: no plaintext in logs).
+        log.info({ deviceId: options.deviceId }, 'daemon: echo received');
         socket?.send(
           JSON.stringify(
             makeEnvelope({
@@ -256,7 +253,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         const decision = permissionDecisionPayloadSchema.safeParse(envelope.payload);
         if (!decision.success) {
           log.warn(
-            { device: options.deviceId },
+            { deviceId: options.deviceId },
             'daemon: dropped permission.decision with invalid payload',
           );
           return;
@@ -264,7 +261,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         const resolve = pendingPermissions.get(decision.data.requestId);
         if (!resolve) {
           log.warn(
-            { device: options.deviceId, requestId: decision.data.requestId },
+            { deviceId: options.deviceId, requestId: decision.data.requestId },
             'daemon: no pending permission for decision',
           );
           return;
@@ -272,7 +269,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         pendingPermissions.delete(decision.data.requestId);
         log.info(
           {
-            device: options.deviceId,
+            deviceId: options.deviceId,
             requestId: decision.data.requestId,
             behavior: decision.data.behavior,
           },
@@ -314,6 +311,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     },
 
     async stop(): Promise<void> {
+      // Unblock any in-flight turns waiting on a human decision so their runs can finish instead of
+      // hanging on a closed socket.
+      for (const resolve of pendingPermissions.values()) {
+        resolve({ behavior: 'deny', message: 'daemon stopping' });
+      }
+      pendingPermissions.clear();
       socket?.close();
       socket = null;
     },

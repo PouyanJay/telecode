@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { createClaudeAgentAdapter, createDaemon, type Daemon } from '@telecode/daemon';
 import {
   agentMessagePayloadSchema,
+  agentPermissionRequestPayloadSchema,
   makeEnvelope,
   parseEnvelope,
   sessionEndedPayloadSchema,
@@ -39,16 +40,17 @@ const MODEL = process.env.TELECODE_LIVE_MODEL ?? 'claude-haiku-4-5-20251001';
 /** Resolve when the browser has received `count` `session.ended` frames (one per turn). */
 function waitForEndedCount(received: Envelope[], count: number, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setInterval(() => {
+    const deadline = setTimeout(() => {
+      clearInterval(poll);
+      reject(new Error(`timed out waiting for ${count} session.ended`));
+    }, timeoutMs);
+    const poll = setInterval(() => {
       if (received.filter((e) => e.type === 'session.ended').length >= count) {
-        clearInterval(timer);
+        clearInterval(poll);
+        clearTimeout(deadline);
         resolve();
       }
     }, 100);
-    setTimeout(() => {
-      clearInterval(timer);
-      reject(new Error(`timed out waiting for ${count} session.ended`));
-    }, timeoutMs);
   });
 }
 
@@ -116,7 +118,7 @@ describe.skipIf(!LIVE)('LIVE: real Claude Agent SDK session through the relay', 
         received.push(envelope);
         // Auto-approve any tool the model decides to use so the harness never blocks.
         if (envelope.type === 'agent.permission_request' && envelope.session_id) {
-          const { requestId } = envelope.payload as { requestId: string };
+          const { requestId } = agentPermissionRequestPayloadSchema.parse(envelope.payload);
           browser.send(
             JSON.stringify(
               makeEnvelope({

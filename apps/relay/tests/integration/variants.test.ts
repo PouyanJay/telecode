@@ -33,7 +33,6 @@ import { connectBrowser } from '../_helpers/ws';
  */
 const DATABASE_URL = process.env.DATABASE_URL;
 const SILENT = pino({ level: 'silent' });
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A frame collector with count-based waiting (resilient to frames that arrive before we await). */
 function makeCollector(socket: WebSocket): {
@@ -302,14 +301,14 @@ describe('session variants: broadcast, error paths, and the one-turn-at-a-time g
       followUp(sessionId, 'second');
       await col.waitForCount('agent.permission_request', 2);
 
-      // A racing follow-up while turn 2 is in flight must be dropped (no third turn starts).
+      // Race a follow-up while turn 2 is in flight, then immediately approve. Frames are ordered per
+      // connection, so the daemon sees (and drops) the racing follow-up before the approval resolves
+      // turn 2 — no third turn can start. The drop is therefore observed deterministically, no sleeps.
       followUp(sessionId, 'third — should be dropped');
-      await sleep(300);
-
       approveLatest(browser, col.frames);
       await col.waitForCount('session.ended', 2);
-      await sleep(200); // give a dropped third turn a chance to (wrongly) appear
 
+      // Exactly two turns ran; the racing follow-up never spawned a third.
       expect(col.count('session.ended')).toBe(2);
       expect(col.count('agent.permission_request')).toBe(2);
       browser.close();

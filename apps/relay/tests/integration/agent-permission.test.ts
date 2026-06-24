@@ -201,7 +201,15 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
       updatedInput: { path: 'SAFE.md', content: 'edited by human' },
     }));
 
-    expect(result.types).toContain('agent.tool_use');
+    expect(result.statusAtRequest).toBe('awaiting_input');
+    expect(result.types).toEqual([
+      'session.started',
+      'agent.message',
+      'agent.permission_request',
+      'agent.tool_use',
+      'agent.message',
+      'session.ended',
+    ]);
     expect(result.toolInput).toEqual({ path: 'SAFE.md', content: 'edited by human' });
     expect(result.finalStatus).toBe('done');
   });

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   deviceCodeRequestSchema,
@@ -8,6 +8,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
+import { constantTimeEquals } from './auth/secret-compare';
 import { type DeviceRegistry } from './registry/device-registry';
 
 /**
@@ -47,12 +48,18 @@ interface PendingRecord {
 }
 
 function generateUserCode(): string {
+  // Reject bytes at/above the largest multiple of the alphabet length so `% length` stays unbiased.
+  const maxUnbiased = 256 - (256 % USER_CODE_ALPHABET.length);
   const segment = (): string => {
-    let out = '';
-    for (const byte of randomBytes(4)) {
-      out += USER_CODE_ALPHABET.charAt(byte % USER_CODE_ALPHABET.length);
+    let chars = '';
+    while (chars.length < 4) {
+      for (const byte of randomBytes(8)) {
+        if (chars.length >= 4) break;
+        if (byte < maxUnbiased)
+          chars += USER_CODE_ALPHABET.charAt(byte % USER_CODE_ALPHABET.length);
+      }
     }
-    return out;
+    return chars;
   };
   return `${segment()}-${segment()}`;
 }
@@ -111,12 +118,17 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
         record.userId !== undefined &&
         record.deviceId !== undefined
       ) {
-        return {
+        const result: PollResult = {
           status: 'approved',
           device_token: record.deviceToken,
           user_id: record.userId,
           device_id: record.deviceId,
         };
+        // One-time delivery: consume the record so the raw token doesn't linger in memory for the
+        // full TTL and a re-poll can't re-read it.
+        byDeviceCode.delete(deviceCode);
+        userCodeToDeviceCode.delete(record.userCode);
+        return result;
       }
       return { status: 'authorization_pending' };
     },
@@ -142,12 +154,6 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       return true;
     },
   };
-}
-
-function constantTimeEquals(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 const tokenRequestSchema = z.object({ device_code: z.string().min(1) });

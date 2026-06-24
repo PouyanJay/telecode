@@ -12,7 +12,24 @@ import { pairDevice } from './pairing';
  * web app), generates an X25519 keypair, and saves credentials to `~/.telecode/credentials.json`. On
  * later runs it loads the saved token and reconnects — no re-pairing.
  */
-const log = pino({ name: 'daemon', level: process.env.LOG_LEVEL ?? 'info' });
+const log = pino({
+  name: 'daemon',
+  level: process.env.LOG_LEVEL ?? 'info',
+  // Defense in depth: never let a secret or plaintext payload reach a log sink.
+  redact: {
+    paths: [
+      'token',
+      '*.token',
+      'payload',
+      '*.payload',
+      'text',
+      'prompt',
+      'channel_token',
+      'device_token',
+    ],
+    censor: '[redacted]',
+  },
+});
 const relayWsUrl = process.env.TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
 // Derive the relay's HTTP base for the pairing endpoints (ws→http, wss→https, strip the /ws path).
 const relayHttpUrl = relayWsUrl.replace(/^ws/, 'http').replace(/\/ws$/, '');

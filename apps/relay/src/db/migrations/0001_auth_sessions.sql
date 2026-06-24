@@ -19,6 +19,8 @@ CREATE INDEX "auth_sessions_user_id_idx" ON "auth_sessions" USING btree ("user_i
 -- ============================================================================
 ALTER TABLE public.auth_sessions ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE public.auth_sessions FORCE ROW LEVEL SECURITY;--> statement-breakpoint
+-- Make the deny-all explicit: telecode_app is never granted access to auth_sessions (owner-path only).
+REVOKE ALL ON public.auth_sessions FROM telecode_app;--> statement-breakpoint
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN

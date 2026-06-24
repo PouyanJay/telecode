@@ -20,16 +20,16 @@
   } = $props();
 
   let listEl = $state<HTMLDivElement>();
-  let pinned = $state(true);
+  let isPinned = $state(true);
 
   function onscroll(): void {
     if (!listEl) return;
-    pinned = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 48;
+    isPinned = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 48;
   }
 
   $effect(() => {
     entries.length; // re-run when a line is appended
-    if (pinned && listEl) listEl.scrollTop = listEl.scrollHeight;
+    if (isPinned && listEl) listEl.scrollTop = listEl.scrollHeight;
   });
 
   function toolInput(input: Record<string, unknown>): string {
@@ -60,13 +60,14 @@
         <p class="who">AGENT</p>
         <p class="message">{entry.text}</p>
       {:else if entry.kind === 'tool'}
+        {@const inputJson = toolInput(entry.input)}
         <div class="tool">
           <span class="who">TOOL</span>
           <code class="tool-name">{entry.toolName}</code>
-          {#if toolInput(entry.input) !== '{}'}
+          {#if inputJson !== '{}'}
             <details class="tool-input">
               <summary>input</summary>
-              <pre><code>{toolInput(entry.input)}</code></pre>
+              <pre><code>{inputJson}</code></pre>
             </details>
           {/if}
         </div>

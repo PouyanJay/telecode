@@ -9,7 +9,24 @@ import { buildRelay } from './relay';
 
 /** Dev/prod entry point for the relay (`pnpm --filter @telecode/relay start`). */
 loadDotenv();
-const log = pino({ name: 'relay', level: process.env.LOG_LEVEL ?? 'info' });
+const log = pino({
+  name: 'relay',
+  level: process.env.LOG_LEVEL ?? 'info',
+  // Defense in depth: never let a secret or plaintext payload reach a log sink.
+  redact: {
+    paths: [
+      'token',
+      '*.token',
+      'payload',
+      '*.payload',
+      'text',
+      'prompt',
+      'channel_token',
+      'device_token',
+    ],
+    censor: '[redacted]',
+  },
+});
 const port = Number(process.env.RELAY_PORT ?? 8080);
 
 const databaseUrl = process.env.DATABASE_URL;

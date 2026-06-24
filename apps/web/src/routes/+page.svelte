@@ -31,7 +31,7 @@
   const device = $derived(data.devices[0] ?? null);
 
   // Type annotations (not `$state<T>()` generics) — the latter trip the Svelte TS preprocessor.
-  let conn: ConnectionStatus | 'idle' = $state('idle');
+  let connectionStatus: ConnectionStatus | 'idle' = $state('idle');
   let session: SessionState = $state(initialSessionState);
   let connection: RelayConnection | null = null;
 
@@ -41,7 +41,7 @@
     connected: { tone: 'success', label: 'CONNECTED' },
     error: { tone: 'danger', label: 'OFFLINE' },
   };
-  const connDisplay = $derived(CONN_DISPLAY[conn]);
+  const connDisplay = $derived(CONN_DISPLAY[connectionStatus]);
 
   const SESSION_DISPLAY: Record<SessionStatus, StatusDisplay> = {
     idle: { tone: 'muted', label: 'READY', pulse: false },
@@ -53,7 +53,7 @@
     offline_paused: { tone: 'warning', label: 'OFFLINE', pulse: false },
   };
   const sessionDisplay = $derived(SESSION_DISPLAY[session.status]);
-  const busy = $derived(
+  const isBusy = $derived(
     session.status === 'starting' ||
       session.status === 'running' ||
       session.status === 'awaiting_input',
@@ -70,7 +70,7 @@
       try {
         const res = await fetch('/api/channel-token');
         if (!res.ok) {
-          conn = 'error';
+          connectionStatus = 'error';
           return;
         }
         const body = (await res.json()) as { channelToken: string };
@@ -81,11 +81,11 @@
           // has no daemon channel to launch on until a device is activated.
           deviceId: device?.id ?? 'web',
           channelToken: body.channelToken,
-          onStatus: (status) => (conn = status),
+          onStatus: (status) => (connectionStatus = status),
           onEvent: (envelope) => (session = applyEnvelope(session, envelope)),
         });
       } catch {
-        conn = 'error';
+        connectionStatus = 'error';
       }
     })();
     return () => connection?.close();
@@ -179,7 +179,7 @@
       {/if}
 
       <Composer
-        {busy}
+        {isBusy}
         submitLabel={composerLabel}
         placeholder={composerPlaceholder}
         onsend={submitPrompt}

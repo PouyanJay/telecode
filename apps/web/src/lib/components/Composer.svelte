@@ -8,13 +8,13 @@
    * submission starts; while a turn is running the composer is disabled rather than swallowing input.
    */
   let {
-    busy = false,
+    isBusy = false,
     disabledReason,
     submitLabel = 'Launch',
     placeholder = 'Describe a task for the agent…',
     onsend,
   }: {
-    busy?: boolean;
+    isBusy?: boolean;
     disabledReason?: string;
     submitLabel?: string;
     placeholder?: string;
@@ -22,12 +22,12 @@
   } = $props();
 
   let prompt = $state('');
-  const blocked = $derived(busy || disabledReason !== undefined);
+  const isBlocked = $derived(isBusy || disabledReason !== undefined);
 
   function handleSubmit(event: Event): void {
     event.preventDefault();
     const trimmed = prompt.trim();
-    if (!trimmed || blocked) return;
+    if (!trimmed || isBlocked) return;
     onsend(trimmed);
     prompt = '';
   }
@@ -53,7 +53,7 @@
     aria-describedby="composer-hint"
   ></textarea>
   <div class="side">
-    <Button type="submit" variant="primary" size="lg" loading={busy} disabled={blocked}>
+    <Button type="submit" variant="primary" size="lg" loading={isBusy} disabled={isBlocked}>
       {submitLabel}
     </Button>
     <span id="composer-hint" class="hint">⌘↵ to send</span>

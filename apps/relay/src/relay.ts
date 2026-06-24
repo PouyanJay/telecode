@@ -72,7 +72,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     const set = browsers.get(channel);
     if (!set) return;
     for (const browser of set) {
-      browser.send(frame);
+      try {
+        browser.send(frame);
+      } catch (err) {
+        // The browser closed between its 'close' event and now — drop it rather than swallow the error.
+        log.warn({ err, channel }, 'relay: dropping a browser that failed to receive');
+        set.delete(browser);
+      }
     }
   }
 
@@ -113,7 +119,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         );
         return;
       }
-      // Stamp the generated session_id (envelope metadata) and forward; the payload passes through untouched.
+      // Payload passes through opaque — the relay never reads it (E2E ciphertext in Phase 3).
       daemon.send(
         JSON.stringify(
           makeEnvelope({
@@ -218,6 +224,65 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         });
     });
 
+    /**
+     * The `hello` handshake: authenticate the peer (browser channel token / daemon device token),
+     * register it on its channel, and ack — or close 4001 on an auth failure. This is the connection
+     * authn/authz boundary.
+     */
+    async function handleHello(envelope: Envelope, channel: string): Promise<void> {
+      const hello = helloPayloadSchema.safeParse(envelope.payload);
+      if (!hello.success) {
+        log.warn({ channel }, 'relay: dropped hello with invalid payload');
+        return;
+      }
+      const { role, token } = hello.data;
+
+      // A browser must prove identity with a channel token whose subject is the envelope user — the
+      // boundary that stops a browser from acting as another user.
+      if (role === 'browser' && authService) {
+        const tokenUserId = token ? await authService.verifyChannelToken(token) : null;
+        if (tokenUserId === null || tokenUserId !== envelope.user_id) {
+          log.warn({ channel }, 'relay: rejected browser hello (invalid channel token)');
+          socket.close(4001, 'unauthorized');
+          return;
+        }
+      }
+
+      // A daemon must present its device token; the resolved device must match the envelope's
+      // (user_id, device_id) and not be revoked. This is the laptop-side execution boundary.
+      if (role === 'daemon' && deviceRegistry) {
+        const device = token
+          ? await deviceRegistry.findActiveByTokenHash(hashDeviceToken(token))
+          : null;
+        if (!device || device.userId !== envelope.user_id || device.id !== envelope.device_id) {
+          log.warn({ channel }, 'relay: rejected daemon hello (invalid device token)');
+          socket.close(4001, 'unauthorized');
+          return;
+        }
+      }
+
+      peer.role = role;
+      peer.channel = channel;
+      if (role === 'daemon') {
+        daemons.set(channel, socket);
+      } else {
+        const set = browsers.get(channel) ?? new Set<WebSocket>();
+        set.add(socket);
+        browsers.set(channel, set);
+      }
+      log.info({ channel, role }, 'relay: peer registered');
+      socket.send(
+        JSON.stringify(
+          makeEnvelope({
+            type: 'hello.ack',
+            userId: envelope.user_id,
+            deviceId: envelope.device_id,
+            payload: {},
+          }),
+        ),
+      );
+    }
+
     async function handleFrame(raw: Buffer): Promise<void> {
       const text = raw.toString();
       let envelope: Envelope;
@@ -231,61 +296,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       const channel = channelKey(envelope.user_id, envelope.device_id);
 
       if (envelope.type === 'hello') {
-        const hello = helloPayloadSchema.safeParse(envelope.payload);
-        if (!hello.success) {
-          log.warn({ channel }, 'relay: dropped hello with invalid payload');
-          return;
-        }
-        const { role, token } = hello.data;
-
-        // A browser must prove identity with a channel token whose subject is the envelope user.
-        // This is the boundary that stops a browser from acting as another user.
-        if (role === 'browser' && authService) {
-          const tokenUserId = token ? await authService.verifyChannelToken(token) : null;
-          if (tokenUserId === null || tokenUserId !== envelope.user_id) {
-            log.warn({ channel }, 'relay: rejected browser hello (invalid channel token)');
-            socket.close(4001, 'unauthorized');
-            return;
-          }
-        }
-
-        // A daemon must present its device token; the resolved device must match the envelope's
-        // (user_id, device_id) and not be revoked. This is the laptop-side execution boundary.
-        if (role === 'daemon' && deviceRegistry) {
-          const device = token
-            ? await deviceRegistry.findActiveByTokenHash(hashDeviceToken(token))
-            : null;
-          if (!device || device.userId !== envelope.user_id || device.id !== envelope.device_id) {
-            log.warn({ channel }, 'relay: rejected daemon hello (invalid device token)');
-            socket.close(4001, 'unauthorized');
-            return;
-          }
-        }
-
-        peer.role = role;
-        peer.channel = channel;
-        if (role === 'daemon') {
-          daemons.set(channel, socket);
-        } else {
-          const set = browsers.get(channel) ?? new Set<WebSocket>();
-          set.add(socket);
-          browsers.set(channel, set);
-        }
-        log.info({ channel, role }, 'relay: peer registered');
-        socket.send(
-          JSON.stringify(
-            makeEnvelope({
-              type: 'hello.ack',
-              userId: envelope.user_id,
-              deviceId: envelope.device_id,
-              payload: {},
-            }),
-          ),
-        );
-        return;
-      }
-
-      if (peer.role === 'browser') {
+        await handleHello(envelope, channel);
+      } else if (peer.role === 'browser') {
         await routeFromBrowser(envelope, channel, text);
       } else if (peer.role === 'daemon') {
         await routeFromDaemon(envelope, channel, text);

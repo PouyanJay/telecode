@@ -1,3 +1,4 @@
+import { SESSION_STATUSES } from '@telecode/protocol';
 import { index, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
 
 /**
@@ -53,16 +54,6 @@ export const devices = pgTable(
     userIdx: index('devices_user_id_idx').on(t.userId),
   }),
 );
-
-/** The lifecycle states a session moves through; mirrors the `session.status` wire values. */
-export const SESSION_STATUSES = [
-  'starting',
-  'running',
-  'awaiting_input',
-  'done',
-  'error',
-  'offline_paused',
-] as const;
 
 /** Agent sessions (the plan's "session registry") — one row per launched Claude Code session. */
 export const sessions = pgTable(

@@ -59,7 +59,8 @@ CREATE INDEX "sessions_device_id_idx" ON "sessions" USING btree ("device_id");--
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'telecode_app') THEN
-    CREATE ROLE telecode_app NOLOGIN;
+    -- NOINHERIT: privileges are used only via explicit `SET LOCAL ROLE telecode_app`, never inherited.
+    CREATE ROLE telecode_app NOLOGIN NOINHERIT;
   END IF;
   -- Let the relay's login role assume telecode_app via SET ROLE. The Supabase `postgres` role
   -- has BYPASSRLS but is NOT a superuser, so it needs explicit membership; on a plain Postgres

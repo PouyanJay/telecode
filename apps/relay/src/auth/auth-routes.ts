@@ -1,8 +1,7 @@
-import { timingSafeEqual } from 'node:crypto';
-
 import type { FastifyInstance } from 'fastify';
 
 import { bearerToken } from './bearer';
+import { constantTimeEquals } from './secret-compare';
 import { type AuthService, providerIdentitySchema } from './auth-service';
 
 /**
@@ -13,12 +12,6 @@ import { type AuthService, providerIdentitySchema } from './auth-service';
  */
 export interface AuthRoutesOptions {
   readonly serviceSecret: string;
-}
-
-function constantTimeEquals(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 export function registerAuthRoutes(
