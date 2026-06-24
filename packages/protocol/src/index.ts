@@ -25,3 +25,10 @@ export type { KeyPair, SealedMessage } from './crypto';
 
 export { deviceCodeResponseSchema, pollResultSchema } from './device-auth';
 export type { DeviceCodeResponse, PollResult } from './device-auth';
+
+export {
+  permissionModeSchema,
+  sessionLaunchPayloadSchema,
+  sessionStartedPayloadSchema,
+} from './session';
+export type { PermissionModeName, SessionLaunchPayload, SessionStartedPayload } from './session';

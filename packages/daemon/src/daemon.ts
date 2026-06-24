@@ -1,7 +1,13 @@
 import { pino, type Logger } from 'pino';
 import WebSocket from 'ws';
 
-import { echoPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
+import {
+  echoPayloadSchema,
+  makeEnvelope,
+  parseEnvelope,
+  sessionLaunchPayloadSchema,
+  type Envelope,
+} from '@telecode/protocol';
 
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
@@ -58,6 +64,34 @@ export function createDaemon(options: DaemonOptions): Daemon {
               deviceId: envelope.device_id,
               ...(envelope.session_id !== undefined ? { sessionId: envelope.session_id } : {}),
               payload: { text },
+            }),
+          ),
+        );
+        return;
+      }
+      case 'session.launch': {
+        const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
+        if (!launch.success) {
+          log.warn(
+            { device: options.deviceId },
+            'daemon: dropped session.launch with invalid payload',
+          );
+          return;
+        }
+        log.info(
+          { device: options.deviceId, sessionId: envelope.session_id },
+          'daemon: session launch received',
+        );
+        // Phase 1 walking skeleton: acknowledge the session started. The real Agent SDK run that
+        // streams agent.message / agent.tool_use lands in a later task.
+        socket?.send(
+          JSON.stringify(
+            makeEnvelope({
+              type: 'session.started',
+              userId: envelope.user_id,
+              deviceId: envelope.device_id,
+              ...(envelope.session_id !== undefined ? { sessionId: envelope.session_id } : {}),
+              payload: {},
             }),
           ),
         );

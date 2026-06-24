@@ -6,6 +6,7 @@ import type { WebSocket } from 'ws';
 import { helloPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
 
 import { createDeviceAuthService, registerDeviceAuthRoutes } from './device-auth';
+import { type SessionRegistry } from './registry/session-registry';
 
 /**
  * The relay / control plane. Both the daemon and the browser dial *out* to it (loopback in
@@ -17,6 +18,11 @@ export interface RelayOptions {
   readonly logger?: Logger;
   /** Where users go to enter the device code (shown by the daemon during pairing). */
   readonly verificationUri?: string;
+  /**
+   * Session registry (Postgres-backed). When provided, the relay persists a row on `session.launch`
+   * and flips it to `running` on `session.started`. Optional so the Phase 0 echo path needs no DB.
+   */
+  readonly sessionRegistry?: SessionRegistry;
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -35,6 +41,66 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // One daemon per channel; any number of browsers watching a channel.
   const daemons = new Map<string, WebSocket>();
   const browsers = new Map<string, Set<WebSocket>>();
+  const sessionRegistry = options.sessionRegistry;
+
+  function broadcastToBrowsers(channel: string, frame: string): void {
+    const set = browsers.get(channel);
+    if (!set) return;
+    for (const browser of set) {
+      browser.send(frame);
+    }
+  }
+
+  async function routeFromBrowser(
+    envelope: Envelope,
+    channel: string,
+    text: string,
+  ): Promise<void> {
+    const daemon = daemons.get(channel);
+    if (envelope.type === 'session.launch' && sessionRegistry) {
+      // The relay owns the session registry: mint the row (and its id) from envelope metadata, never
+      // from the payload (which is opaque here and ciphertext in Phase 3).
+      const sessionId = await sessionRegistry.createSession({
+        userId: envelope.user_id,
+        deviceId: envelope.device_id,
+      });
+      log.info({ channel, sessionId }, 'relay: session launching');
+      if (!daemon) {
+        log.warn({ channel, sessionId }, 'relay: no daemon registered for channel');
+        return;
+      }
+      // Stamp the generated session_id (envelope metadata) and forward; the payload passes through untouched.
+      daemon.send(
+        JSON.stringify(
+          makeEnvelope({
+            type: 'session.launch',
+            userId: envelope.user_id,
+            deviceId: envelope.device_id,
+            sessionId,
+            payload: envelope.payload,
+            nonce: envelope.nonce,
+          }),
+        ),
+      );
+      return;
+    }
+    if (daemon) {
+      daemon.send(text);
+    } else {
+      log.warn({ channel }, 'relay: no daemon registered for channel');
+    }
+  }
+
+  async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
+    if (envelope.type === 'session.started' && sessionRegistry && envelope.session_id) {
+      await sessionRegistry.markRunning({
+        userId: envelope.user_id,
+        sessionId: envelope.session_id,
+      });
+      log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
+    }
+    broadcastToBrowsers(channel, text);
+  }
 
   await app.register(websocket);
 
@@ -50,6 +116,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     const peer: PeerState = { role: 'unknown', channel: null };
 
     socket.on('message', (raw: Buffer) => {
+      // The handler awaits DB writes for session.* control messages, so it runs async; failures are
+      // contained per-frame (logged, never an unhandled rejection that would crash the relay).
+      void handleFrame(raw).catch((err: unknown) => {
+        log.error({ err, channel: peer.channel }, 'relay: frame handling failed');
+      });
+    });
+
+    async function handleFrame(raw: Buffer): Promise<void> {
       const text = raw.toString();
       let envelope: Envelope;
       try {
@@ -91,23 +165,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         return;
       }
 
-      // Route by role — forward the raw frame; the relay never re-encodes the payload.
       if (peer.role === 'browser') {
-        const daemon = daemons.get(channel);
-        if (daemon) {
-          daemon.send(text);
-        } else {
-          log.warn({ channel }, 'relay: no daemon registered for channel');
-        }
+        await routeFromBrowser(envelope, channel, text);
       } else if (peer.role === 'daemon') {
-        const set = browsers.get(channel);
-        if (set) {
-          for (const browser of set) {
-            browser.send(text);
-          }
-        }
+        await routeFromDaemon(envelope, channel, text);
       }
-    });
+    }
 
     socket.on('close', () => {
       if (peer.channel === null) {
