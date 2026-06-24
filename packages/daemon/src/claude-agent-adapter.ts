@@ -6,7 +6,12 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { pino, type Logger } from 'pino';
 
-import type { AgentAdapter, AgentRunResult, CanUseTool, PermissionRequest } from './agent-adapter';
+import type {
+  AgentAdapter,
+  AgentRunOptions,
+  AgentRunResult,
+  PermissionRequest,
+} from './agent-adapter';
 
 /**
  * The real {@link AgentAdapter} backed by the Claude Agent SDK. Maps the SDK's `canUseTool` callback
@@ -31,7 +36,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
   const log = options.logger ?? pino({ name: 'claude-agent-adapter' });
 
   return {
-    async run(prompt: string, canUseTool: CanUseTool): Promise<AgentRunResult> {
+    async run(prompt: string, { canUseTool, onEvent }: AgentRunOptions): Promise<AgentRunResult> {
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
       const denied: string[] = [];
@@ -64,7 +69,21 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
       });
 
       for await (const message of session) {
-        // Drive the session to completion; canUseTool above records every interception.
+        // Map SDK assistant messages onto our streamed event contract. canUseTool above records
+        // every interception; tool_use blocks here are the (allowed) tools the agent actually ran.
+        if (message.type === 'assistant') {
+          for (const block of message.message.content) {
+            if (block.type === 'text') {
+              onEvent({ type: 'message', text: block.text });
+            } else if (block.type === 'tool_use') {
+              onEvent({
+                type: 'tool_use',
+                toolName: block.name,
+                input: block.input as Record<string, unknown>,
+              });
+            }
+          }
+        }
         log.debug({ type: message.type }, 'agent message');
       }
 

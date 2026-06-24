@@ -3,7 +3,13 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { pino, type Logger } from 'pino';
 import type { WebSocket } from 'ws';
 
-import { helloPayloadSchema, makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
+import {
+  helloPayloadSchema,
+  makeEnvelope,
+  parseEnvelope,
+  sessionEndedPayloadSchema,
+  type Envelope,
+} from '@telecode/protocol';
 
 import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
@@ -110,12 +116,23 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
-    if (envelope.type === 'session.started' && sessionRegistry && envelope.session_id) {
-      await sessionRegistry.markRunning({
-        userId: envelope.user_id,
-        sessionId: envelope.session_id,
-      });
-      log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
+    if (sessionRegistry && envelope.session_id) {
+      if (envelope.type === 'session.started') {
+        await sessionRegistry.markRunning({
+          userId: envelope.user_id,
+          sessionId: envelope.session_id,
+        });
+        log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
+      } else if (envelope.type === 'session.ended') {
+        const ended = sessionEndedPayloadSchema.safeParse(envelope.payload);
+        const status = ended.success ? ended.data.status : 'done';
+        await sessionRegistry.markEnded({
+          userId: envelope.user_id,
+          sessionId: envelope.session_id,
+          status,
+        });
+        log.info({ channel, sessionId: envelope.session_id, status }, 'relay: session ended');
+      }
     }
     broadcastToBrowsers(channel, text);
   }
@@ -142,12 +159,17 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   app.get('/ws', { websocket: true }, (socket: WebSocket) => {
     const peer: PeerState = { role: 'unknown', channel: null };
 
+    // Frame handling is async (session.* control messages await DB writes), so we chain frames into a
+    // per-connection queue: each frame is fully handled before the next, preserving stream order (a
+    // later agent.message must never overtake the session.started that awaited a DB write). Failures
+    // are contained per-frame — never an unhandled rejection that would crash the relay.
+    let processing: Promise<void> = Promise.resolve();
     socket.on('message', (raw: Buffer) => {
-      // The handler awaits DB writes for session.* control messages, so it runs async; failures are
-      // contained per-frame (logged, never an unhandled rejection that would crash the relay).
-      void handleFrame(raw).catch((err: unknown) => {
-        log.error({ err, channel: peer.channel }, 'relay: frame handling failed');
-      });
+      processing = processing
+        .then(() => handleFrame(raw))
+        .catch((err: unknown) => {
+          log.error({ err, channel: peer.channel }, 'relay: frame handling failed');
+        });
     });
 
     async function handleFrame(raw: Buffer): Promise<void> {

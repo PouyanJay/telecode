@@ -36,12 +36,15 @@ async function main(): Promise<void> {
 
   const result = await adapter.run(
     'Use the Write tool to create a file ./telecode-spike-test.txt containing the word telecode. Do nothing else.',
-    async (request) => {
-      log.info(
-        { tool: request.toolName, input: request.input },
-        'canUseTool intercepted a tool request — DENYING to prove interception',
-      );
-      return { behavior: 'deny', message: 'Spike 1: denied by canUseTool.' };
+    {
+      canUseTool: async (request) => {
+        log.info(
+          { tool: request.toolName, input: request.input },
+          'canUseTool intercepted a tool request — DENYING to prove interception',
+        );
+        return { behavior: 'deny', message: 'Spike 1: denied by canUseTool.' };
+      },
+      onEvent: (event) => log.info({ event }, 'agent event'),
     },
   );
 

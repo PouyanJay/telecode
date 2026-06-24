@@ -3,9 +3,11 @@
  * the Claude Agent SDK is used behind this one interface (never CLI scraping), so SDK churn touches
  * a single file and a future adapter for another coding agent slots in cleanly.
  *
- * The load-bearing piece is `canUseTool`: every tool the agent wants to run is routed through it for
- * an allow/deny decision. In the product the daemon forwards that request to the browser (the
- * human-in-the-loop gate) and returns the human's decision; here the contract is defined and proven.
+ * Two load-bearing pieces:
+ *  - `canUseTool`: every tool the agent wants to run is routed through it for an allow/deny decision.
+ *    In the product the daemon forwards that request to the browser (the human-in-the-loop gate).
+ *  - `onEvent`: streamed agent activity (assistant text, tool calls) the daemon relays up to the web
+ *    as it happens. Streaming is telecode's default, not an edge case.
  */
 
 export interface PermissionRequest {
@@ -19,6 +21,20 @@ export type PermissionDecision =
 
 export type CanUseTool = (request: PermissionRequest) => Promise<PermissionDecision>;
 
+/** A streamed unit of agent activity. */
+export type AgentEvent =
+  | { readonly type: 'message'; readonly text: string }
+  | {
+      readonly type: 'tool_use';
+      readonly toolName: string;
+      readonly input: Record<string, unknown>;
+    };
+
+export interface AgentRunOptions {
+  readonly canUseTool: CanUseTool;
+  readonly onEvent: (event: AgentEvent) => void;
+}
+
 export interface AgentRunResult {
   /** Every tool request that passed through `canUseTool`, in order. */
   readonly intercepted: PermissionRequest[];
@@ -27,26 +43,37 @@ export interface AgentRunResult {
 }
 
 export interface AgentAdapter {
-  run(prompt: string, canUseTool: CanUseTool): Promise<AgentRunResult>;
+  run(prompt: string, options: AgentRunOptions): Promise<AgentRunResult>;
 }
 
 /**
- * Deterministic adapter for tests/CI: replays a fixed list of tool requests through `canUseTool`,
- * with no model call. Proves the interception + allow/deny contract the real adapter must honor.
+ * Deterministic adapter for tests/CI: replays a fixed script of events, with no model call. Messages
+ * stream straight through `onEvent`; tool_use events are gated through `canUseTool` first and only
+ * streamed when allowed — proving both the streaming and the allow/deny contracts the real adapter honors.
  */
-export function createFakeAgentAdapter(toolRequests: PermissionRequest[]): AgentAdapter {
+export function createFakeAgentAdapter(events: AgentEvent[]): AgentAdapter {
   return {
-    async run(_prompt: string, canUseTool: CanUseTool): Promise<AgentRunResult> {
+    async run(_prompt: string, { canUseTool, onEvent }: AgentRunOptions): Promise<AgentRunResult> {
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
       const denied: string[] = [];
-      for (const request of toolRequests) {
+      for (const event of events) {
+        if (event.type === 'message') {
+          onEvent(event);
+          continue;
+        }
+        const request: PermissionRequest = { toolName: event.toolName, input: event.input };
         intercepted.push(request);
         const decision = await canUseTool(request);
         if (decision.behavior === 'allow') {
-          allowed.push(request.toolName);
+          allowed.push(event.toolName);
+          onEvent({
+            type: 'tool_use',
+            toolName: event.toolName,
+            input: decision.updatedInput ?? event.input,
+          });
         } else {
-          denied.push(request.toolName);
+          denied.push(event.toolName);
         }
       }
       return { intercepted, allowed, denied };

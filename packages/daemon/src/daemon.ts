@@ -7,13 +7,18 @@ import {
   parseEnvelope,
   sessionLaunchPayloadSchema,
   type Envelope,
+  type MessageType,
 } from '@telecode/protocol';
+
+import { type AgentAdapter, type PermissionDecision } from './agent-adapter';
+import { createClaudeAgentAdapter } from './claude-agent-adapter';
 
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
  * reaches in), announces itself for `(userId, deviceId)`, and supervises work for that
- * device. Phase 0 only answers `echo` to prove the outbound-relay path end-to-end; the
- * Claude Agent SDK adapter lands in a later task.
+ * device. On `session.launch` it runs an {@link AgentAdapter} session and streams `agent.message`
+ * / `agent.tool_use` up, then `session.ended`. The permission gate (forwarding `canUseTool` to the
+ * browser) lands in the next task; here every tool is auto-allowed.
  */
 export interface DaemonOptions {
   readonly relayUrl: string;
@@ -21,6 +26,8 @@ export interface DaemonOptions {
   readonly deviceId: string;
   /** Device token presented on `hello`; the relay verifies it when device auth is configured. */
   readonly deviceToken?: string;
+  /** Agent runtime. Defaults to the real Claude Agent SDK adapter; tests inject a fake. */
+  readonly agentAdapter?: AgentAdapter;
   readonly logger?: Logger;
 }
 
@@ -33,7 +40,65 @@ export interface Daemon {
 
 export function createDaemon(options: DaemonOptions): Daemon {
   const log = options.logger ?? pino({ name: 'daemon' });
+  const agentAdapter = options.agentAdapter ?? createClaudeAgentAdapter({ logger: log });
   let socket: WebSocket | null = null;
+
+  /** Send an envelope on the daemon's channel, carrying the session id when present. */
+  function sendForSession(source: Envelope, type: MessageType, payload: unknown): void {
+    socket?.send(
+      JSON.stringify(
+        makeEnvelope({
+          type,
+          userId: source.user_id,
+          deviceId: source.device_id,
+          ...(source.session_id !== undefined ? { sessionId: source.session_id } : {}),
+          payload,
+        }),
+      ),
+    );
+  }
+
+  /** Run an agent session for a `session.launch` and stream its activity up to the web. */
+  async function runSession(envelope: Envelope): Promise<void> {
+    const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
+    if (!launch.success) {
+      log.warn({ device: options.deviceId }, 'daemon: dropped session.launch with invalid payload');
+      return;
+    }
+    log.info(
+      { device: options.deviceId, sessionId: envelope.session_id },
+      'daemon: session launch received',
+    );
+    sendForSession(envelope, 'session.started', {});
+
+    try {
+      await agentAdapter.run(launch.data.prompt, {
+        // Task 6 forwards this to the browser; for now every tool is auto-allowed.
+        canUseTool: async (): Promise<PermissionDecision> => ({ behavior: 'allow' }),
+        onEvent: (event) => {
+          if (event.type === 'message') {
+            sendForSession(envelope, 'agent.message', { text: event.text });
+          } else {
+            sendForSession(envelope, 'agent.tool_use', {
+              toolName: event.toolName,
+              input: event.input,
+            });
+          }
+        },
+      });
+      log.info(
+        { device: options.deviceId, sessionId: envelope.session_id },
+        'daemon: session ended',
+      );
+      sendForSession(envelope, 'session.ended', { status: 'done' });
+    } catch (err) {
+      log.error({ err, sessionId: envelope.session_id }, 'daemon: session run failed');
+      sendForSession(envelope, 'session.ended', {
+        status: 'error',
+        error: err instanceof Error ? err.message : 'unknown error',
+      });
+    }
+  }
 
   function handleMessage(raw: Buffer, onReady: () => void): void {
     let envelope: Envelope;
@@ -72,31 +137,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         return;
       }
       case 'session.launch': {
-        const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
-        if (!launch.success) {
-          log.warn(
-            { device: options.deviceId },
-            'daemon: dropped session.launch with invalid payload',
-          );
-          return;
-        }
-        log.info(
-          { device: options.deviceId, sessionId: envelope.session_id },
-          'daemon: session launch received',
-        );
-        // Phase 1 walking skeleton: acknowledge the session started. The real Agent SDK run that
-        // streams agent.message / agent.tool_use lands in a later task.
-        socket?.send(
-          JSON.stringify(
-            makeEnvelope({
-              type: 'session.started',
-              userId: envelope.user_id,
-              deviceId: envelope.device_id,
-              ...(envelope.session_id !== undefined ? { sessionId: envelope.session_id } : {}),
-              payload: {},
-            }),
-          ),
-        );
+        void runSession(envelope);
         return;
       }
       default:

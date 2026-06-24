@@ -15,6 +15,8 @@ export interface SessionRegistry {
   createSession(input: { userId: string; deviceId: string }): Promise<string>;
   /** Flip a session to `running` once the daemon reports it started. No-op if the row isn't the user's. */
   markRunning(input: { userId: string; sessionId: string }): Promise<void>;
+  /** Mark a session terminal (`done`/`error`) with an end timestamp. No-op if the row isn't the user's. */
+  markEnded(input: { userId: string; sessionId: string; status: 'done' | 'error' }): Promise<void>;
 }
 
 export function createSessionRegistry(db: DbHandle): SessionRegistry {
@@ -37,6 +39,16 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
         await scoped
           .update(sessions)
           .set({ status: 'running', updatedAt: new Date() })
+          .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
+      });
+    },
+
+    async markEnded({ userId, sessionId, status }): Promise<void> {
+      const now = new Date();
+      await withUserContext(db, userId, async (scoped) => {
+        await scoped
+          .update(sessions)
+          .set({ status, endedAt: now, updatedAt: now })
           .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
       });
     },

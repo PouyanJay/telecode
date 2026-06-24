@@ -10,6 +10,8 @@ export type { StoredCredentials } from './credentials';
 export { createFakeAgentAdapter } from './agent-adapter';
 export type {
   AgentAdapter,
+  AgentEvent,
+  AgentRunOptions,
   AgentRunResult,
   CanUseTool,
   PermissionDecision,

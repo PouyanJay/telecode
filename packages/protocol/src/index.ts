@@ -30,5 +30,20 @@ export {
   permissionModeSchema,
   sessionLaunchPayloadSchema,
   sessionStartedPayloadSchema,
+  SESSION_STATUSES,
+  sessionStatusSchema,
+  agentMessagePayloadSchema,
+  agentToolUsePayloadSchema,
+  sessionEndedPayloadSchema,
+  sessionStatusPayloadSchema,
 } from './session';
-export type { PermissionModeName, SessionLaunchPayload, SessionStartedPayload } from './session';
+export type {
+  PermissionModeName,
+  SessionLaunchPayload,
+  SessionStartedPayload,
+  SessionStatusName,
+  AgentMessagePayload,
+  AgentToolUsePayload,
+  SessionEndedPayload,
+  SessionStatusPayload,
+} from './session';
