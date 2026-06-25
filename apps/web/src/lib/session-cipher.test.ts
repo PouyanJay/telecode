@@ -102,6 +102,28 @@ describe('browser session cipher', () => {
     expect(await cipher.tryDecrypt(frame)).toEqual({ decrypted: false });
   });
 
+  it('throws on a tampered encrypted frame instead of passing it through as cleartext', async () => {
+    const daemon = await generateKeyPair();
+    const cipher = createBrowserSessionCipher(encodeKey(daemon.publicKey));
+    const browserPublicKey = await cipher.publicKey();
+    const contentKey = generateContentKey();
+    const wrapped = await wrapContentKey(
+      contentKey,
+      decodeKey(browserPublicKey!),
+      daemon.privateKey,
+    );
+    await cipher.receiveKey(sessionEnvelope('session.key', wrapped));
+
+    // A bit-flipped ciphertext (string payload + nonce + a known key) must fail authentication, not be
+    // mistaken for a cleartext frame and surfaced raw to the UI.
+    const sealed = await encryptWithContentKey({ text: 'secret' }, contentKey);
+    const tampered = sessionEnvelope('agent.message', {
+      payload: `${sealed.payload[0] === 'A' ? 'B' : 'A'}${sealed.payload.slice(1)}`,
+      nonce: sealed.nonce,
+    });
+    await expect(cipher.tryDecrypt(tampered)).rejects.toThrow();
+  });
+
   it('is disabled when there is no daemon public key (pre-E2E device)', async () => {
     const cipher = createBrowserSessionCipher(null);
     expect(cipher.enabled).toBe(false);
