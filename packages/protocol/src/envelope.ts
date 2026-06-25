@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { sessionStatusSchema, type SessionStatusName } from './session';
+import { base64KeySchema, sessionStatusSchema, type SessionStatusName } from './session';
 
 /**
  * Wire protocol version. Bump on any breaking change to the envelope or message union.
@@ -68,7 +68,7 @@ export const envelopeSchema = z.object({
   type: messageTypeSchema,
   nonce: z.string(),
   status: sessionStatusSchema.optional(),
-  sender_public_key: z.string().min(1).optional(),
+  sender_public_key: base64KeySchema.optional(),
   payload: z.unknown(),
 });
 

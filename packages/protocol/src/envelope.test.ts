@@ -87,8 +87,11 @@ describe('makeEnvelope', () => {
   });
 });
 
+// A well-formed base64 32-byte key (43 base64 chars + one `=` pad) — the shape encodeKey() produces.
+const VALID_KEY = `${'A'.repeat(43)}=`;
+
 describe('envelope E2E routing-metadata fields (Phase 3)', () => {
-  it('accepts an optional cleartext status the relay reads without decrypting', () => {
+  it('accepts an optional cleartext status field (routing metadata for the relay)', () => {
     const env = parseEnvelope({ ...validWire, type: 'session.ended', status: 'done' });
     expect(env.status).toBe('done');
   });
@@ -97,9 +100,18 @@ describe('envelope E2E routing-metadata fields (Phase 3)', () => {
     expect(safeParseEnvelope({ ...validWire, status: 'nonsense' }).success).toBe(false);
   });
 
-  it('accepts an optional sender_public_key (base64 ephemeral key)', () => {
-    const env = parseEnvelope({ ...validWire, sender_public_key: 'cHVia2V5' });
-    expect(env.sender_public_key).toBe('cHVia2V5');
+  it('accepts an optional sender_public_key (base64 32-byte ephemeral key)', () => {
+    const env = parseEnvelope({ ...validWire, sender_public_key: VALID_KEY });
+    expect(env.sender_public_key).toBe(VALID_KEY);
+  });
+
+  it('rejects a sender_public_key that is not a base64 32-byte key', () => {
+    for (const bad of ['', 'cHVia2V5', `${'A'.repeat(44)}`, `${'!'.repeat(43)}=`]) {
+      expect(
+        safeParseEnvelope({ ...validWire, sender_public_key: bad }).success,
+        `${JSON.stringify(bad)} must be rejected`,
+      ).toBe(false);
+    }
   });
 
   it('treats status and sender_public_key as absent by default', () => {
@@ -121,11 +133,11 @@ describe('makeEnvelope routing-metadata fields', () => {
       deviceId: 'd',
       sessionId: 's',
       status: 'error',
-      senderPublicKey: 'cHVia2V5',
+      senderPublicKey: VALID_KEY,
       payload: 'ciphertext',
     });
     expect(env.status).toBe('error');
-    expect(env.sender_public_key).toBe('cHVia2V5');
+    expect(env.sender_public_key).toBe(VALID_KEY);
   });
 
   it('omits status and sender_public_key keys when not provided', () => {

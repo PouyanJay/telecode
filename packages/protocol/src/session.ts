@@ -7,6 +7,18 @@ import { z } from 'zod';
  * live together here by design.
  */
 
+/**
+ * A 32-byte key (X25519 public key or symmetric content key) as standard base64 — the wire/storage shape
+ * produced by `encodeKey`. 32 bytes encode to exactly 44 base64 characters (43 data chars + one `=` pad).
+ * Validating here, at the trust boundary, rejects malformed key material before it reaches `decodeKey`
+ * (where a non-base64 string would otherwise throw a cryptic `atob` error deep in the crypto path).
+ */
+export const base64KeySchema = z
+  .string()
+  .length(44)
+  .regex(/^[A-Za-z0-9+/]{43}=$/, 'must be a base64-encoded 32-byte key');
+export type Base64Key = z.infer<typeof base64KeySchema>;
+
 /** The Agent SDK permission modes, surfaced on the wire. Default is the conservative `default`. */
 export const permissionModeSchema = z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']);
 export type PermissionModeName = z.infer<typeof permissionModeSchema>;
@@ -106,7 +118,7 @@ export type SessionStatusPayload = z.infer<typeof sessionStatusPayloadSchema>;
  * exception), so only that browser can open it; once unwrapped, every other session payload is encrypted
  * with this key. The relay never sees it — it forwards the sealed envelope verbatim.
  */
-export const sessionKeyPayloadSchema = z.object({ key: z.string().min(1) });
+export const sessionKeyPayloadSchema = z.object({ key: base64KeySchema });
 export type SessionKeyPayload = z.infer<typeof sessionKeyPayloadSchema>;
 
 /**

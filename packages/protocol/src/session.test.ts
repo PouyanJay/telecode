@@ -219,12 +219,17 @@ describe('sessionHistoryPayloadSchema', () => {
 });
 
 describe('sessionKeyPayloadSchema', () => {
-  it('validates the wrapped per-session content key', () => {
-    expect(sessionKeyPayloadSchema.parse({ key: 'YmFzZTY0a2V5' }).key).toBe('YmFzZTY0a2V5');
+  // A well-formed base64 32-byte content key (43 base64 chars + one `=` pad).
+  const VALID_KEY = `${'A'.repeat(43)}=`;
+
+  it('validates the wrapped per-session content key (base64 32-byte key)', () => {
+    expect(sessionKeyPayloadSchema.parse({ key: VALID_KEY }).key).toBe(VALID_KEY);
   });
 
-  it('rejects an empty key', () => {
-    expect(sessionKeyPayloadSchema.safeParse({ key: '' }).success).toBe(false);
+  it('rejects a key that is not a base64 32-byte key', () => {
+    for (const bad of ['', 'YmFzZTY0a2V5', `${'A'.repeat(44)}`]) {
+      expect(sessionKeyPayloadSchema.safeParse({ key: bad }).success).toBe(false);
+    }
   });
 
   it('rejects a missing key', () => {

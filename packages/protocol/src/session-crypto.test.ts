@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { generateKeyPair } from './crypto';
+import { ProtocolError } from './errors';
 import {
   decryptWithContentKey,
   encryptWithContentKey,
@@ -25,16 +26,32 @@ describe('per-session content key', () => {
     expect(await decryptWithContentKey(sealed, key)).toEqual({ text: 'streamed agent output' });
   });
 
+  it('uses a fresh nonce per encryption (same payload + key → different ciphertext)', async () => {
+    const key = generateContentKey();
+    const a = await encryptWithContentKey({ text: 'payload' }, key);
+    const b = await encryptWithContentKey({ text: 'payload' }, key);
+    expect(a.nonce).not.toBe(b.nonce);
+    expect(a.payload).not.toBe(b.payload);
+  });
+
   it('rejects a tampered ciphertext', async () => {
     const key = generateContentKey();
     const sealed = await encryptWithContentKey({ secret: 42 }, key);
     const tampered = { ...sealed, payload: `${sealed.payload.slice(0, -2)}AA` };
-    await expect(decryptWithContentKey(tampered, key)).rejects.toThrow();
+    await expect(decryptWithContentKey(tampered, key)).rejects.toBeInstanceOf(ProtocolError);
   });
 
   it('rejects decryption under a different content key', async () => {
     const sealed = await encryptWithContentKey({ secret: 'x' }, generateContentKey());
-    await expect(decryptWithContentKey(sealed, generateContentKey())).rejects.toThrow();
+    await expect(decryptWithContentKey(sealed, generateContentKey())).rejects.toBeInstanceOf(
+      ProtocolError,
+    );
+  });
+
+  it('rejects a non-ciphertext payload before decrypting', async () => {
+    await expect(
+      decryptWithContentKey({ payload: { not: 'ciphertext' }, nonce: '' }, generateContentKey()),
+    ).rejects.toBeInstanceOf(ProtocolError);
   });
 
   it('wraps to a browser pubkey and the browser unwraps the same key', async () => {
@@ -56,12 +73,14 @@ describe('per-session content key', () => {
     // The daemon wraps the same content key to each tab's pubkey (one wrap per subscriber)...
     const forA = await wrapContentKey(key, tabA.publicKey, daemon.privateKey);
     const forB = await wrapContentKey(key, tabB.publicKey, daemon.privateKey);
-    expect(await unwrapContentKey(forA, daemon.publicKey, tabA.privateKey)).toBe(key);
-    expect(await unwrapContentKey(forB, daemon.publicKey, tabB.privateKey)).toBe(key);
 
-    // ...then encrypts ONE payload that the relay broadcasts to both. Each tab decrypts it.
+    // ...and encrypts ONE payload that the relay broadcasts to both. Each tab unwraps its own copy of
+    // the key and decrypts the shared frame with it — exactly the runtime flow, not the original key.
     const broadcast = await encryptWithContentKey({ text: 'fan-out frame' }, key);
-    expect(await decryptWithContentKey(broadcast, key)).toEqual({ text: 'fan-out frame' });
+    const keyAtTabA = await unwrapContentKey(forA, daemon.publicKey, tabA.privateKey);
+    const keyAtTabB = await unwrapContentKey(forB, daemon.publicKey, tabB.privateKey);
+    expect(await decryptWithContentKey(broadcast, keyAtTabA)).toEqual({ text: 'fan-out frame' });
+    expect(await decryptWithContentKey(broadcast, keyAtTabB)).toEqual({ text: 'fan-out frame' });
   });
 
   it('does not let a non-subscribed browser unwrap the key', async () => {

@@ -41,11 +41,12 @@ describe('E2E walking skeleton: the relay forwards only ciphertext', () => {
     await app?.close();
   });
 
-  it('seals both directions; no plaintext crosses the relay; both ends decrypt', async () => {
+  it('browser seals → relay forwards only ciphertext to daemon → daemon decrypts', async () => {
     const daemon = await connectDaemon(relayUrl, userId, deviceId);
     const browser = await connectBrowser(relayUrl, userId, deviceId);
 
-    // A distinctive plaintext that must never appear in any frame the relay handles.
+    // A distinctive plaintext (spaces + dashes are outside the base64 alphabet, so it cannot appear
+    // verbatim inside any ciphertext) that must never cross the relay in the clear.
     const PROMPT = 'rm -rf / --no-preserve-root';
     const sealed = await sealEnvelopePayload(
       { text: PROMPT },
@@ -69,22 +70,29 @@ describe('E2E walking skeleton: the relay forwards only ciphertext', () => {
 
     // The relay forwards frames verbatim, so what the daemon received is exactly what the relay observed.
     expect(JSON.stringify(daemonFrame)).not.toContain(PROMPT);
-    expect(typeof daemonFrame.payload).toBe('string');
+    expect(daemonFrame.payload).toBe(sealed.payload); // forwarded ciphertext byte-for-byte, not re-encoded
     expect(daemonFrame.nonce).toBe(sealed.nonce);
-    const openedPrompt = await openEnvelopePayload(
-      daemonFrame,
-      browserKp.publicKey,
-      daemonKp.privateKey,
-    );
-    expect(openedPrompt).toEqual({ text: PROMPT });
+    expect(
+      await openEnvelopePayload(daemonFrame, browserKp.publicKey, daemonKp.privateKey),
+    ).toEqual({
+      text: PROMPT,
+    });
 
-    // Reverse direction: daemon → browser.
+    daemon.close();
+    browser.close();
+  });
+
+  it('daemon seals → relay forwards only ciphertext to browser → browser decrypts', async () => {
+    const daemon = await connectDaemon(relayUrl, userId, deviceId);
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+
     const REPLY = 'secret-agent-output-42';
     const sealedReply = await sealEnvelopePayload(
       { text: REPLY },
       browserKp.publicKey,
       daemonKp.privateKey,
     );
+
     const onBrowser = waitForEnvelope(browser, (e) => e.type === 'echo.reply');
     daemon.send(
       JSON.stringify(
@@ -100,12 +108,12 @@ describe('E2E walking skeleton: the relay forwards only ciphertext', () => {
     const browserFrame = await onBrowser;
 
     expect(JSON.stringify(browserFrame)).not.toContain(REPLY);
-    const openedReply = await openEnvelopePayload(
-      browserFrame,
-      daemonKp.publicKey,
-      browserKp.privateKey,
-    );
-    expect(openedReply).toEqual({ text: REPLY });
+    expect(browserFrame.payload).toBe(sealedReply.payload);
+    expect(
+      await openEnvelopePayload(browserFrame, daemonKp.publicKey, browserKp.privateKey),
+    ).toEqual({
+      text: REPLY,
+    });
 
     daemon.close();
     browser.close();

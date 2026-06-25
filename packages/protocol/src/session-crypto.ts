@@ -1,9 +1,12 @@
 import { decodeKey, encodeKey, generateSecretKey, openSecret, sealSecret } from './crypto';
 import {
   openEnvelopePayload,
+  parsePlaintext,
+  requireCiphertext,
   sealEnvelopePayload,
   type EncryptedEnvelopeFields,
 } from './envelope-crypto';
+import { ProtocolError } from './errors';
 import { sessionKeyPayloadSchema } from './session';
 
 /**
@@ -64,12 +67,14 @@ export async function decryptWithContentKey(
   envelope: { readonly payload?: unknown; readonly nonce: string },
   contentKey: string,
 ): Promise<unknown> {
-  if (typeof envelope.payload !== 'string') {
-    throw new Error('encrypted envelope payload must be a base64 ciphertext string');
+  const ciphertext = requireCiphertext(envelope);
+  let plaintext: string;
+  try {
+    plaintext = await openSecret({ ciphertext, nonce: envelope.nonce }, decodeKey(contentKey));
+  } catch (err) {
+    throw new ProtocolError('failed to decrypt payload under the session content key', {
+      cause: err,
+    });
   }
-  const plaintext = await openSecret(
-    { ciphertext: envelope.payload, nonce: envelope.nonce },
-    decodeKey(contentKey),
-  );
-  return JSON.parse(plaintext) as unknown;
+  return parsePlaintext(plaintext);
 }
