@@ -168,6 +168,9 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
               userId: envelope.user_id,
               deviceId: envelope.device_id,
               sessionId,
+              // Relay-generated control message: cleartext (the relay holds no session key), so the
+              // browser reads its outcome from the `status` field, not by decrypting the payload.
+              status: 'error',
               payload: { status: 'error', error: 'device offline' },
             }),
           ),
@@ -219,8 +222,15 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         });
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
       } else if (envelope.type === 'session.ended') {
-        const ended = sessionEndedPayloadSchema.safeParse(envelope.payload);
-        const status = ended.success ? ended.data.status : 'done';
+        // Prefer the cleartext `status` envelope field (E2E: the payload is ciphertext the relay can't
+        // read); fall back to the payload for cleartext-mode peers; default to `done`. Type-only routing.
+        const fromPayload = sessionEndedPayloadSchema.safeParse(envelope.payload);
+        const status =
+          envelope.status === 'done' || envelope.status === 'error'
+            ? envelope.status
+            : fromPayload.success
+              ? fromPayload.data.status
+              : 'done';
         await sessionRegistry.markEnded({
           userId: envelope.user_id,
           sessionId: envelope.session_id,
@@ -239,10 +249,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         pushAwaitingInput(envelope.user_id, envelope.session_id);
       } else if (envelope.type === 'session.status') {
         // A daemon status report (Task 9 pause/resume) — persist it so a reload/dashboard reflects it.
-        // Type-only routing: the relay never reads the agent payload, only the status it transitions to.
-        const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
-        if (parsed.success) {
-          const status = parsed.data.status;
+        // Prefer the cleartext `status` envelope field (E2E); fall back to the payload (cleartext mode).
+        // Routing metadata only: the relay never reads the agent payload, only the status it transitions to.
+        const fromPayload = sessionStatusPayloadSchema.safeParse(envelope.payload);
+        const status =
+          envelope.status ?? (fromPayload.success ? fromPayload.data.status : undefined);
+        if (status) {
           if (status === 'paused' || status === 'running' || status === 'awaiting_input') {
             await sessionRegistry.markStatus({
               userId: envelope.user_id,
