@@ -33,6 +33,9 @@ export {
 } from './crypto';
 export type { KeyPair, SealedMessage } from './crypto';
 
+export { sealEnvelopePayload, openEnvelopePayload } from './envelope-crypto';
+export type { EncryptedEnvelopeFields } from './envelope-crypto';
+
 export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';
 export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device-auth';
 
