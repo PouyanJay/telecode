@@ -34,6 +34,15 @@ export interface SessionRegistry {
   markRunning(input: { userId: string; sessionId: string }): Promise<void>;
   /** Flip a session to `awaiting_input` while a tool request blocks on a human decision. No-op if not the user's. */
   markAwaitingInput(input: { userId: string; sessionId: string }): Promise<void>;
+  /**
+   * Persist a non-terminal status the daemon reports via `session.status` (Task 9 pause/resume), so a
+   * reload reflects it. Terminal transitions go through {@link markEnded}. No-op if the row isn't theirs.
+   */
+  markStatus(input: {
+    userId: string;
+    sessionId: string;
+    status: 'running' | 'awaiting_input' | 'paused';
+  }): Promise<void>;
   /** Mark a session terminal (`done`/`error`) with an end timestamp. No-op if the row isn't the user's. */
   markEnded(input: { userId: string; sessionId: string; status: 'done' | 'error' }): Promise<void>;
 }
@@ -43,7 +52,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
   async function setStatus(
     userId: string,
     sessionId: string,
-    status: 'running' | 'awaiting_input',
+    status: 'running' | 'awaiting_input' | 'paused',
   ): Promise<void> {
     await withUserContext(db, userId, async (scoped) => {
       await scoped
@@ -93,6 +102,10 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
 
     async markAwaitingInput({ userId, sessionId }): Promise<void> {
       await setStatus(userId, sessionId, 'awaiting_input');
+    },
+
+    async markStatus({ userId, sessionId, status }): Promise<void> {
+      await setStatus(userId, sessionId, status);
     },
 
     async markEnded({ userId, sessionId, status }): Promise<void> {

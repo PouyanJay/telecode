@@ -3,6 +3,7 @@ import {
   parseEnvelope,
   type Envelope,
   type PermissionDecisionPayload,
+  type SessionControlAction,
   type SessionLaunchPayload,
 } from '@telecode/protocol';
 
@@ -34,6 +35,8 @@ export interface RelayConnection {
   sendUserMessage(sessionId: string, text: string): void;
   /** Send the human's verdict for a pending `agent.permission_request` on `sessionId`. */
   decide(sessionId: string, decision: PermissionDecisionPayload): void;
+  /** Send an operator control (end / interrupt / pause / resume) for `sessionId`. */
+  control(sessionId: string, action: SessionControlAction): void;
   close(): void;
 }
 
@@ -42,7 +45,12 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   options.onStatus('connecting');
 
   function send(
-    type: 'session.launch' | 'session.subscribe' | 'permission.decision' | 'user.message',
+    type:
+      | 'session.launch'
+      | 'session.subscribe'
+      | 'permission.decision'
+      | 'user.message'
+      | 'session.control',
     payload: unknown,
     sessionId?: string,
   ): void {
@@ -101,6 +109,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     },
     decide(sessionId: string, decision: PermissionDecisionPayload): void {
       send('permission.decision', decision, sessionId);
+    },
+    control(sessionId: string, action: SessionControlAction): void {
+      send('session.control', { action }, sessionId);
     },
     close(): void {
       socket?.close();

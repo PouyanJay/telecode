@@ -8,6 +8,7 @@ import {
   makeEnvelope,
   parseEnvelope,
   sessionEndedPayloadSchema,
+  sessionStatusPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
 
@@ -193,6 +194,27 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           sessionId: envelope.session_id,
         });
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session awaiting input');
+      } else if (envelope.type === 'session.status') {
+        // A daemon status report (Task 9 pause/resume) — persist it so a reload/dashboard reflects it.
+        // Type-only routing: the relay never reads the agent payload, only the status it transitions to.
+        const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
+        if (parsed.success) {
+          const status = parsed.data.status;
+          if (status === 'paused' || status === 'running' || status === 'awaiting_input') {
+            await sessionRegistry.markStatus({
+              userId: envelope.user_id,
+              sessionId: envelope.session_id,
+              status,
+            });
+          } else if (status === 'done' || status === 'error') {
+            await sessionRegistry.markEnded({
+              userId: envelope.user_id,
+              sessionId: envelope.session_id,
+              status,
+            });
+          }
+          log.info({ channel, sessionId: envelope.session_id, status }, 'relay: session status');
+        }
       }
     }
     broadcastToBrowsers(channel, text);

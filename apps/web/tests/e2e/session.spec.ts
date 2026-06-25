@@ -218,6 +218,29 @@ test('rejects the gated tool and the session finishes without running it', async
   await expect(page.getByText('TOOL', { exact: true })).toHaveCount(0);
 });
 
+test('interrupt stops a running turn and the session ends (done)', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'a long task');
+  // The turn is in flight (gated, awaiting input), so the Interrupt control is offered.
+  await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
+  await page.getByRole('button', { name: 'Interrupt' }).click();
+  await expect(page.getByText('DONE')).toBeVisible();
+});
+
+test('pause reports paused and resume clears it', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'a task to pause');
+  await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await expect(page.getByText('PAUSED')).toBeVisible();
+  // The composer is closed to follow-ups while paused.
+  await expect(page.getByPlaceholder('Paused — resume to send a follow-up…')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Resume' }).click();
+  await expect(page.getByText('PAUSED')).toHaveCount(0);
+});
+
 test('the launch form prompts to connect GitHub when no repo is available (dev user)', async ({
   page,
 }) => {

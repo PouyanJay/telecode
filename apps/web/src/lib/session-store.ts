@@ -2,6 +2,7 @@ import {
   sessionStartedPayloadSchema,
   type Envelope,
   type PermissionDecisionPayload,
+  type SessionControlAction,
   type SessionLaunchPayload,
 } from '@telecode/protocol';
 import { writable, type Readable } from 'svelte/store';
@@ -173,6 +174,11 @@ export function decide(sessionId: string, decision: PermissionDecisionPayload): 
     return next;
   });
   conn.decide(sessionId, decision);
+}
+
+/** Send an operator control (end / interrupt / pause / resume); the daemon reports the resulting status. */
+export function sendControl(sessionId: string, action: SessionControlAction): void {
+  connection?.control(sessionId, action);
 }
 
 /** Close the connection and reject any in-flight launches (only on full teardown, e.g. sign-out). */

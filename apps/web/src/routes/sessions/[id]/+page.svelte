@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
 
   import { env } from '$env/dynamic/public';
-  import { StatusDot } from '@telecode/ui';
+  import { Button, StatusDot } from '@telecode/ui';
+  import type { SessionControlAction } from '@telecode/protocol';
 
   import Composer from '$lib/components/Composer.svelte';
   import TopBar from '$lib/components/TopBar.svelte';
@@ -13,6 +14,7 @@
     connectionState,
     decide,
     ensureConnection,
+    sendControl,
     sendUserMessage,
     sessions as liveSessions,
     subscribe,
@@ -36,6 +38,16 @@
       session.status === 'running' ||
       session.status === 'awaiting_input',
   );
+  // Operator controls (Task 9). Interrupt stops the in-flight turn; pause/resume gate new work; end
+  // terminates the session. They need a live channel; nothing is actionable on a terminal session.
+  const connected = $derived($connectionState === 'connected');
+  const isPaused = $derived(session.status === 'paused');
+  const isTerminal = $derived(session.status === 'done' || session.status === 'error');
+  const showControls = $derived(known && session.status !== 'idle');
+
+  function onControl(action: SessionControlAction): void {
+    sendControl(sessionId, action);
+  }
 
   onMount(() => {
     if (device) {
@@ -78,6 +90,29 @@
     <a class="back" href="/">← Sessions</a>
     <span class="sid">{sessionId.slice(0, 8)}</span>
     <StatusDot tone={display.tone} label={display.label} pulse={display.pulse} aria-live="polite" />
+    {#if showControls}
+      <div class="controls" aria-label="Session controls">
+        {#if isBusy}
+          <Button variant="ghost" size="sm" disabled={!connected} onclick={() => onControl('interrupt')}>
+            Interrupt
+          </Button>
+        {/if}
+        {#if isPaused}
+          <Button variant="secondary" size="sm" disabled={!connected} onclick={() => onControl('resume')}>
+            Resume
+          </Button>
+        {:else if !isTerminal}
+          <Button variant="secondary" size="sm" disabled={!connected} onclick={() => onControl('pause')}>
+            Pause
+          </Button>
+        {/if}
+        {#if !isTerminal}
+          <Button variant="danger" size="sm" disabled={!connected} onclick={() => onControl('end')}>
+            End
+          </Button>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   {#if !known}
@@ -104,9 +139,9 @@
     {/if}
     <div class="dock hairline-t">
       <Composer
-        {isBusy}
+        isBusy={isBusy || isPaused}
         submitLabel="Send"
-        placeholder="Send a follow-up instruction…"
+        placeholder={isPaused ? 'Paused — resume to send a follow-up…' : 'Send a follow-up instruction…'}
         onsend={submitPrompt}
       />
     </div>
@@ -148,6 +183,11 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
+  }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
   }
   .placeholder {
     flex: 1;
