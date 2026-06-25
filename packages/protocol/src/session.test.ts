@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   agentPermissionRequestPayloadSchema,
   permissionDecisionPayloadSchema,
+  sessionControlPayloadSchema,
   sessionHistoryPayloadSchema,
   sessionLaunchPayloadSchema,
+  sessionStatusPayloadSchema,
   userMessagePayloadSchema,
 } from './session';
 
@@ -143,6 +145,25 @@ describe('sessionLaunchPayloadSchema: repo selection (Task 8)', () => {
         repo: { owner: 'ok', name: 'ok', cloneUrl: '' },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('sessionControlPayloadSchema: per-session controls (Task 9)', () => {
+  it('parses each control action', () => {
+    for (const action of ['end', 'interrupt', 'pause', 'resume'] as const) {
+      expect(sessionControlPayloadSchema.parse({ action }).action).toBe(action);
+    }
+  });
+
+  it('rejects an unknown control action', () => {
+    expect(sessionControlPayloadSchema.safeParse({ action: 'restart' }).success).toBe(false);
+    expect(sessionControlPayloadSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe('sessionStatusPayloadSchema: paused status (Task 9)', () => {
+  it('accepts the paused status', () => {
+    expect(sessionStatusPayloadSchema.parse({ status: 'paused' }).status).toBe('paused');
   });
 });
 

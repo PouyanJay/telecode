@@ -71,6 +71,9 @@ export const SESSION_STATUSES = [
   'done',
   'error',
   'offline_paused',
+  // Operator-paused: the daemon refuses new turns until resumed (Task 9). Distinct from `offline_paused`
+  // (the device is off). TS-enum only — the `status` column is plain text, so no migration is needed.
+  'paused',
 ] as const;
 export const sessionStatusSchema = z.enum(SESSION_STATUSES);
 export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
@@ -136,6 +139,17 @@ export type PermissionDecisionPayload = z.infer<typeof permissionDecisionPayload
  */
 export const userMessagePayloadSchema = z.object({ text: z.string().min(1) });
 export type UserMessagePayload = z.infer<typeof userMessagePayloadSchema>;
+
+/**
+ * Payload for `session.control` (web → daemon): an operator control for a running session (Task 9).
+ * `interrupt` aborts the in-flight turn (the session stays followable); `end` terminates the session
+ * (no more turns); `pause` makes the daemon refuse new turns (reporting `paused`) without freezing an
+ * in-flight turn; `resume` re-enables turns. The session id is on the envelope.
+ */
+export const sessionControlActionSchema = z.enum(['end', 'interrupt', 'pause', 'resume']);
+export type SessionControlAction = z.infer<typeof sessionControlActionSchema>;
+export const sessionControlPayloadSchema = z.object({ action: sessionControlActionSchema });
+export type SessionControlPayload = z.infer<typeof sessionControlPayloadSchema>;
 
 /**
  * Payload for `session.subscribe` (web → daemon): re-attach to an existing session on UI reopen/reload.

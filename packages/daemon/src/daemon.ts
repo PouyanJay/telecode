@@ -8,12 +8,14 @@ import {
   makeEnvelope,
   parseEnvelope,
   permissionDecisionPayloadSchema,
+  sessionControlPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   type Envelope,
   type MessageType,
   type PermissionDecisionPayload,
+  type SessionControlAction,
   type SessionHistoryEntry,
   type SessionHistoryPayload,
   type SessionLaunchPayload,
@@ -81,13 +83,26 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // Tool requests the agent is blocked on, keyed by the correlation id we send to the browser; each is
   // resolved when its matching `permission.decision` returns. Single-session in Phase 1, but keyed so it
   // stays correct as sessions multiply.
-  const pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
+  // Carries the owning `sessionId` alongside the resolver so end/interrupt can settle a session's gates.
+  const pendingPermissions = new Map<
+    string,
+    { sessionId: string | undefined; resolve: (decision: PermissionDecision) => void }
+  >();
   // The agent conversation id per telecode session, so a `user.message` follow-up resumes the same chat.
   const sdkSessions = new Map<string, string>();
   // The worktree cwd each session runs in, so every turn (launch + follow-ups) uses the same one.
   const sessionCwds = new Map<string, string>();
   // Telecode sessions with a turn in flight (one turn at a time per session).
   const activeRuns = new Set<string>();
+  // The in-flight turn's abort handle per session (Task 9): interrupt/end abort it. Set at turn start,
+  // cleared at turn end.
+  const sessionAborts = new Map<string, AbortController>();
+  // Per-session operator control (Task 9): `paused` refuses new turns; `ended` is terminal (refuse
+  // follow-ups); `prePauseStatus` is restored on resume.
+  const sessionControls = new Map<
+    string,
+    { paused: boolean; ended: boolean; prePauseStatus: SessionStatusName }
+  >();
   // The live transcript + status the daemon holds for each session (architecture invariant #3/#7: the
   // session lives on the laptop). A reopened browser re-attaches with `session.subscribe` and we backfill
   // this as `session.history` — so the relay never needs the plaintext (E2E-consistent in Phase 3). Kept
@@ -155,7 +170,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
     setStatus(source.session_id, 'awaiting_input');
     return new Promise<PermissionDecision>((resolve) => {
-      pendingPermissions.set(requestId, resolve);
+      pendingPermissions.set(requestId, { sessionId: source.session_id, resolve });
       log.info(
         {
           deviceId: options.deviceId,
@@ -183,6 +198,93 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return { behavior: 'deny', message: payload.message ?? 'Denied by the operator' };
   }
 
+  /** The operator-control record for a session, created on first use. */
+  function controlFor(sessionId: string): {
+    paused: boolean;
+    ended: boolean;
+    prePauseStatus: SessionStatusName;
+  } {
+    let existing = sessionControls.get(sessionId);
+    if (!existing) {
+      existing = { paused: false, ended: false, prePauseStatus: 'running' };
+      sessionControls.set(sessionId, existing);
+    }
+    return existing;
+  }
+
+  /**
+   * Stop a session's in-flight turn (Task 9 interrupt/end): settle its pending gates with `deny` (so a
+   * blocked `canUseTool` can't strand) — recording the verdict so a later backfill shows them decided —
+   * then abort the run. Returns whether a turn was actually in flight.
+   */
+  function stopTurn(sessionId: string, reason: string): boolean {
+    const record = sessionRecords.get(sessionId);
+    for (const [requestId, pending] of pendingPermissions) {
+      if (pending.sessionId !== sessionId) continue;
+      const entry = record?.transcript.find(
+        (e): e is Extract<SessionHistoryEntry, { kind: 'permission' }> =>
+          e.kind === 'permission' && e.requestId === requestId,
+      );
+      if (entry) entry.decision = 'deny';
+      pendingPermissions.delete(requestId);
+      pending.resolve({ behavior: 'deny', message: reason });
+    }
+    const abort = sessionAborts.get(sessionId);
+    if (abort) {
+      abort.abort();
+      return true;
+    }
+    return false;
+  }
+
+  /** Apply an operator control (`end` / `interrupt` / `pause` / `resume`) to a session. */
+  function handleControl(envelope: Envelope, action: SessionControlAction): void {
+    const sessionId = envelope.session_id;
+    if (sessionId === undefined) return;
+    const control = controlFor(sessionId);
+    switch (action) {
+      case 'interrupt': {
+        // Abort the in-flight turn; the aborted run ends cleanly (`done`) and the session stays followable.
+        const aborted = stopTurn(sessionId, 'interrupted by operator');
+        log.info({ deviceId: options.deviceId, sessionId, aborted }, 'daemon: interrupt');
+        return;
+      }
+      case 'end': {
+        // Terminal: refuse future follow-ups, abort any in-flight turn. If none was running, end directly.
+        control.ended = true;
+        const aborted = stopTurn(sessionId, 'session ended by operator');
+        log.info({ deviceId: options.deviceId, sessionId, aborted }, 'daemon: end');
+        if (!aborted) {
+          setStatus(sessionId, 'done');
+          sendForSession(envelope, 'session.ended', { status: 'done' });
+        }
+        return;
+      }
+      case 'pause': {
+        // Refuse new turns + report `paused`; an in-flight turn keeps running (use interrupt to stop it).
+        if (control.paused) return;
+        control.prePauseStatus = sessionRecords.get(sessionId)?.status ?? 'running';
+        control.paused = true;
+        setStatus(sessionId, 'paused');
+        sendForSession(envelope, 'session.status', { status: 'paused' });
+        log.info({ deviceId: options.deviceId, sessionId }, 'daemon: paused');
+        return;
+      }
+      case 'resume': {
+        if (!control.paused) return;
+        control.paused = false;
+        setStatus(sessionId, control.prePauseStatus);
+        sendForSession(envelope, 'session.status', { status: control.prePauseStatus });
+        log.info({ deviceId: options.deviceId, sessionId }, 'daemon: resumed');
+        return;
+      }
+      default: {
+        const _exhaustive: never = action;
+        return _exhaustive;
+      }
+    }
+  }
+
   /**
    * Run one agent turn (the initial prompt or a follow-up) and stream its activity up, then end the
    * turn with `session.ended`. `resume` continues a prior agent conversation. The returned conversation
@@ -200,10 +302,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
       log.warn({ deviceId: options.deviceId, sessionId }, 'daemon: turn already running; dropped');
       return;
     }
-    if (sessionId !== undefined) activeRuns.add(sessionId);
+    // A per-turn abort handle so interrupt/end (Task 9) can stop this run.
+    const abort = new AbortController();
+    if (sessionId !== undefined) {
+      activeRuns.add(sessionId);
+      sessionAborts.set(sessionId, abort);
+    }
     try {
       const result = await agentAdapter.run(prompt, {
         canUseTool: (request) => requestPermission(envelope, request),
+        signal: abort.signal,
         ...(cwd !== undefined ? { cwd } : {}),
         onEvent: (event) => {
           if (event.type === 'message') {
@@ -226,14 +334,24 @@ export function createDaemon(options: DaemonOptions): Daemon {
       setStatus(sessionId, 'done');
       sendForSession(envelope, 'session.ended', { status: 'done' });
     } catch (err) {
-      log.error({ err, sessionId }, 'daemon: turn failed');
-      setStatus(sessionId, 'error');
-      sendForSession(envelope, 'session.ended', {
-        status: 'error',
-        error: err instanceof Error ? err.message : 'unknown error',
-      });
+      // An aborted run is an operator interrupt/end, not a failure — end the turn cleanly as `done`.
+      if (abort.signal.aborted) {
+        log.info({ deviceId: options.deviceId, sessionId }, 'daemon: turn interrupted');
+        setStatus(sessionId, 'done');
+        sendForSession(envelope, 'session.ended', { status: 'done' });
+      } else {
+        log.error({ err, sessionId }, 'daemon: turn failed');
+        setStatus(sessionId, 'error');
+        sendForSession(envelope, 'session.ended', {
+          status: 'error',
+          error: err instanceof Error ? err.message : 'unknown error',
+        });
+      }
     } finally {
-      if (sessionId !== undefined) activeRuns.delete(sessionId);
+      if (sessionId !== undefined) {
+        activeRuns.delete(sessionId);
+        sessionAborts.delete(sessionId);
+      }
     }
   }
 
@@ -335,6 +453,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return;
     }
     const sessionId = envelope.session_id;
+    // Operator controls gate follow-ups: an ended session takes no more turns; a paused one is closed to
+    // new work until resumed (an in-flight turn is unaffected — A-6).
+    const control = sessionId !== undefined ? sessionControls.get(sessionId) : undefined;
+    if (control?.ended) {
+      log.warn(
+        { deviceId: options.deviceId, sessionId },
+        'daemon: follow-up refused — session ended',
+      );
+      return;
+    }
+    if (control?.paused) {
+      log.warn(
+        { deviceId: options.deviceId, sessionId },
+        'daemon: follow-up refused — session paused',
+      );
+      return;
+    }
     const resume = sessionId !== undefined ? sdkSessions.get(sessionId) : undefined;
     if (resume === undefined) {
       log.warn(
@@ -428,8 +563,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
           );
           return;
         }
-        const resolve = pendingPermissions.get(decision.data.requestId);
-        if (!resolve) {
+        const pending = pendingPermissions.get(decision.data.requestId);
+        if (!pending) {
           log.warn(
             { deviceId: options.deviceId, requestId: decision.data.requestId },
             'daemon: no pending permission for decision',
@@ -458,7 +593,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
           },
           'daemon: permission decided',
         );
-        resolve(toPermissionDecision(decision.data));
+        pending.resolve(toPermissionDecision(decision.data));
+        return;
+      }
+      case 'session.control': {
+        const control = sessionControlPayloadSchema.safeParse(envelope.payload);
+        if (!control.success) {
+          log.warn(
+            { deviceId: options.deviceId },
+            'daemon: dropped session.control with invalid payload',
+          );
+          return;
+        }
+        handleControl(envelope, control.data.action);
         return;
       }
       default:
@@ -496,7 +643,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     async stop(): Promise<void> {
       // Unblock any in-flight turns waiting on a human decision so their runs can finish instead of
       // hanging on a closed socket.
-      for (const resolve of pendingPermissions.values()) {
+      for (const { resolve } of pendingPermissions.values()) {
         resolve({ behavior: 'deny', message: 'daemon stopping' });
       }
       pendingPermissions.clear();

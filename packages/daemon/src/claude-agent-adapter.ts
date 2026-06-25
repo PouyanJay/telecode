@@ -45,7 +45,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
   return {
     async run(
       prompt: string,
-      { canUseTool, onEvent, resume, cwd }: AgentRunOptions,
+      { canUseTool, onEvent, resume, cwd, signal }: AgentRunOptions,
     ): Promise<AgentRunResult> {
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
@@ -67,6 +67,13 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
         return { behavior: 'deny', message: decision.message };
       };
 
+      // Bridge our AbortSignal onto the SDK's AbortController so an interrupt/end aborts the query.
+      const abortController = new AbortController();
+      if (signal) {
+        if (signal.aborted) abortController.abort();
+        else signal.addEventListener('abort', () => abortController.abort(), { once: true });
+      }
+
       const session = query({
         prompt,
         options: {
@@ -74,6 +81,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           permissionMode: options.permissionMode ?? 'default',
           maxTurns: options.maxTurns ?? 4,
           settingSources: options.settingSources ?? [],
+          abortController,
           // Run in the session's worktree so parallel agents never clobber each other's files.
           ...(cwd ? { cwd } : {}),
           ...(resume ? { resume } : {}),
@@ -82,27 +90,35 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
         },
       });
 
-      for await (const message of session) {
-        // Capture the conversation id so the daemon can resume this session for a follow-up turn.
-        if (message.type === 'system' && message.subtype === 'init') {
-          sessionId = message.session_id;
-        }
-        // Map SDK assistant messages onto our streamed event contract. canUseTool above records
-        // every interception; tool_use blocks here are the (allowed) tools the agent actually ran.
-        if (message.type === 'assistant') {
-          for (const block of message.message.content) {
-            if (block.type === 'text') {
-              onEvent({ type: 'message', text: block.text });
-            } else if (block.type === 'tool_use') {
-              onEvent({
-                type: 'tool_use',
-                toolName: block.name,
-                input: toToolInput(block.input),
-              });
+      try {
+        for await (const message of session) {
+          // Capture the conversation id so the daemon can resume this session for a follow-up turn.
+          if (message.type === 'system' && message.subtype === 'init') {
+            sessionId = message.session_id;
+          }
+          // Map SDK assistant messages onto our streamed event contract. canUseTool above records
+          // every interception; tool_use blocks here are the (allowed) tools the agent actually ran.
+          if (message.type === 'assistant') {
+            for (const block of message.message.content) {
+              if (block.type === 'text') {
+                onEvent({ type: 'message', text: block.text });
+              } else if (block.type === 'tool_use') {
+                onEvent({
+                  type: 'tool_use',
+                  toolName: block.name,
+                  input: toToolInput(block.input),
+                });
+              }
             }
           }
+          log.debug({ type: message.type }, 'agent message');
         }
-        log.debug({ type: message.type }, 'agent message');
+      } catch (err) {
+        // An operator interrupt/end aborts the query mid-stream. Return what we have (notably the
+        // captured conversation id) so the daemon ends the turn cleanly and the session can still be
+        // resumed — rather than surfacing the abort as a run failure. Re-throw any genuine error.
+        if (!signal?.aborted) throw err;
+        log.debug({ sessionId }, 'agent session aborted (interrupt/end)');
       }
 
       log.debug({ intercepted: intercepted.length, sessionId }, 'agent session complete');
