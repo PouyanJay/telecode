@@ -9,6 +9,7 @@ import {
   parseEnvelope,
   sealEnvelopePayload,
   unwrapContentKey,
+  type EncryptedEnvelopeFields,
   type Envelope,
   type KeyPair,
 } from '@telecode/protocol';
@@ -24,12 +25,16 @@ import { buildRelay } from '../../src/relay';
 import { connectBrowser, waitForEnvelope } from '../_helpers/ws';
 
 /**
- * Phase 3 exit criterion (plan §3.5): an encrypted session runs end-to-end across the REAL relay — a
- * keypair-bearing daemon and a browser that seals its launch — and the relay only ever forwards
- * ciphertext. This is the full-stack proof the daemon-only test (fake relay) can't give: it exercises the
- * relay's launch rewrite (which must carry `sender_public_key` through) and its cleartext-status routing.
+ * Phase 3 exit criterion (plan §3.5 + §8): an encrypted session runs end-to-end across the REAL relay — a
+ * keypair-bearing daemon and a browser that seals its launch — and the relay only ever forwards ciphertext.
+ * Two proofs the daemon-only test (fake relay) can't give: (1) the frames the relay forwards carry no
+ * plaintext, exercising the relay's launch rewrite (which must carry `sender_public_key` through) and its
+ * cleartext-status routing; (2) the relay's own logs contain neither plaintext nor ciphertext payloads —
+ * the "verify via relay logs" criterion, captured here from a real pino stream.
  */
 const DATABASE_URL = process.env.DATABASE_URL;
+const PROMPT = 'exfiltrate the production secrets';
+const AGENT_TEXT = 'planning the change';
 
 describe('full-stack E2E session through the real relay', () => {
   let app: FastifyInstance;
@@ -40,6 +45,8 @@ describe('full-stack E2E session through the real relay', () => {
   let daemonKp: KeyPair;
   let userId: string;
   let deviceId: string;
+  // Captured relay log lines (real pino → in-memory stream), cleared per test.
+  const relayLogs: string[] = [];
 
   beforeAll(async () => {
     if (!DATABASE_URL) {
@@ -60,10 +67,9 @@ describe('full-stack E2E session through the real relay', () => {
     );
     deviceId = d.rows[0]!.id;
 
-    app = await buildRelay({
-      logger: pino({ level: 'silent' }),
-      sessionRegistry: createSessionRegistry(handle),
-    });
+    // Capture the relay's logs at info level into memory so the test can assert payload-blindness.
+    const logger = pino({ level: 'info' }, { write: (line: string) => relayLogs.push(line) });
+    app = await buildRelay({ logger, sessionRegistry: createSessionRegistry(handle) });
     await app.listen({ port: 0, host: '127.0.0.1' });
     relayUrl = `ws://127.0.0.1:${(app.server.address() as AddressInfo).port}/ws`;
 
@@ -76,7 +82,7 @@ describe('full-stack E2E session through the real relay', () => {
         publicKey: encodeKey(daemonKp.publicKey),
         privateKey: encodeKey(daemonKp.privateKey),
       },
-      agentAdapter: createFakeAgentAdapter([{ type: 'message', text: 'planning the change' }]),
+      agentAdapter: createFakeAgentAdapter([{ type: 'message', text: AGENT_TEXT }]),
       logger: pino({ level: 'silent' }),
     });
     await daemon.start();
@@ -91,9 +97,19 @@ describe('full-stack E2E session through the real relay', () => {
 
   beforeEach(async () => {
     await admin.query('truncate table sessions');
+    relayLogs.length = 0;
   });
 
-  it('runs an encrypted session end-to-end; the relay never forwards plaintext', async () => {
+  /**
+   * Drive a full encrypted session as the browser: seal + send the launch, unwrap the delivered content
+   * key, decrypt the stream to completion. Returns every frame the relay forwarded + the sealed launch
+   * payload (the ciphertext the relay handled), for the caller to assert against.
+   */
+  async function runEncryptedSession(): Promise<{
+    received: Envelope[];
+    sessionId: string | undefined;
+    sealedLaunch: EncryptedEnvelopeFields;
+  }> {
     const browserKp = await generateKeyPair();
     const browser = await connectBrowser(relayUrl, userId, deviceId);
     const received: Envelope[] = [];
@@ -101,10 +117,7 @@ describe('full-stack E2E session through the real relay', () => {
       received.push(parseEnvelope(JSON.parse(raw.toString()))),
     );
 
-    // The browser seals the launch to the daemon and announces its ephemeral pubkey. Distinctive
-    // plaintext (with spaces) that must never appear verbatim in any forwarded frame.
-    const PROMPT = 'exfiltrate the production secrets';
-    const sealed = await sealEnvelopePayload(
+    const sealedLaunch = await sealEnvelopePayload(
       { prompt: PROMPT },
       daemonKp.publicKey,
       browserKp.privateKey,
@@ -116,38 +129,54 @@ describe('full-stack E2E session through the real relay', () => {
           userId,
           deviceId,
           senderPublicKey: encodeKey(browserKp.publicKey),
-          payload: sealed.payload,
-          nonce: sealed.nonce,
+          payload: sealedLaunch.payload,
+          nonce: sealedLaunch.nonce,
         }),
       ),
     );
 
-    // The daemon decrypted the launch, minted + delivered the content key (box-wrapped to the browser).
     const keyFrame = await waitForEnvelope(browser, (e) => e.type === 'session.key');
-    const sessionId = keyFrame.session_id;
-    expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
     const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
-
-    // The streamed frame is ciphertext; the browser decrypts it to the agent's message.
     const messageFrame = await waitForEnvelope(browser, (e) => e.type === 'agent.message');
-    expect(typeof messageFrame.payload).toBe('string');
-    expect(await decryptWithContentKey(messageFrame, contentKey)).toEqual({
-      text: 'planning the change',
-    });
+    expect(await decryptWithContentKey(messageFrame, contentKey)).toEqual({ text: AGENT_TEXT });
+    await waitForEnvelope(browser, (e) => e.type === 'session.ended');
 
-    // session.ended carries the cleartext status; the relay used it to mark the registry `done`.
-    const endedFrame = await waitForEnvelope(browser, (e) => e.type === 'session.ended');
-    expect(endedFrame.status).toBe('done');
+    browser.close();
+    return { received, sessionId: keyFrame.session_id, sealedLaunch };
+  }
+
+  it('runs an encrypted session end-to-end; no plaintext crosses the relay; registry marked done', async () => {
+    const { received, sessionId } = await runEncryptedSession();
+
+    expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    // session.ended carried the cleartext status; the relay used it to mark the registry `done`.
     const row = await admin.query<{ status: string }>('select status from sessions where id = $1', [
       sessionId,
     ]);
     expect(row.rows[0]?.status).toBe('done');
 
-    // The decisive property: no plaintext (prompt or agent output) crossed the relay in any frame.
+    // The decisive property: every frame the relay forwarded to the browser carried a ciphertext payload
+    // (a base64 string, non-empty nonce) and no plaintext (prompt or agent output) appears anywhere. That
+    // the helper decrypted the stream proves the ciphertext round-tripped intact.
+    for (const frame of received) {
+      expect(typeof frame.payload).toBe('string');
+      expect(frame.nonce).not.toBe('');
+    }
     const allFrames = JSON.stringify(received);
     expect(allFrames).not.toContain(PROMPT);
-    expect(allFrames).not.toContain('planning the change');
+    expect(allFrames).not.toContain(AGENT_TEXT);
+  });
 
-    browser.close();
+  it('the relay logs only routing metadata — never plaintext or ciphertext payloads', async () => {
+    const { sealedLaunch } = await runEncryptedSession();
+
+    const logs = relayLogs.join('\n');
+    // Sanity: capture works and the relay did log session lifecycle metadata.
+    expect(logs).toContain('relay: session');
+    // The exit criterion: nothing readable or even encrypted from the payload reaches the relay's logs.
+    expect(logs).not.toContain(PROMPT);
+    expect(logs).not.toContain(AGENT_TEXT);
+    expect(logs).not.toContain(sealedLaunch.payload);
+    expect(logs).not.toContain('"payload"');
   });
 });
