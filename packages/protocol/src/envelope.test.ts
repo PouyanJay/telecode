@@ -87,6 +87,54 @@ describe('makeEnvelope', () => {
   });
 });
 
+describe('envelope E2E routing-metadata fields (Phase 3)', () => {
+  it('accepts an optional cleartext status the relay reads without decrypting', () => {
+    const env = parseEnvelope({ ...validWire, type: 'session.ended', status: 'done' });
+    expect(env.status).toBe('done');
+  });
+
+  it('rejects an unknown status value', () => {
+    expect(safeParseEnvelope({ ...validWire, status: 'nonsense' }).success).toBe(false);
+  });
+
+  it('accepts an optional sender_public_key (base64 ephemeral key)', () => {
+    const env = parseEnvelope({ ...validWire, sender_public_key: 'cHVia2V5' });
+    expect(env.sender_public_key).toBe('cHVia2V5');
+  });
+
+  it('treats status and sender_public_key as absent by default', () => {
+    const env = parseEnvelope(validWire);
+    expect(env.status).toBeUndefined();
+    expect(env.sender_public_key).toBeUndefined();
+  });
+
+  it('recognizes session.key as a valid message type', () => {
+    expect(safeParseEnvelope({ ...validWire, type: 'session.key' }).success).toBe(true);
+  });
+});
+
+describe('makeEnvelope routing-metadata fields', () => {
+  it('sets status and sender_public_key when provided', () => {
+    const env = makeEnvelope({
+      type: 'session.ended',
+      userId: 'u',
+      deviceId: 'd',
+      sessionId: 's',
+      status: 'error',
+      senderPublicKey: 'cHVia2V5',
+      payload: 'ciphertext',
+    });
+    expect(env.status).toBe('error');
+    expect(env.sender_public_key).toBe('cHVia2V5');
+  });
+
+  it('omits status and sender_public_key keys when not provided', () => {
+    const env = makeEnvelope({ type: 'echo', userId: 'u', deviceId: 'd', payload: {} });
+    expect('status' in env).toBe(false);
+    expect('sender_public_key' in env).toBe(false);
+  });
+});
+
 describe('echoPayloadSchema', () => {
   it('validates a text payload', () => {
     expect(echoPayloadSchema.parse({ text: 'ok' }).text).toBe('ok');

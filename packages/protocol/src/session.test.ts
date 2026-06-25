@@ -5,6 +5,7 @@ import {
   permissionDecisionPayloadSchema,
   sessionControlPayloadSchema,
   sessionHistoryPayloadSchema,
+  sessionKeyPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionStatusPayloadSchema,
   userMessagePayloadSchema,
@@ -214,5 +215,19 @@ describe('sessionHistoryPayloadSchema', () => {
       entries: [{ kind: 'diff', text: 'x' }],
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('sessionKeyPayloadSchema', () => {
+  it('validates the wrapped per-session content key', () => {
+    expect(sessionKeyPayloadSchema.parse({ key: 'YmFzZTY0a2V5' }).key).toBe('YmFzZTY0a2V5');
+  });
+
+  it('rejects an empty key', () => {
+    expect(sessionKeyPayloadSchema.safeParse({ key: '' }).success).toBe(false);
+  });
+
+  it('rejects a missing key', () => {
+    expect(sessionKeyPayloadSchema.safeParse({}).success).toBe(false);
   });
 });

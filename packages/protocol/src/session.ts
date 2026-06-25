@@ -101,6 +101,15 @@ export const sessionStatusPayloadSchema = z.object({ status: sessionStatusSchema
 export type SessionStatusPayload = z.infer<typeof sessionStatusPayloadSchema>;
 
 /**
+ * Decrypted payload for `session.key` (daemon → web, E2E): the per-session symmetric content key, base64.
+ * On the wire this object is itself box-sealed to the browser's ephemeral public key (the bootstrap
+ * exception), so only that browser can open it; once unwrapped, every other session payload is encrypted
+ * with this key. The relay never sees it — it forwards the sealed envelope verbatim.
+ */
+export const sessionKeyPayloadSchema = z.object({ key: z.string().min(1) });
+export type SessionKeyPayload = z.infer<typeof sessionKeyPayloadSchema>;
+
+/**
  * Payload for `agent.permission_request` (daemon → web): a consequential tool call the agent wants to
  * run, paused at the {@link https://docs.claude.com SDK `canUseTool` gate} until a human decides. The
  * `requestId` correlates this request with the human's {@link permissionDecisionPayloadSchema} reply.

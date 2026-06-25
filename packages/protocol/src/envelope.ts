@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { sessionStatusSchema, type SessionStatusName } from './session';
+
 /**
  * Wire protocol version. Bump on any breaking change to the envelope or message union.
  * All three peers (web, relay, daemon) MUST agree on this.
@@ -37,6 +39,8 @@ export const MESSAGE_TYPES = [
   'session.subscribe',
   'session.history',
   'session.status',
+  // E2E key delivery (daemon -> web): the per-session content key, box-sealed to the browser's pubkey
+  'session.key',
 ] as const;
 
 export const messageTypeSchema = z.enum(MESSAGE_TYPES);
@@ -47,6 +51,14 @@ export type MessageType = z.infer<typeof messageTypeSchema>;
  * protocol contract in the plan; `payload` is a JSON body in plaintext mode (Phase 0)
  * and ciphertext once E2E lands (Phase 3). `nonce` is the base64 crypto_box nonce, or
  * an empty string when the payload is not encrypted.
+ *
+ * `status` and `sender_public_key` are E2E **routing metadata** — small, non-secret fields the relay
+ * reads without ever decrypting the payload (plan §3.5 honest-metadata caveat):
+ *  - `status` lets the relay update the Postgres session registry from a lifecycle message whose payload
+ *    is now ciphertext. It reveals only that a session exists and its coarse state.
+ *  - `sender_public_key` carries a browser's ephemeral X25519 public key (base64) on `session.launch`/
+ *    `session.subscribe` so the daemon can wrap the per-session content key to it. A public key is not
+ *    secret; the relay brokering it is the plan's documented key-exchange model.
  */
 export const envelopeSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
@@ -55,6 +67,8 @@ export const envelopeSchema = z.object({
   session_id: z.string().min(1).optional(),
   type: messageTypeSchema,
   nonce: z.string(),
+  status: sessionStatusSchema.optional(),
+  sender_public_key: z.string().min(1).optional(),
   payload: z.unknown(),
 });
 
@@ -97,6 +111,10 @@ export function makeEnvelope(params: {
   payload: unknown;
   sessionId?: string;
   nonce?: string;
+  /** Cleartext lifecycle status (routing metadata) — set on lifecycle messages under E2E. */
+  status?: SessionStatusName;
+  /** Sender's ephemeral X25519 public key (base64) — set by a browser on launch/subscribe. */
+  senderPublicKey?: string;
 }): Envelope {
   return envelopeSchema.parse({
     v: PROTOCOL_VERSION,
@@ -105,6 +123,8 @@ export function makeEnvelope(params: {
     ...(params.sessionId !== undefined ? { session_id: params.sessionId } : {}),
     type: params.type,
     nonce: params.nonce ?? '',
+    ...(params.status !== undefined ? { status: params.status } : {}),
+    ...(params.senderPublicKey !== undefined ? { sender_public_key: params.senderPublicKey } : {}),
     payload: params.payload,
   });
 }
