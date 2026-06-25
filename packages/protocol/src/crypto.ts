@@ -1,7 +1,13 @@
 import nacl from 'tweetnacl';
 
 /**
- * E2E crypto helpers — X25519 authenticated encryption (NaCl `box`, via tweetnacl).
+ * Crypto helpers (NaCl, via tweetnacl) — two primitives, both authenticated:
+ *  - `box` (X25519-XSalsa20-Poly1305): E2E encryption between two parties — {@link seal}/{@link open}.
+ *  - `secretbox` (XSalsa20-Poly1305): symmetric at-rest encryption under one key —
+ *    {@link sealSecret}/{@link openSecret}. Used by the relay to protect the user's stored OAuth token.
+ *
+ * Both share the {@link SealedMessage} `{nonce, ciphertext}` base64 shape. All encryption MUST go through
+ * these helpers — never ad hoc (architecture invariant: crypto lives in `@telecode/protocol`).
  *
  * tweetnacl is the plan's accepted libsodium-family option; chosen over `libsodium-wrappers`
  * because its WASM ESM build does not resolve cleanly under Vite/Vitest (and would resurface
@@ -98,6 +104,34 @@ export async function open(
   const plaintext = nacl.box.open(ciphertext, nonce, senderPublicKey, recipientPrivateKey);
   if (plaintext === null) {
     throw new Error('decryption failed: wrong key pair or tampered ciphertext');
+  }
+  return utf8Decoder.decode(plaintext);
+}
+
+/** Generate a 32-byte symmetric key for {@link sealSecret} (e.g. the relay's at-rest token key). */
+export function generateSecretKey(): Uint8Array {
+  return nacl.randomBytes(nacl.secretbox.keyLength);
+}
+
+/** Symmetrically encrypt `plaintext` under `key` (authenticated; fresh random nonce per call). */
+export async function sealSecret(plaintext: string, key: Uint8Array): Promise<SealedMessage> {
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+  const ciphertext = nacl.secretbox(utf8Encoder.encode(plaintext), nonce, key);
+  return { nonce: toBase64(nonce), ciphertext: toBase64(ciphertext) };
+}
+
+/**
+ * Decrypt a {@link sealSecret} message under `key`. Rejects if the key is wrong or the ciphertext was
+ * tampered with (NaCl authenticates before decrypting and returns null on failure).
+ */
+export async function openSecret(sealed: SealedMessage, key: Uint8Array): Promise<string> {
+  const plaintext = nacl.secretbox.open(
+    fromBase64(sealed.ciphertext),
+    fromBase64(sealed.nonce),
+    key,
+  );
+  if (plaintext === null) {
+    throw new Error('decryption failed: wrong key or tampered ciphertext');
   }
   return utf8Decoder.decode(plaintext);
 }

@@ -22,6 +22,17 @@ export const providerIdentitySchema = z.object({
 export type ProviderIdentity = z.infer<typeof providerIdentitySchema>;
 
 /**
+ * The `/auth/session` request body: the verified identity plus the provider's OAuth access token (when
+ * the provider grants one — e.g. GitHub with `repo` scope), so the relay can persist it for later
+ * server-side use. The token is a secret the trusted web tier forwards once; it never reaches the browser.
+ */
+export const createSessionRequestSchema = providerIdentitySchema.extend({
+  oauthAccessToken: z.string().min(1).optional(),
+  oauthScope: z.string().min(1).optional(),
+});
+export type CreateSessionRequest = z.infer<typeof createSessionRequestSchema>;
+
+/**
  * The relay's auth domain (the relay owns auth + the registries — AD-1/AD-3). It runs the OAuth-session
  * lifecycle and mints/verifies the short-lived **channel token** the browser presents on the WS.
  *

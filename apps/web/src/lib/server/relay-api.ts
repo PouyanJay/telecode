@@ -1,3 +1,5 @@
+import { type SessionStatusName } from '@telecode/protocol';
+
 import { env } from '$env/dynamic/private';
 
 import type { ProviderIdentity } from './auth/provider';
@@ -30,12 +32,43 @@ export interface RelayDevice {
   lastSeenAt: Date | null;
 }
 
-/** Mint a login session for a verified identity (service-secret guarded). */
-export async function createRelaySession(identity: ProviderIdentity): Promise<CreatedSession> {
+/** A session in the user's registry (routing metadata only) — the dashboard's persisted list source. */
+export interface RelaySession {
+  id: string;
+  deviceId: string;
+  title: string | null;
+  status: SessionStatusName;
+  createdAt: Date;
+  updatedAt: Date;
+  endedAt: Date | null;
+}
+
+/** A provider's OAuth access token, forwarded to the relay for at-rest storage (never to the browser). */
+export interface OAuthTokenInput {
+  accessToken: string;
+  scope?: string;
+}
+
+/**
+ * Mint a login session for a verified identity (service-secret guarded). When the provider granted an
+ * OAuth access token, it is forwarded here so the relay can persist it (encrypted) for later use.
+ */
+export async function createRelaySession(
+  identity: ProviderIdentity,
+  oauth?: OAuthTokenInput,
+): Promise<CreatedSession> {
   const res = await fetch(`${RELAY_HTTP_URL}/auth/session`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-telecode-service-secret': SERVICE_SECRET },
-    body: JSON.stringify(identity),
+    body: JSON.stringify({
+      ...identity,
+      ...(oauth
+        ? {
+            oauthAccessToken: oauth.accessToken,
+            ...(oauth.scope ? { oauthScope: oauth.scope } : {}),
+          }
+        : {}),
+    }),
   });
   if (!res.ok) {
     throw new Error(`relay /auth/session failed: ${res.status}`);
@@ -82,6 +115,120 @@ export async function listDevices(sessionToken: string): Promise<RelayDevice[]> 
     name: device.name,
     lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
   }));
+}
+
+/** List the user's sessions, newest-first (session-token authed). Empty on any error. */
+export async function listSessions(sessionToken: string): Promise<RelaySession[]> {
+  const res = await fetch(`${RELAY_HTTP_URL}/me/sessions`, {
+    headers: { authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) {
+    return [];
+  }
+  const body = (await res.json()) as {
+    sessions: {
+      id: string;
+      device_id: string;
+      title: string | null;
+      status: SessionStatusName;
+      created_at: string;
+      updated_at: string;
+      ended_at: string | null;
+    }[];
+  };
+  return body.sessions.map((session) => ({
+    id: session.id,
+    deviceId: session.device_id,
+    title: session.title,
+    status: session.status,
+    createdAt: new Date(session.created_at),
+    updatedAt: new Date(session.updated_at),
+    endedAt: session.ended_at ? new Date(session.ended_at) : null,
+  }));
+}
+
+/** A GitHub repo the user can launch a session against (for the launch picker). */
+export interface RelayRepo {
+  id: number;
+  fullName: string;
+  name: string;
+  owner: string;
+  private: boolean;
+  defaultBranch: string;
+  cloneUrl: string;
+}
+
+/** The user's repos plus whether they've linked a GitHub token (`connected: false` → prompt to link). */
+export interface RepoList {
+  connected: boolean;
+  repos: RelayRepo[];
+}
+
+/**
+ * List the user's GitHub repos for the launch picker (session-token authed). The relay calls GitHub with
+ * the user's stored token; this only ever sees repo metadata. Returns not-connected + empty on any error
+ * (no token linked, GitHub unavailable) so the UI degrades cleanly.
+ */
+export async function listRepos(sessionToken: string): Promise<RepoList> {
+  const res = await fetch(`${RELAY_HTTP_URL}/me/repos`, {
+    headers: { authorization: `Bearer ${sessionToken}` },
+  });
+  if (!res.ok) {
+    return { connected: false, repos: [] };
+  }
+  const body = (await res.json()) as {
+    connected: boolean;
+    repos: {
+      id: number;
+      full_name: string;
+      name: string;
+      owner: string;
+      private: boolean;
+      default_branch: string;
+      clone_url: string;
+    }[];
+  };
+  return {
+    connected: body.connected,
+    repos: body.repos.map((repo) => ({
+      id: repo.id,
+      fullName: repo.full_name,
+      name: repo.name,
+      owner: repo.owner,
+      private: repo.private,
+      defaultBranch: repo.default_branch,
+      cloneUrl: repo.clone_url,
+    })),
+  };
+}
+
+/**
+ * Register the browser's push subscription with the relay (session-token authed). The `subscription` is
+ * the browser's `PushSubscription.toJSON()` (`{ endpoint, keys: { p256dh, auth } }`). Resolves true on
+ * success.
+ */
+export async function savePushSubscription(
+  sessionToken: string,
+  subscription: unknown,
+): Promise<boolean> {
+  const res = await fetch(`${RELAY_HTTP_URL}/me/push-subscriptions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${sessionToken}` },
+    body: JSON.stringify(subscription),
+  });
+  return res.ok;
+}
+
+/** Remove a push subscription by endpoint (session-token authed). Best-effort. */
+export async function deletePushSubscription(
+  sessionToken: string,
+  endpoint: string,
+): Promise<void> {
+  await fetch(`${RELAY_HTTP_URL}/me/push-subscriptions`, {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${sessionToken}` },
+    body: JSON.stringify({ endpoint }),
+  });
 }
 
 /** Exchange a session token for a short-lived channel token, or null if the session is invalid. */

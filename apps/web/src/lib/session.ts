@@ -3,6 +3,7 @@ import {
   agentPermissionRequestPayloadSchema,
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
+  sessionHistoryPayloadSchema,
   sessionStatusPayloadSchema,
   type Envelope,
   type SessionStatusName,
@@ -150,6 +151,51 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
     case 'session.status': {
       const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
       return parsed.success ? { ...base, status: parsed.data.status } : base;
+    }
+
+    case 'session.history': {
+      // Reopen = reconnect, not restart (invariant #7): the daemon backfills the whole transcript, so
+      // reseed the state wholesale from it rather than appending. A resolved gate (`allow`/`deny`)
+      // replays as decided (no action buttons); a still-open one stays `pending` and actionable.
+      const parsed = sessionHistoryPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return base;
+      const entries: TranscriptEntry[] = parsed.data.entries.map((entry, i) => {
+        const id = `e${i}`;
+        switch (entry.kind) {
+          case 'user':
+            return { kind: 'user', id, text: entry.text };
+          case 'message':
+            return { kind: 'message', id, text: entry.text };
+          case 'tool':
+            return { kind: 'tool', id, toolName: entry.toolName, input: entry.input };
+          case 'permission':
+            return {
+              kind: 'permission',
+              id,
+              requestId: entry.requestId,
+              toolName: entry.toolName,
+              input: entry.input,
+              decision:
+                entry.decision === 'allow'
+                  ? 'approved'
+                  : entry.decision === 'deny'
+                    ? 'rejected'
+                    : 'pending',
+            };
+          default: {
+            // Exhaustiveness: a new history-entry kind must be handled here (parse already rejects
+            // unknown kinds at runtime, so this is unreachable).
+            const _exhaustive: never = entry;
+            return _exhaustive;
+          }
+        }
+      });
+      return {
+        sessionId: envelope.session_id ?? base.sessionId,
+        status: parsed.data.status,
+        entries,
+        seq: entries.length,
+      };
     }
 
     default:

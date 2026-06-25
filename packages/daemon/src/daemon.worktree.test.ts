@@ -1,0 +1,286 @@
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+import { makeEnvelope } from '@telecode/protocol';
+import { pino } from 'pino';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { type AgentAdapter, type AgentRunOptions } from './agent-adapter';
+import { createDaemon, type Daemon } from './daemon';
+import { startFakeRelay, type FakeRelay } from './fake-relay';
+import { createGitRepoManager, type RepoManager } from './sessions/repo-manager';
+import { createGitWorktreeManager, type WorktreeManager } from './sessions/worktree-manager';
+
+const run = promisify(execFile);
+const silent = pino({ level: 'silent' });
+
+// Real daemon ↔ an in-process fake relay (WS) ↔ a real git worktree. The only faked layer is the agent
+// model (a recording adapter), which is the correct boundary — a live model is the opt-in `live-agent`
+// test. This proves the daemon cuts a worktree per session and runs the agent in it.
+
+const tempDirs: string[] = [];
+const daemons: Daemon[] = [];
+const relays: FakeRelay[] = [];
+
+async function tempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+async function makeRepo(): Promise<string> {
+  const dir = await tempDir('telecode-repo-');
+  await run('git', ['-C', dir, 'init', '-q', '-b', 'main']);
+  await run('git', ['-C', dir, 'config', 'user.email', 'test@telecode.dev']);
+  await run('git', ['-C', dir, 'config', 'user.name', 'Telecode Test']);
+  await writeFile(join(dir, 'README.md'), '# repo\n');
+  await run('git', ['-C', dir, 'add', '.']);
+  await run('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+  return dir;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface RecordedRun {
+  readonly prompt: string;
+  readonly cwd?: string;
+  readonly resume?: string;
+}
+
+/** An adapter that records each run's cwd/resume and writes a file in its cwd (proving where it ran). */
+function recordingAdapter(runs: RecordedRun[]): AgentAdapter {
+  return {
+    async run(prompt: string, opts: AgentRunOptions) {
+      runs.push({
+        prompt,
+        ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+      });
+      if (opts.cwd !== undefined) {
+        await writeFile(join(opts.cwd, 'agent-was-here.txt'), prompt);
+      }
+      opts.onEvent({ type: 'message', text: 'done' });
+      return { intercepted: [], allowed: [], denied: [], sessionId: 'sdk-1' };
+    },
+  };
+}
+
+interface DaemonExtras {
+  worktreeManager?: WorktreeManager;
+  repoManager?: RepoManager;
+  defaultRepoPath?: string;
+}
+
+async function startDaemon(
+  userId: string,
+  deviceId: string,
+  adapter: AgentAdapter,
+  extras: DaemonExtras = {},
+): Promise<FakeRelay> {
+  const relay = await startFakeRelay(userId, deviceId);
+  relays.push(relay);
+  const daemon = createDaemon({
+    relayUrl: relay.url,
+    userId,
+    deviceId,
+    agentAdapter: adapter,
+    logger: silent,
+    ...(extras.worktreeManager ? { worktreeManager: extras.worktreeManager } : {}),
+    ...(extras.repoManager ? { repoManager: extras.repoManager } : {}),
+    ...(extras.defaultRepoPath ? { defaultRepoPath: extras.defaultRepoPath } : {}),
+  });
+  daemons.push(daemon);
+  await daemon.start();
+  return relay;
+}
+
+afterEach(async () => {
+  await Promise.all(daemons.splice(0).map((d) => d.stop()));
+  await Promise.all(relays.splice(0).map((r) => r.close()));
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe('daemon: a git worktree per session (Task 6)', () => {
+  it('runs each session in its own worktree, isolates them, reuses on follow-up, and keeps them on end', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const repoPath = await makeRepo();
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot, logger: silent });
+    const runs: RecordedRun[] = [];
+    const relay = await startDaemon(userId, deviceId, recordingAdapter(runs), {
+      worktreeManager: manager,
+      defaultRepoPath: repoPath,
+    });
+
+    // Session A.
+    const sidA = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sidA,
+        payload: { prompt: 'work on A' },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sidA);
+
+    const wtA = join(worktreesRoot, sidA);
+    expect(runs[0]?.cwd).toBe(wtA);
+    // The agent ran in the worktree — its file is there and NOT in the repo root / daemon cwd.
+    expect(await readFile(join(wtA, 'agent-was-here.txt'), 'utf8')).toBe('work on A');
+    expect(await exists(join(repoPath, 'agent-was-here.txt'))).toBe(false);
+    const { stdout: branchA } = await run('git', ['-C', wtA, 'rev-parse', '--abbrev-ref', 'HEAD']);
+    expect(branchA.trim()).toBe(`telecode/${sidA.slice(0, 8)}`);
+
+    // Session B — its own isolated worktree.
+    const sidB = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sidB,
+        payload: { prompt: 'work on B' },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sidB);
+
+    const wtB = join(worktreesRoot, sidB);
+    expect(runs[1]?.cwd).toBe(wtB);
+    expect(await readFile(join(wtB, 'agent-was-here.txt'), 'utf8')).toBe('work on B');
+    // A's worktree is untouched by B.
+    expect(await readFile(join(wtA, 'agent-was-here.txt'), 'utf8')).toBe('work on A');
+
+    // Follow-up on A reuses the same worktree cwd (resume turn).
+    relay.send(
+      makeEnvelope({
+        type: 'user.message',
+        userId,
+        deviceId,
+        sessionId: sidA,
+        payload: { text: 'keep going on A' },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sidA);
+    const followUp = runs.find((r) => r.resume !== undefined);
+    expect(followUp?.cwd).toBe(wtA);
+
+    // Kept on end: both worktrees + branches still present after the sessions ended.
+    expect(await exists(wtA)).toBe(true);
+    expect(await exists(wtB)).toBe(true);
+    const { stdout: list } = await run('git', ['-C', repoPath, 'worktree', 'list', '--porcelain']);
+    expect(list).toContain(wtA);
+    expect(list).toContain(wtB);
+  });
+
+  it('runs in the daemon cwd (no worktree) when no worktree manager is configured', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const runs: RecordedRun[] = [];
+    const relay = await startDaemon(userId, deviceId, recordingAdapter(runs));
+
+    const sid = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sid,
+        payload: { prompt: 'no repo configured' },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sid);
+
+    expect(runs[0]?.cwd).toBeUndefined();
+  });
+
+  it('ends the session with an error (agent never runs) when the worktree cannot be prepared', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const notARepo = await tempDir('telecode-not-a-repo-');
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot, logger: silent });
+    const runs: RecordedRun[] = [];
+    const relay = await startDaemon(userId, deviceId, recordingAdapter(runs), {
+      worktreeManager: manager,
+      defaultRepoPath: notARepo,
+    });
+
+    const sid = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sid,
+        payload: { prompt: 'this cannot get a worktree' },
+      }),
+    );
+    const ended = await relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.session_id === sid,
+    );
+
+    expect((ended.payload as { status: string }).status).toBe('error');
+    expect(runs).toHaveLength(0);
+  });
+});
+
+describe('daemon: clone-on-demand for a launch repo (Task 8)', () => {
+  it('clones the launch repo, cuts the worktree from the clone, and runs the agent there', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    // A committed repo standing in for the GitHub remote (cloned via its local path as the clone URL).
+    const sourceRepo = await makeRepo();
+    const reposRoot = await tempDir('telecode-repos-');
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const repoManager = createGitRepoManager({ reposRoot, logger: silent });
+    const worktreeManager = createGitWorktreeManager({ worktreesRoot, logger: silent });
+    const runs: RecordedRun[] = [];
+    // No defaultRepoPath — the repo must come from the launch payload (clone-on-demand).
+    const relay = await startDaemon(userId, deviceId, recordingAdapter(runs), {
+      worktreeManager,
+      repoManager,
+    });
+
+    const sid = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sid,
+        payload: {
+          prompt: 'work on the cloned repo',
+          repo: { owner: 'octocat', name: 'hello', cloneUrl: sourceRepo },
+        },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sid);
+
+    // The repo was cloned on demand to <reposRoot>/<owner>/<name>, carrying the source content.
+    const clonePath = join(reposRoot, 'octocat', 'hello');
+    expect(await exists(join(clonePath, 'README.md'))).toBe(true);
+
+    // The worktree was cut from that clone, and the agent ran in it.
+    const worktreePath = join(worktreesRoot, sid);
+    expect(runs[0]?.cwd).toBe(worktreePath);
+    expect(await readFile(join(worktreePath, 'agent-was-here.txt'), 'utf8')).toBe(
+      'work on the cloned repo',
+    );
+    const { stdout: list } = await run('git', ['-C', clonePath, 'worktree', 'list', '--porcelain']);
+    expect(list).toContain(worktreePath);
+  });
+});

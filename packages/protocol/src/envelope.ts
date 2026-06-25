@@ -31,6 +31,8 @@ export const MESSAGE_TYPES = [
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   'user.message',
+  // per-session controls (web -> daemon): end / interrupt / pause / resume
+  'session.control',
   // reconnect (web <-> daemon)
   'session.subscribe',
   'session.history',

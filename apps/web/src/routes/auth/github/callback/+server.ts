@@ -20,11 +20,14 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
     error(400, 'Invalid OAuth callback. Please try signing in again.');
   }
 
-  const identity = await provider.completeLogin({
+  const { identity, accessToken, scope } = await provider.completeLogin({
     code,
     redirectUri: `${url.origin}/auth/github/callback`,
   });
-  const session = await createRelaySession(identity);
+  const session = await createRelaySession(
+    identity,
+    accessToken ? { accessToken, ...(scope ? { scope } : {}) } : undefined,
+  );
   setSessionCookie(cookies, session.token, session.expiresAt);
   cookies.delete('telecode_oauth_state', { path: '/' });
   redirect(303, '/');

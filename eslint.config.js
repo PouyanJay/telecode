@@ -14,6 +14,9 @@ export default tseslint.config(
       '**/.memory/**',
       '**/*.svelte',
       '**/*.d.ts',
+      // SvelteKit compiles the service worker in a separate webworker tsconfig (so typescript-eslint's
+      // project service can't place it); it is type-checked by `svelte-check` instead.
+      '**/service-worker.ts',
     ],
   },
   js.configs.recommended,

@@ -11,19 +11,56 @@ import { z } from 'zod';
 export const permissionModeSchema = z.enum(['default', 'plan', 'acceptEdits', 'bypassPermissions']);
 export type PermissionModeName = z.infer<typeof permissionModeSchema>;
 
+/**
+ * A safe path segment for a repo owner/name: it becomes part of the daemon's on-disk clone cache path
+ * (`~/.telecode/repos/<owner>/<name>`), so it is constrained to GitHub-valid characters and may not be a
+ * traversal segment (`.`/`..`) — validated at the wire boundary so a crafted launch can't escape the cache.
+ */
+const repoPathSegmentSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9._-]+$/)
+  .refine((value) => value !== '.' && value !== '..', {
+    message: 'must not be a traversal segment',
+  });
+
+/**
+ * Payload for the `repo` a session runs in (Phase 2 Task 8): the daemon clones it on demand (using the
+ * laptop's own git credentials — the relay's GitHub token never travels here) and cuts the session's
+ * worktree from it. `cloneUrl` is the repo's public clone URL (from the repo listing).
+ */
+export const sessionRepoSchema = z.object({
+  owner: repoPathSegmentSchema,
+  name: repoPathSegmentSchema,
+  cloneUrl: z.string().min(1).max(500),
+});
+export type SessionRepo = z.infer<typeof sessionRepoSchema>;
+
 /** Payload for `session.launch` (web → daemon): parameters to start one new agent session. */
 export const sessionLaunchPayloadSchema = z.object({
   prompt: z.string().min(1),
+  /** GitHub repo to clone-on-demand and run in; omitted runs in the daemon's configured/default cwd. */
+  repo: sessionRepoSchema.optional(),
   /** Working directory for the session (single cwd in Phase 1; git worktrees in Phase 2). */
   cwd: z.string().min(1).optional(),
   permissionMode: permissionModeSchema.optional(),
   /** Optional user-facing label. */
   title: z.string().min(1).optional(),
+  /**
+   * Client-generated correlation id, echoed back on `session.started`, so the launching browser can
+   * match the relay-minted `session_id` to *its* launch (the relay assigns the id; the browser can't
+   * choose it). Opaque to the relay.
+   */
+  clientRef: z.string().min(1).optional(),
 });
 export type SessionLaunchPayload = z.infer<typeof sessionLaunchPayloadSchema>;
 
-/** Payload for `session.started` (daemon → web): the session is now running. The id is on the envelope. */
-export const sessionStartedPayloadSchema = z.object({});
+/**
+ * Payload for `session.started` (daemon → web): the session is now running. The id is on the envelope;
+ * `clientRef` echoes the launch's correlation id so the launching browser can pair its request to the id.
+ */
+export const sessionStartedPayloadSchema = z.object({ clientRef: z.string().optional() });
 export type SessionStartedPayload = z.infer<typeof sessionStartedPayloadSchema>;
 
 /** Session lifecycle states; mirrors the `sessions.status` column. */
@@ -34,6 +71,9 @@ export const SESSION_STATUSES = [
   'done',
   'error',
   'offline_paused',
+  // Operator-paused: the daemon refuses new turns until resumed (Task 9). Distinct from `offline_paused`
+  // (the device is off). TS-enum only — the `status` column is plain text, so no migration is needed.
+  'paused',
 ] as const;
 export const sessionStatusSchema = z.enum(SESSION_STATUSES);
 export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
@@ -99,3 +139,55 @@ export type PermissionDecisionPayload = z.infer<typeof permissionDecisionPayload
  */
 export const userMessagePayloadSchema = z.object({ text: z.string().min(1) });
 export type UserMessagePayload = z.infer<typeof userMessagePayloadSchema>;
+
+/**
+ * Payload for `session.control` (web → daemon): an operator control for a running session (Task 9).
+ * `interrupt` aborts the in-flight turn (the session stays followable); `end` terminates the session
+ * (no more turns); `pause` makes the daemon refuse new turns (reporting `paused`) without freezing an
+ * in-flight turn; `resume` re-enables turns. The session id is on the envelope.
+ */
+export const sessionControlActionSchema = z.enum(['end', 'interrupt', 'pause', 'resume']);
+export type SessionControlAction = z.infer<typeof sessionControlActionSchema>;
+export const sessionControlPayloadSchema = z.object({ action: sessionControlActionSchema });
+export type SessionControlPayload = z.infer<typeof sessionControlPayloadSchema>;
+
+/**
+ * Payload for `session.subscribe` (web → daemon): re-attach to an existing session on UI reopen/reload.
+ * The session id is on the envelope; the daemon replies with {@link sessionHistoryPayloadSchema}.
+ */
+export const sessionSubscribePayloadSchema = z.object({});
+export type SessionSubscribePayload = z.infer<typeof sessionSubscribePayloadSchema>;
+
+/**
+ * One entry of a backfilled transcript (in `session.history`), mirroring the UI's transcript kinds. A
+ * `permission` carries its resolved verdict so the replay shows a decided gate without action buttons
+ * (`pending` still awaits a human); `allow`/`deny` render as approved/rejected.
+ */
+export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('user'), text: z.string() }),
+  z.object({ kind: z.literal('message'), text: z.string() }),
+  z.object({
+    kind: z.literal('tool'),
+    toolName: z.string().min(1),
+    input: z.record(z.unknown()),
+  }),
+  z.object({
+    kind: z.literal('permission'),
+    requestId: z.string().min(1),
+    toolName: z.string().min(1),
+    input: z.record(z.unknown()),
+    decision: z.enum(['pending', 'allow', 'deny']),
+  }),
+]);
+export type SessionHistoryEntry = z.infer<typeof sessionHistoryEntrySchema>;
+
+/**
+ * Payload for `session.history` (daemon → web): the ordered transcript + current status, sent in
+ * response to `session.subscribe`. Backfill comes from the daemon — the live transcript holder — so the
+ * relay never needs the plaintext (consistent with E2E in Phase 3). Reopen is a reconnect, not a restart.
+ */
+export const sessionHistoryPayloadSchema = z.object({
+  status: sessionStatusSchema,
+  entries: z.array(sessionHistoryEntrySchema),
+});
+export type SessionHistoryPayload = z.infer<typeof sessionHistoryPayloadSchema>;

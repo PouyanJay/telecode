@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   agentPermissionRequestPayloadSchema,
   permissionDecisionPayloadSchema,
+  sessionControlPayloadSchema,
+  sessionHistoryPayloadSchema,
+  sessionLaunchPayloadSchema,
+  sessionStatusPayloadSchema,
   userMessagePayloadSchema,
 } from './session';
 
@@ -93,6 +97,76 @@ describe('permissionDecisionPayloadSchema', () => {
   });
 });
 
+describe('sessionLaunchPayloadSchema: repo selection (Task 8)', () => {
+  it('parses a launch carrying a repo to clone on demand', () => {
+    const parsed = sessionLaunchPayloadSchema.parse({
+      prompt: 'fix the bug',
+      repo: {
+        owner: 'octocat',
+        name: 'hello-world',
+        cloneUrl: 'https://github.com/octocat/hello-world.git',
+      },
+    });
+    expect(parsed.repo).toEqual({
+      owner: 'octocat',
+      name: 'hello-world',
+      cloneUrl: 'https://github.com/octocat/hello-world.git',
+    });
+  });
+
+  it('parses a launch with no repo (repo is optional)', () => {
+    const parsed = sessionLaunchPayloadSchema.parse({ prompt: 'just chat' });
+    expect(parsed.repo).toBeUndefined();
+  });
+
+  it('rejects a repo whose owner/name is not a safe path segment', () => {
+    for (const segment of ['..', '.', 'has/slash', 'bad space', '']) {
+      expect(
+        sessionLaunchPayloadSchema.safeParse({
+          prompt: 'x',
+          repo: { owner: segment, name: 'ok', cloneUrl: 'https://example.com/r.git' },
+        }).success,
+        `owner ${JSON.stringify(segment)} must be rejected`,
+      ).toBe(false);
+      expect(
+        sessionLaunchPayloadSchema.safeParse({
+          prompt: 'x',
+          repo: { owner: 'ok', name: segment, cloneUrl: 'https://example.com/r.git' },
+        }).success,
+        `name ${JSON.stringify(segment)} must be rejected`,
+      ).toBe(false);
+    }
+  });
+
+  it('rejects a repo with an empty clone url', () => {
+    expect(
+      sessionLaunchPayloadSchema.safeParse({
+        prompt: 'x',
+        repo: { owner: 'ok', name: 'ok', cloneUrl: '' },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('sessionControlPayloadSchema: per-session controls (Task 9)', () => {
+  it('parses each control action', () => {
+    for (const action of ['end', 'interrupt', 'pause', 'resume'] as const) {
+      expect(sessionControlPayloadSchema.parse({ action }).action).toBe(action);
+    }
+  });
+
+  it('rejects an unknown control action', () => {
+    expect(sessionControlPayloadSchema.safeParse({ action: 'restart' }).success).toBe(false);
+    expect(sessionControlPayloadSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe('sessionStatusPayloadSchema: paused status (Task 9)', () => {
+  it('accepts the paused status', () => {
+    expect(sessionStatusPayloadSchema.parse({ status: 'paused' }).status).toBe('paused');
+  });
+});
+
 describe('userMessagePayloadSchema', () => {
   it('parses a follow-up instruction', () => {
     expect(userMessagePayloadSchema.parse({ text: 'now add tests' }).text).toBe('now add tests');
@@ -100,5 +174,45 @@ describe('userMessagePayloadSchema', () => {
 
   it('rejects an empty follow-up', () => {
     expect(userMessagePayloadSchema.safeParse({ text: '' }).success).toBe(false);
+  });
+});
+
+describe('sessionHistoryPayloadSchema', () => {
+  it('parses a backfilled transcript of mixed entry kinds + status', () => {
+    const parsed = sessionHistoryPayloadSchema.parse({
+      status: 'awaiting_input',
+      entries: [
+        { kind: 'user', text: 'do it' },
+        { kind: 'message', text: 'working' },
+        { kind: 'tool', toolName: 'Read', input: { path: 'README.md' } },
+        { kind: 'permission', requestId: 'req_1', toolName: 'Write', input: {}, decision: 'allow' },
+      ],
+    });
+    expect(parsed.status).toBe('awaiting_input');
+    expect(parsed.entries).toHaveLength(4);
+  });
+
+  it('accepts an empty transcript (a not-live session)', () => {
+    expect(
+      sessionHistoryPayloadSchema.safeParse({ status: 'offline_paused', entries: [] }).success,
+    ).toBe(true);
+  });
+
+  it('rejects a permission entry with an unknown decision', () => {
+    const result = sessionHistoryPayloadSchema.safeParse({
+      status: 'running',
+      entries: [
+        { kind: 'permission', requestId: 'r', toolName: 'X', input: {}, decision: 'maybe' },
+      ],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an entry with an unknown kind', () => {
+    const result = sessionHistoryPayloadSchema.safeParse({
+      status: 'running',
+      entries: [{ kind: 'diff', text: 'x' }],
+    });
+    expect(result.success).toBe(false);
   });
 });

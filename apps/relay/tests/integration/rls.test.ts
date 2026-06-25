@@ -4,7 +4,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
-import { devices, sessions, users } from '../../src/db/schema';
+import {
+  authSessions,
+  devices,
+  oauthTokens,
+  pushSubscriptions,
+  sessions,
+  users,
+} from '../../src/db/schema';
 import { withUserContext } from '../../src/db/user-context';
 
 /**
@@ -145,5 +152,36 @@ describe('RLS isolation across the registries', () => {
     const aSelf = await withUserContext(handle, userA, (db) => db.select().from(users));
     expect(aSelf).toHaveLength(1);
     expect(aSelf[0]?.id).toBe(userA);
+  });
+
+  it('denies the user-scoped role ALL access to the owner-only secret tables', async () => {
+    // auth_sessions / oauth_tokens / push_subscriptions hold secrets the relay touches only on its
+    // trusted owner path; telecode_app is granted nothing, so even a SELECT is a permission error
+    // (deny-all). This guards the lockdown that keeps session tokens, GitHub tokens, and push endpoints
+    // unreadable by the user-scoped RLS role. (Drizzle wraps the pg error, so we check the cause chain.)
+    async function expectPermissionDenied(run: () => Promise<unknown>): Promise<void> {
+      let succeeded = false;
+      try {
+        await run();
+        succeeded = true;
+      } catch (err) {
+        // Drizzle wraps the pg error ("permission denied for table …") as the `cause`.
+        const cause = (err as { cause?: unknown }).cause;
+        const detail = `${(err as Error).message} ${cause instanceof Error ? cause.message : ''}`;
+        expect(detail).toMatch(/permission denied/i);
+      }
+      // Outside the catch: a security regression (the table becoming readable) fails loudly and clearly.
+      if (succeeded) throw new Error('expected a permission error, but the query succeeded');
+    }
+
+    await expectPermissionDenied(() =>
+      withUserContext(handle, userA, (db) => db.select().from(authSessions)),
+    );
+    await expectPermissionDenied(() =>
+      withUserContext(handle, userA, (db) => db.select().from(oauthTokens)),
+    );
+    await expectPermissionDenied(() =>
+      withUserContext(handle, userA, (db) => db.select().from(pushSubscriptions)),
+    );
   });
 });

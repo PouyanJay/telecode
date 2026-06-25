@@ -122,20 +122,27 @@ test.afterAll(() => {
   daemon?.kill();
 });
 
-async function signInAndLaunch(
-  page: import('@playwright/test').Page,
-  prompt: string,
-): Promise<void> {
+type Page = import('@playwright/test').Page;
+
+/** Sign in and wait for the dashboard's channel to connect. */
+async function signIn(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('button', { name: 'Continue as developer' }).click();
-  // Device is paired → the session view is shown and the browser connects to the relay.
   await expect(page.getByText('CONNECTED')).toBeVisible({ timeout: 10_000 });
-  await page.getByLabel('Prompt').fill(prompt);
-  await page.getByRole('button', { name: 'Launch' }).click();
 }
 
-test('launches a session, streams it, and runs the gated tool once approved', async ({ page }) => {
-  await signInAndLaunch(page, 'Add a hello line to the README');
+/** Launch a session from the dashboard; resolves once the per-id session view is shown. */
+async function launchFromDashboard(page: Page, prompt: string): Promise<void> {
+  await page.getByLabel('Task').fill(prompt);
+  await page.getByRole('button', { name: 'Launch' }).click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
+}
+
+test('launch from the dashboard, stream on the session view, approve the gated tool', async ({
+  page,
+}) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Add a hello line to the README');
 
   // The agent's first message streams in, then it blocks on the Write tool awaiting a human decision.
   await expect(page.getByText('Planning the change')).toBeVisible();
@@ -149,13 +156,47 @@ test('launches a session, streams it, and runs the gated tool once approved', as
   await expect(page.getByText('DONE')).toBeVisible();
 });
 
-test('sends a follow-up that resumes the session for a second turn', async ({ page }) => {
-  await signInAndLaunch(page, 'Add a hello line to the README');
+test('the launched session appears in the dashboard list with live status', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Add a hello line to the README');
+  // It backfilled on the session view, so its prompt becomes the list title; the gate is still pending.
+  await expect(page.getByText('Planning the change')).toBeVisible();
+
+  await page.getByRole('link', { name: '← Sessions' }).click();
+  await expect(page).toHaveURL(/\/$/);
+
+  // This specific session is listed, showing its live awaiting-input status (sorted to the top).
+  const row = page.getByRole('link', { name: /Add a hello line to the README/ });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('AWAITING INPUT');
+});
+
+test('reopen = reconnect: the transcript restores after a reload (daemon backfill)', async ({
+  page,
+}) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Add a hello line to the README');
   await page.getByRole('button', { name: 'Approve' }).click();
   await expect(page.getByText('Finished')).toBeVisible();
 
-  // With a session live, the composer steers it: a follow-up appears in the transcript and the agent
-  // responds in a second turn.
+  // Reload the session view: the in-memory store is cleared, so the daemon must backfill the transcript
+  // via session.subscribe → session.history (reopen is a reconnect, never a restart).
+  await page.reload();
+  await expect(page.getByText('Planning the change')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Finished')).toBeVisible();
+  await expect(page.getByText('DONE')).toBeVisible();
+  // The previously-approved gate replays as decided, not as a fresh actionable prompt.
+  await expect(page.getByText('APPROVED')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0);
+});
+
+test('sends a follow-up that resumes the session for a second turn', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Add a hello line to the README');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  // The composer steers the session: the follow-up appears and the agent responds in a second turn.
   await page.getByLabel('Prompt').fill('now write a test too');
   await page.getByRole('button', { name: 'Send' }).click();
 
@@ -164,7 +205,8 @@ test('sends a follow-up that resumes the session for a second turn', async ({ pa
 });
 
 test('rejects the gated tool and the session finishes without running it', async ({ page }) => {
-  await signInAndLaunch(page, 'Try to overwrite a file');
+  await signIn(page);
+  await launchFromDashboard(page, 'Try to overwrite a file');
 
   await expect(page.getByRole('button', { name: 'Reject' })).toBeVisible();
   await page.getByRole('button', { name: 'Reject' }).click();
@@ -174,4 +216,43 @@ test('rejects the gated tool and the session finishes without running it', async
   await expect(page.getByText('DONE')).toBeVisible();
   // The Write tool never ran — no executed tool-call entry appears in the transcript.
   await expect(page.getByText('TOOL', { exact: true })).toHaveCount(0);
+});
+
+test('interrupt stops a running turn and the session ends (done)', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'a long task');
+  // The turn is in flight (gated, awaiting input), so the Interrupt control is offered.
+  await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
+  await page.getByRole('button', { name: 'Interrupt' }).click();
+  await expect(page.getByText('DONE')).toBeVisible();
+});
+
+test('pause reports paused and resume clears it', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'a task to pause');
+  await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await expect(page.getByText('PAUSED')).toBeVisible();
+  // The composer is closed to follow-ups while paused.
+  await expect(page.getByPlaceholder('Paused — resume to send a follow-up…')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Resume' }).click();
+  await expect(page.getByText('PAUSED')).toHaveCount(0);
+});
+
+// NOTE: the "Enable notifications" affordance can't be e2e'd — headless Chromium reports web push
+// `unsupported` (no PushManager/Notification), and real push delivery needs a push service. The pure
+// VAPID-key conversion is unit-tested (push-key.test.ts); the SW + subscribe flow are verified manually.
+
+test('the launch form prompts to connect GitHub when no repo is available (dev user)', async ({
+  page,
+}) => {
+  await signIn(page);
+  // The dev user has no stored GitHub token, so the picker degrades to a connect prompt — and a launch
+  // with no repo still works (it runs in the daemon's default workspace).
+  await expect(page.getByText(/Connect GitHub to run a session/)).toBeVisible();
+  await expect(page.getByLabel('Repository')).toHaveCount(0);
+  await launchFromDashboard(page, 'Work without a repo');
+  await expect(page.getByText('Planning the change')).toBeVisible();
 });

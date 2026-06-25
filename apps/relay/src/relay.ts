@@ -8,15 +8,23 @@ import {
   makeEnvelope,
   parseEnvelope,
   sessionEndedPayloadSchema,
+  sessionStatusPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
 
 import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
+import { type OAuthTokenStore } from './auth/oauth-token-store';
+import { createGithubClient, type GithubClient } from './github/github-client';
+import { registerRepoListRoute } from './github/repo-routes';
+import { registerPushRoutes } from './push/push-routes';
+import { type PushSender } from './push/push-sender';
+import { type PushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceListRoute } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
+import { registerSessionListRoute } from './registry/session-routes';
 
 /**
  * The relay / control plane. Both the daemon and the browser dial *out* to it (loopback in
@@ -40,12 +48,26 @@ export interface RelayOptions {
    */
   readonly auth?: { readonly service: AuthService; readonly serviceSecret: string };
   /**
+   * Stores the user's OAuth access token encrypted at rest (requires `auth`). When provided, an access
+   * token sent on `/auth/session` is persisted, and `/me/repos` is exposed (lists the user's GitHub
+   * repos). Optional so deployments without a token-encryption key simply omit repo listing.
+   */
+  readonly oauthTokenStore?: OAuthTokenStore;
+  /**
    * Device registry (Postgres-backed). When provided (with `auth` for the service secret), the relay
    * exposes the device-authorization endpoints — `/device/approve` persists the device under the
    * server-derived user — and requires every `daemon` peer to present a valid device token on `hello`
    * whose device matches the envelope's `(user_id, device_id)`. Optional so the echo path needs no DB.
    */
   readonly deviceRegistry?: DeviceRegistry;
+  /** GitHub API client for `/me/repos`. Defaults to the real HTTP client; tests inject a fake. */
+  readonly githubClient?: GithubClient;
+  /**
+   * Web push (requires `auth`). When provided, the relay exposes the subscription endpoints and sends a
+   * notification to the user's subscriptions when a session goes `awaiting_input`. The sender is a DI
+   * seam (real `web-push` impl in production; a fake in tests).
+   */
+  readonly push?: { readonly store: PushSubscriptionStore; readonly sender: PushSender };
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -67,6 +89,39 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   const sessionRegistry = options.sessionRegistry;
   const authService = options.auth?.service;
   const deviceRegistry = options.deviceRegistry;
+  const oauthTokenStore = options.oauthTokenStore;
+  const push = options.push;
+
+  /**
+   * Notify the user's devices that a session needs input (Task 10). Fire-and-forget: it must never block
+   * frame routing, and a failed/expired push (pruned on `gone`) must not surface as a relay error. The
+   * payload is routing metadata only (id + deep-link) — never agent content (the relay can't read it).
+   */
+  function pushAwaitingInput(userId: string, sessionId: string): void {
+    if (!push) return;
+    void (async (): Promise<void> => {
+      const subscriptions = await push.store.listByUser(userId).catch((err: unknown) => {
+        log.warn({ err, sessionId }, 'relay: could not list push subscriptions');
+        return [];
+      });
+      // allSettled, not all: one device's failed/expired push must not drop the others.
+      const results = await Promise.allSettled(
+        subscriptions.map(async (subscription) => {
+          const { gone } = await push.sender.send(subscription, {
+            title: 'A session needs your input',
+            body: 'Tap to review the pending action.',
+            data: { sessionId, url: `/sessions/${sessionId}` },
+          });
+          if (gone) await push.store.deleteByEndpoint({ userId, endpoint: subscription.endpoint });
+        }),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          log.warn({ err: result.reason, sessionId }, 'relay: a push delivery failed');
+        }
+      }
+    })();
+  }
 
   function broadcastToBrowsers(channel: string, frame: string): void {
     const set = browsers.get(channel);
@@ -180,6 +235,29 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           sessionId: envelope.session_id,
         });
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session awaiting input');
+        // Ping the user (web push) that a session needs them — fire-and-forget, routing metadata only.
+        pushAwaitingInput(envelope.user_id, envelope.session_id);
+      } else if (envelope.type === 'session.status') {
+        // A daemon status report (Task 9 pause/resume) — persist it so a reload/dashboard reflects it.
+        // Type-only routing: the relay never reads the agent payload, only the status it transitions to.
+        const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
+        if (parsed.success) {
+          const status = parsed.data.status;
+          if (status === 'paused' || status === 'running' || status === 'awaiting_input') {
+            await sessionRegistry.markStatus({
+              userId: envelope.user_id,
+              sessionId: envelope.session_id,
+              status,
+            });
+          } else if (status === 'done' || status === 'error') {
+            await sessionRegistry.markEnded({
+              userId: envelope.user_id,
+              sessionId: envelope.session_id,
+              status,
+            });
+          }
+          log.info({ channel, sessionId: envelope.session_id, status }, 'relay: session status');
+        }
       }
     }
     broadcastToBrowsers(channel, text);
@@ -201,10 +279,30 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   // OAuth-session + channel-token endpoints (web → relay, server-to-server).
   if (options.auth) {
-    registerAuthRoutes(app, options.auth.service, { serviceSecret: options.auth.serviceSecret });
+    registerAuthRoutes(app, options.auth.service, {
+      serviceSecret: options.auth.serviceSecret,
+      ...(oauthTokenStore ? { tokenStore: oauthTokenStore } : {}),
+    });
     // The web lists the user's devices to pick the channel its browser should watch.
     if (deviceRegistry) {
       registerDeviceListRoute(app, options.auth.service, deviceRegistry);
+    }
+    // The dashboard + reconnect list the user's sessions (status, device, title).
+    if (sessionRegistry) {
+      registerSessionListRoute(app, options.auth.service, sessionRegistry);
+    }
+    // The launch picker lists the user's GitHub repos (only when a token store is configured).
+    if (oauthTokenStore) {
+      registerRepoListRoute(
+        app,
+        options.auth.service,
+        oauthTokenStore,
+        options.githubClient ?? createGithubClient(),
+      );
+    }
+    // Web push: register/remove subscriptions (the relay sends on awaiting_input).
+    if (push) {
+      registerPushRoutes(app, options.auth.service, push.store);
     }
   }
 
