@@ -155,6 +155,7 @@ export interface RelayRepo {
   owner: string;
   private: boolean;
   defaultBranch: string;
+  cloneUrl: string;
 }
 
 /** The user's repos plus whether they've linked a GitHub token (`connected: false` → prompt to link). */
@@ -184,6 +185,7 @@ export async function listRepos(sessionToken: string): Promise<RepoList> {
       owner: string;
       private: boolean;
       default_branch: string;
+      clone_url: string;
     }[];
   };
   return {
@@ -195,6 +197,7 @@ export async function listRepos(sessionToken: string): Promise<RepoList> {
       owner: repo.owner,
       private: repo.private,
       defaultBranch: repo.default_branch,
+      cloneUrl: repo.clone_url,
     })),
   };
 }

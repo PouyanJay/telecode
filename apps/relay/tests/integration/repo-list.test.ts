@@ -29,6 +29,7 @@ const REPOS: GithubRepo[] = [
     owner: 'octocat',
     private: false,
     defaultBranch: 'main',
+    cloneUrl: 'https://github.com/octocat/hello.git',
   },
   {
     id: 2,
@@ -37,6 +38,7 @@ const REPOS: GithubRepo[] = [
     owner: 'octocat',
     private: true,
     defaultBranch: 'develop',
+    cloneUrl: 'https://github.com/octocat/secret.git',
   },
 ];
 
@@ -117,6 +119,7 @@ describe('relay repo listing: GET /me/repos', () => {
           owner: 'octocat',
           private: false,
           default_branch: 'main',
+          clone_url: 'https://github.com/octocat/hello.git',
         },
         {
           id: 2,
@@ -125,6 +128,7 @@ describe('relay repo listing: GET /me/repos', () => {
           owner: 'octocat',
           private: true,
           default_branch: 'develop',
+          clone_url: 'https://github.com/octocat/secret.git',
         },
       ],
     });

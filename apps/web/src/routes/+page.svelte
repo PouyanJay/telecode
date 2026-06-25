@@ -6,6 +6,7 @@
   import { Button, StatusDot } from '@telecode/ui';
 
   import TopBar from '$lib/components/TopBar.svelte';
+  import { launchRepo } from '$lib/launch-repo';
   import type { SessionState, SessionStatus } from '$lib/session';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
@@ -22,6 +23,7 @@
 
   const user = $derived(data.user);
   const device = $derived(data.devices[0] ?? null);
+  const repos = $derived(data.repos);
 
   interface Row {
     id: string;
@@ -66,6 +68,7 @@
 
   let prompt = $state('');
   let title = $state('');
+  let selectedRepoId = $state('');
   let launching = $state(false);
   let launchError: string | null = $state(null);
 
@@ -82,7 +85,12 @@
     launching = true;
     launchError = null;
     try {
-      const id = await launch({ prompt: text, ...(title.trim() ? { title: title.trim() } : {}) });
+      const repo = launchRepo(repos, selectedRepoId);
+      const id = await launch({
+        prompt: text,
+        ...(title.trim() ? { title: title.trim() } : {}),
+        ...(repo ? { repo } : {}),
+      });
       await goto(`/sessions/${id}`);
     } catch (err) {
       launchError = err instanceof Error ? err.message : 'Launch failed.';
@@ -127,6 +135,24 @@
     <section class="body" aria-label="Sessions">
       <form class="launch" onsubmit={onLaunch} aria-label="Launch a session">
         <p class="eyebrow">LAUNCH A SESSION ON {device.name}</p>
+        {#if data.githubConnected && repos.length > 0}
+          <label class="repo-field">
+            <span class="field-label">Repository</span>
+            <select class="repo" bind:value={selectedRepoId} aria-label="Repository">
+              <option value="">No repo — run in the default workspace</option>
+              {#each repos as repo (repo.id)}
+                <option value={String(repo.id)}>{repo.fullName}{repo.private ? ' (private)' : ''}</option>
+              {/each}
+            </select>
+          </label>
+        {:else if data.githubConnected}
+          <p class="repo-note">No repositories found for your GitHub account.</p>
+        {:else}
+          <p class="repo-note">
+            Connect GitHub to run a session in one of your repos. The session runs in the daemon’s
+            default workspace until then.
+          </p>
+        {/if}
         <textarea
           class="prompt"
           bind:value={prompt}
@@ -294,6 +320,41 @@
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  /* Repo picker */
+  .repo-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .field-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--text-muted);
+  }
+  .repo {
+    width: 100%;
+    height: 40px;
+    padding: 0 var(--space-3);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+  .repo:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .repo-note {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    line-height: var(--lh-base);
   }
   .launch-row {
     display: flex;

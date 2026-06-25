@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 
-import { destroyRelaySession, listDevices, listSessions } from '$lib/server/relay-api';
+import { destroyRelaySession, listDevices, listRepos, listSessions } from '$lib/server/relay-api';
 import { clearSessionCookie, getSessionToken } from '$lib/server/session-cookie';
 
 import type { Actions, PageServerLoad } from './$types';
@@ -11,10 +11,17 @@ export const load: PageServerLoad = async ({ locals, cookies }) => {
   }
   const token = getSessionToken(cookies);
   // The persisted session list survives UI restarts (reopen = reconnect); live status overlays it.
-  const [devices, sessions] = token
-    ? await Promise.all([listDevices(token), listSessions(token)])
-    : [[], []];
-  return { user: locals.user, devices, sessions };
+  // Repos populate the launch picker (clone-on-demand); `connected:false` until the user links GitHub.
+  const [devices, sessions, repoList] = token
+    ? await Promise.all([listDevices(token), listSessions(token), listRepos(token)])
+    : [[], [], { connected: false, repos: [] }];
+  return {
+    user: locals.user,
+    devices,
+    sessions,
+    githubConnected: repoList.connected,
+    repos: repoList.repos,
+  };
 };
 
 export const actions: Actions = {

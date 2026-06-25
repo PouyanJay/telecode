@@ -11,6 +11,8 @@ export interface GithubRepo {
   readonly owner: string;
   readonly private: boolean;
   readonly defaultBranch: string;
+  /** HTTPS clone URL — the daemon clones this (with the laptop's own git credentials) on launch. */
+  readonly cloneUrl: string;
 }
 
 export interface GithubClient {
@@ -26,6 +28,7 @@ interface GithubApiRepo {
   owner: { login: string };
   private: boolean;
   default_branch: string;
+  clone_url: string;
 }
 
 /** Error thrown when GitHub rejects the request, with the HTTP status for the route to map to 502. */
@@ -68,6 +71,7 @@ export function createGithubClient(): GithubClient {
         owner: repo.owner.login,
         private: repo.private,
         defaultBranch: repo.default_branch,
+        cloneUrl: repo.clone_url,
       }));
     },
   };

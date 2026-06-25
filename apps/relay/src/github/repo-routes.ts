@@ -43,6 +43,7 @@ export function registerRepoListRoute(
           owner: repo.owner,
           private: repo.private,
           default_branch: repo.defaultBranch,
+          clone_url: repo.cloneUrl,
         })),
       });
     } catch {

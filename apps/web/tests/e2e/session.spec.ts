@@ -217,3 +217,15 @@ test('rejects the gated tool and the session finishes without running it', async
   // The Write tool never ran — no executed tool-call entry appears in the transcript.
   await expect(page.getByText('TOOL', { exact: true })).toHaveCount(0);
 });
+
+test('the launch form prompts to connect GitHub when no repo is available (dev user)', async ({
+  page,
+}) => {
+  await signIn(page);
+  // The dev user has no stored GitHub token, so the picker degrades to a connect prompt — and a launch
+  // with no repo still works (it runs in the daemon's default workspace).
+  await expect(page.getByText(/Connect GitHub to run a session/)).toBeVisible();
+  await expect(page.getByLabel('Repository')).toHaveCount(0);
+  await launchFromDashboard(page, 'Work without a repo');
+  await expect(page.getByText('Planning the change')).toBeVisible();
+});
