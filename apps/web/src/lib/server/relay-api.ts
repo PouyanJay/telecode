@@ -30,6 +30,8 @@ export interface RelayDevice {
   id: string;
   name: string;
   lastSeenAt: Date | null;
+  /** The device daemon's X25519 public key (base64) for E2E key exchange; null if paired pre-E2E. */
+  publicKey: string | null;
 }
 
 /** A session in the user's registry (routing metadata only) — the dashboard's persisted list source. */
@@ -108,12 +110,13 @@ export async function listDevices(sessionToken: string): Promise<RelayDevice[]> 
     return [];
   }
   const body = (await res.json()) as {
-    devices: { id: string; name: string; last_seen_at: string | null }[];
+    devices: { id: string; name: string; last_seen_at: string | null; public_key: string | null }[];
   };
   return body.devices.map((device) => ({
     id: device.id,
     name: device.name,
     lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
+    publicKey: device.public_key ?? null,
   }));
 }
 

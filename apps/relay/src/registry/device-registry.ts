@@ -21,6 +21,8 @@ export interface ActiveDevice {
   readonly id: string;
   readonly name: string;
   readonly lastSeenAt: Date | null;
+  /** The device's X25519 public key (base64) for E2E key exchange; null for devices paired pre-E2E. */
+  readonly publicKey: string | null;
 }
 
 export interface DeviceRegistry {
@@ -64,7 +66,12 @@ export function createDeviceRegistry(db: DbHandle): DeviceRegistry {
     async findActiveByUser(userId): Promise<ActiveDevice[]> {
       return withUserContext(db, userId, async (scoped) =>
         scoped
-          .select({ id: devices.id, name: devices.name, lastSeenAt: devices.lastSeenAt })
+          .select({
+            id: devices.id,
+            name: devices.name,
+            lastSeenAt: devices.lastSeenAt,
+            publicKey: devices.publicKey,
+          })
           .from(devices)
           .where(and(eq(devices.userId, userId), isNull(devices.revokedAt)))
           .orderBy(desc(devices.createdAt)),

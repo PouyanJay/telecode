@@ -78,6 +78,33 @@ describe('relay device listing: GET /me/devices', () => {
     expect(body.devices[0]).toMatchObject({ id: aliceDeviceId, name: 'alice-laptop' });
   });
 
+  it('returns each device’s public key (base64) for E2E key exchange, null when unset', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const publicKey = `${'A'.repeat(43)}=`;
+    const keyedId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'keyed-laptop',
+      deviceTokenHash: 'hash-keyed',
+      publicKey,
+    });
+    const unkeyedId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'legacy-laptop',
+      deviceTokenHash: 'hash-legacy',
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/me/devices',
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ devices: { id: string; public_key: string | null }[] }>();
+    const byId = new Map(body.devices.map((d) => [d.id, d.public_key]));
+    expect(byId.get(keyedId)).toBe(publicKey);
+    expect(byId.get(unkeyedId)).toBeNull();
+  });
+
   it('omits revoked devices', async () => {
     const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
     const deviceId = await registry.createDevice({
