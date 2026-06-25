@@ -160,15 +160,18 @@ describe('RLS isolation across the registries', () => {
     // (deny-all). This guards the lockdown that keeps session tokens, GitHub tokens, and push endpoints
     // unreadable by the user-scoped RLS role. (Drizzle wraps the pg error, so we check the cause chain.)
     async function expectPermissionDenied(run: () => Promise<unknown>): Promise<void> {
+      let succeeded = false;
       try {
         await run();
-        throw new Error('expected a permission error, but the query succeeded');
+        succeeded = true;
       } catch (err) {
         // Drizzle wraps the pg error ("permission denied for table …") as the `cause`.
         const cause = (err as { cause?: unknown }).cause;
         const detail = `${(err as Error).message} ${cause instanceof Error ? cause.message : ''}`;
         expect(detail).toMatch(/permission denied/i);
       }
+      // Outside the catch: a security regression (the table becoming readable) fails loudly and clearly.
+      if (succeeded) throw new Error('expected a permission error, but the query succeeded');
     }
 
     await expectPermissionDenied(() =>

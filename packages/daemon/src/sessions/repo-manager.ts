@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
-import { access, mkdir } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
 import { pino, type Logger } from 'pino';
+
+import { pathExists } from './path-exists';
 
 const run = promisify(execFile);
 
@@ -44,15 +46,6 @@ export interface GitRepoManagerOptions {
 export function createGitRepoManager(options: GitRepoManagerOptions): RepoManager {
   const log = options.logger ?? pino({ name: 'repo-manager' });
   const reposRoot = resolve(options.reposRoot);
-
-  async function pathExists(path: string): Promise<boolean> {
-    try {
-      await access(path);
-      return true;
-    } catch {
-      return false;
-    }
-  }
 
   return {
     async ensureClone(repo): Promise<string> {

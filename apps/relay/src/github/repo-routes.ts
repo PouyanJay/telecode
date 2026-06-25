@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 
 import { type AuthService } from '../auth/auth-service';
-import { bearerToken } from '../auth/bearer';
 import { type OAuthTokenStore } from '../auth/oauth-token-store';
+import { requireUser } from '../auth/require-auth';
 import { type GithubClient } from './github-client';
 
 /**
@@ -18,14 +18,8 @@ export function registerRepoListRoute(
   github: GithubClient,
 ): void {
   app.get('/me/repos', async (request, reply) => {
-    const sessionToken = bearerToken(request);
-    if (!sessionToken) {
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-    const userId = await auth.validateSession(sessionToken);
-    if (!userId) {
-      return reply.code(401).send({ error: 'invalid_session' });
-    }
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
 
     const stored = await tokenStore.getToken(userId);
     if (!stored) {

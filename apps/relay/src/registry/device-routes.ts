@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
-import { bearerToken } from '../auth/bearer';
 import { type AuthService } from '../auth/auth-service';
+import { requireUser } from '../auth/require-auth';
 import { type DeviceRegistry } from './device-registry';
 
 /**
@@ -15,14 +15,8 @@ export function registerDeviceListRoute(
   registry: DeviceRegistry,
 ): void {
   app.get('/me/devices', async (request, reply) => {
-    const token = bearerToken(request);
-    if (!token) {
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-    const userId = await auth.validateSession(token);
-    if (!userId) {
-      return reply.code(401).send({ error: 'invalid_session' });
-    }
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
     const devices = await registry.findActiveByUser(userId);
     return reply.send({
       devices: devices.map((device) => ({

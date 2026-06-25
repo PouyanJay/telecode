@@ -33,6 +33,15 @@ export interface VapidConfig {
   readonly privateKey: string;
 }
 
+/** Narrow an unknown caught error to one carrying a specific web-push HTTP status. */
+function isStatus(err: unknown, status: number): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { statusCode?: unknown }).statusCode === status
+  );
+}
+
 /** The real sender: encrypts the payload to the subscription keys and delivers it via web-push + VAPID. */
 export function createWebPushSender(vapid: VapidConfig): PushSender {
   webpush.setVapidDetails(vapid.subject, vapid.publicKey, vapid.privateKey);
@@ -48,9 +57,8 @@ export function createWebPushSender(vapid: VapidConfig): PushSender {
         );
         return { gone: false };
       } catch (err) {
-        const statusCode = (err as { statusCode?: number }).statusCode;
         // 404/410: the subscription is dead (browser unsubscribed / endpoint expired) → prune it.
-        if (statusCode === 404 || statusCode === 410) {
+        if (isStatus(err, 404) || isStatus(err, 410)) {
           return { gone: true };
         }
         throw err;

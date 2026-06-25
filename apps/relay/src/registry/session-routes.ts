@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { type AuthService } from '../auth/auth-service';
-import { bearerToken } from '../auth/bearer';
+import { requireUser } from '../auth/require-auth';
 import { type SessionRegistry } from './session-registry';
 
 /**
@@ -17,14 +17,8 @@ export function registerSessionListRoute(
   registry: SessionRegistry,
 ): void {
   app.get('/me/sessions', async (request, reply) => {
-    const token = bearerToken(request);
-    if (!token) {
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-    const userId = await auth.validateSession(token);
-    if (!userId) {
-      return reply.code(401).send({ error: 'invalid_session' });
-    }
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
     const sessions = await registry.listByUser(userId);
     return reply.send({
       sessions: sessions.map((session) => ({

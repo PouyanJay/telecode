@@ -1,9 +1,11 @@
 import { execFile } from 'node:child_process';
-import { access, mkdir } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { pino, type Logger } from 'pino';
+
+import { pathExists } from './path-exists';
 
 const run = promisify(execFile);
 
@@ -46,15 +48,6 @@ export interface GitWorktreeManagerOptions {
 export function createGitWorktreeManager(options: GitWorktreeManagerOptions): WorktreeManager {
   const log = options.logger ?? pino({ name: 'worktree-manager' });
   const worktreesRoot = resolve(options.worktreesRoot);
-
-  async function pathExists(path: string): Promise<boolean> {
-    try {
-      await access(path);
-      return true;
-    } catch {
-      return false;
-    }
-  }
 
   return {
     async ensureWorktree(sessionId, repoPath): Promise<SessionWorktree> {

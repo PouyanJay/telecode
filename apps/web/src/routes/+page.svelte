@@ -54,8 +54,7 @@
   });
 
   function firstPrompt(entries: SessionState['entries']): string | undefined {
-    const entry = entries.find((e) => e.kind === 'user');
-    return entry?.kind === 'user' ? entry.text : undefined;
+    return entries.find((e) => e.kind === 'user')?.text;
   }
 
   function relativeTime(date: Date): string {

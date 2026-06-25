@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 /**
  * The seam that isolates GitHub's REST API from the relay's routes — a DI boundary like the daemon's
  * `AgentAdapter`, so the real network impl is swapped for a fake in tests. The relay calls GitHub on the
@@ -20,16 +22,18 @@ export interface GithubClient {
   listRepos(accessToken: string): Promise<GithubRepo[]>;
 }
 
-/** The shape of a repo in GitHub's `GET /user/repos` response (only the fields we read). */
-interface GithubApiRepo {
-  id: number;
-  full_name: string;
-  name: string;
-  owner: { login: string };
-  private: boolean;
-  default_branch: string;
-  clone_url: string;
-}
+/** The fields we read from GitHub's `GET /user/repos` response — validated at this trust boundary. */
+const githubApiReposSchema = z.array(
+  z.object({
+    id: z.number(),
+    full_name: z.string(),
+    name: z.string(),
+    owner: z.object({ login: z.string() }),
+    private: z.boolean(),
+    default_branch: z.string(),
+    clone_url: z.string(),
+  }),
+);
 
 /** Error thrown when GitHub rejects the request, with the HTTP status for the route to map to 502. */
 export class GithubApiError extends Error {
@@ -63,8 +67,11 @@ export function createGithubClient(): GithubClient {
       if (!res.ok) {
         throw new GithubApiError(`GitHub repo listing failed: ${res.status}`, res.status);
       }
-      const repos = (await res.json()) as GithubApiRepo[];
-      return repos.map((repo) => ({
+      const parsed = githubApiReposSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        throw new GithubApiError('unexpected GitHub repo-listing response shape', 502);
+      }
+      return parsed.data.map((repo) => ({
         id: repo.id,
         fullName: repo.full_name,
         name: repo.name,

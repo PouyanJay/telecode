@@ -4,6 +4,7 @@ import { bearerToken } from './bearer';
 import { constantTimeEquals } from './secret-compare';
 import { type AuthService, createSessionRequestSchema } from './auth-service';
 import { type OAuthTokenStore } from './oauth-token-store';
+import { requireUser } from './require-auth';
 
 /**
  * Relay HTTP auth endpoints, all called server-to-server by the SvelteKit web tier (the browser never
@@ -70,14 +71,8 @@ export function registerAuthRoutes(
 
   // Web → relay: exchange a valid session for a short-lived channel token (for the browser WS).
   app.post('/channel-token', async (request, reply) => {
-    const token = bearerToken(request);
-    if (!token) {
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-    const userId = await auth.validateSession(token);
-    if (!userId) {
-      return reply.code(401).send({ error: 'invalid_session' });
-    }
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
     const channelToken = await auth.mintChannelToken(userId);
     return reply.send({ channel_token: channelToken, user_id: userId });
   });

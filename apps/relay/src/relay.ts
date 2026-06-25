@@ -100,21 +100,25 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   function pushAwaitingInput(userId: string, sessionId: string): void {
     if (!push) return;
     void (async (): Promise<void> => {
-      try {
-        const subscriptions = await push.store.listByUser(userId);
-        await Promise.all(
-          subscriptions.map(async (subscription) => {
-            const { gone } = await push.sender.send(subscription, {
-              title: 'A session needs your input',
-              body: 'Tap to review the pending action.',
-              data: { sessionId, url: `/sessions/${sessionId}` },
-            });
-            if (gone)
-              await push.store.deleteByEndpoint({ userId, endpoint: subscription.endpoint });
-          }),
-        );
-      } catch (err) {
-        log.warn({ err, sessionId }, 'relay: failed to send awaiting-input push');
+      const subscriptions = await push.store.listByUser(userId).catch((err: unknown) => {
+        log.warn({ err, sessionId }, 'relay: could not list push subscriptions');
+        return [];
+      });
+      // allSettled, not all: one device's failed/expired push must not drop the others.
+      const results = await Promise.allSettled(
+        subscriptions.map(async (subscription) => {
+          const { gone } = await push.sender.send(subscription, {
+            title: 'A session needs your input',
+            body: 'Tap to review the pending action.',
+            data: { sessionId, url: `/sessions/${sessionId}` },
+          });
+          if (gone) await push.store.deleteByEndpoint({ userId, endpoint: subscription.endpoint });
+        }),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          log.warn({ err: result.reason, sessionId }, 'relay: a push delivery failed');
+        }
       }
     })();
   }

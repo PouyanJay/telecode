@@ -21,13 +21,16 @@ export interface PushSubscriptionStore {
 export function createPushSubscriptionStore(db: DbHandle): PushSubscriptionStore {
   return {
     async save({ userId, endpoint, p256dh, auth }): Promise<void> {
-      // Owner connection (push_subscriptions is owner-only). Re-subscribing the same endpoint updates it.
+      // Owner connection (push_subscriptions is owner-only). Re-subscribing the same endpoint refreshes
+      // its keys, but `setWhere` pins the update to the owning user so a (high-entropy, effectively
+      // unguessable) endpoint collision can never silently reassign another user's subscription.
       await db.db
         .insert(pushSubscriptions)
         .values({ userId, endpoint, p256dh, auth })
         .onConflictDoUpdate({
           target: pushSubscriptions.endpoint,
-          set: { userId, p256dh, auth },
+          set: { p256dh, auth },
+          setWhere: eq(pushSubscriptions.userId, userId),
         });
     },
 

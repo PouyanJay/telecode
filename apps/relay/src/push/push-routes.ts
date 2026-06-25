@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { type AuthService } from '../auth/auth-service';
-import { bearerToken } from '../auth/bearer';
+import { requireUser } from '../auth/require-auth';
 import { type PushSubscriptionStore } from './push-subscription-store';
 
 /**
@@ -22,10 +22,8 @@ export function registerPushRoutes(
   store: PushSubscriptionStore,
 ): void {
   app.post('/me/push-subscriptions', async (request, reply) => {
-    const token = bearerToken(request);
-    if (!token) return reply.code(401).send({ error: 'unauthorized' });
-    const userId = await auth.validateSession(token);
-    if (!userId) return reply.code(401).send({ error: 'invalid_session' });
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
 
     const parsed = subscriptionSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_request' });
@@ -40,10 +38,8 @@ export function registerPushRoutes(
   });
 
   app.delete('/me/push-subscriptions', async (request, reply) => {
-    const token = bearerToken(request);
-    if (!token) return reply.code(401).send({ error: 'unauthorized' });
-    const userId = await auth.validateSession(token);
-    if (!userId) return reply.code(401).send({ error: 'invalid_session' });
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
 
     const parsed = unsubscribeSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid_request' });

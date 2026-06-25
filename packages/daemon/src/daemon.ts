@@ -218,10 +218,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * then abort the run. Returns whether a turn was actually in flight.
    */
   function stopTurn(sessionId: string, reason: string): boolean {
-    const record = sessionRecords.get(sessionId);
+    const sessionRecord = sessionRecords.get(sessionId);
     for (const [requestId, pending] of pendingPermissions) {
       if (pending.sessionId !== sessionId) continue;
-      const entry = record?.transcript.find(
+      const entry = sessionRecord?.transcript.find(
         (e): e is Extract<SessionHistoryEntry, { kind: 'permission' }> =>
           e.kind === 'permission' && e.requestId === requestId,
       );

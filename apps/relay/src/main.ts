@@ -20,6 +20,8 @@ const log = pino({
     paths: [
       'token',
       '*.token',
+      'accessToken',
+      '*.accessToken',
       'payload',
       '*.payload',
       'text',
