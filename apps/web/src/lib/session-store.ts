@@ -25,6 +25,8 @@ export interface ConnectOptions {
   readonly userId: string;
   readonly deviceId: string;
   readonly channelToken: string;
+  /** The watched device's X25519 public key (base64) for E2E; null/undefined keeps the channel cleartext. */
+  readonly daemonPublicKey?: string | null;
 }
 
 interface PendingLaunch {
@@ -80,6 +82,7 @@ export function connect(
     userId: options.userId,
     deviceId: options.deviceId,
     channelToken: options.channelToken,
+    daemonPublicKey: options.daemonPublicKey,
     onStatus: (status) => connState.set(status),
     onEvent: handleEvent,
   });
@@ -101,6 +104,7 @@ export function ensureConnection(options: {
   relayUrl: string;
   userId: string;
   deviceId: string;
+  daemonPublicKey?: string | null;
 }): Promise<void> {
   if (connection) return Promise.resolve();
   connecting ??= (async () => {

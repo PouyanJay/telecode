@@ -76,7 +76,12 @@
   onMount(() => {
     pushState = pushPermission();
     if (device) {
-      void ensureConnection({ relayUrl: RELAY_URL, userId: user?.id ?? '', deviceId: device.id });
+      void ensureConnection({
+        relayUrl: RELAY_URL,
+        userId: user?.id ?? '',
+        deviceId: device.id,
+        daemonPublicKey: device.publicKey,
+      });
     }
   });
 
