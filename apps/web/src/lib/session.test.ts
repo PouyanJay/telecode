@@ -1,6 +1,7 @@
-import { makeEnvelope, type Envelope } from '@telecode/protocol';
+import { makeEnvelope, SESSION_STATUSES, type Envelope } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
+import { SESSION_DISPLAY } from './session-display';
 import {
   appendUserMessage,
   applyEnvelope,
@@ -161,5 +162,15 @@ describe('session reducer', () => {
     expect(first?.kind === 'user' && first.text).toBe('build it');
     expect(third?.kind === 'user' && third.text).toBe('now add tests');
     expect(new Set(state.entries.map((e) => e.id)).size).toBe(3); // stable, unique keys
+  });
+});
+
+// Variant coverage (Task 11): every wire session status must fold through the reducer's session.status
+// case and have a display — a parametrized guard so adding a status without handling both fails here.
+describe('session status coverage', () => {
+  it.each(SESSION_STATUSES)('folds session.status %s and has a display mapping', (status) => {
+    const state = applyEnvelope(startingState(), frame('session.status', { status }));
+    expect(state.status).toBe(status);
+    expect(SESSION_DISPLAY[status]).toBeDefined();
   });
 });

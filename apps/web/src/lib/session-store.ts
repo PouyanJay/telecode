@@ -65,11 +65,17 @@ function handleEvent(envelope: Envelope): void {
   }
 }
 
-/** Open the shared connection (idempotent — the first authenticated route to mount wins). */
-export function connect(options: ConnectOptions): void {
+/**
+ * Open the shared connection (idempotent — the first authenticated route to mount wins). `createConn` is
+ * a seam for tests to inject a fake connection; production uses the real {@link createRelayConnection}.
+ */
+export function connect(
+  options: ConnectOptions,
+  createConn: typeof createRelayConnection = createRelayConnection,
+): void {
   if (connection) return;
   connState.set('connecting');
-  connection = createRelayConnection({
+  connection = createConn({
     relayUrl: options.relayUrl,
     userId: options.userId,
     deviceId: options.deviceId,
