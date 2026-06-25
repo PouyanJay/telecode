@@ -1,5 +1,6 @@
 import {
   decodeKey,
+  decryptWithContentKey,
   encodeKey,
   encryptWithContentKey,
   generateContentKey,
@@ -66,7 +67,7 @@ describe('browser session cipher', () => {
       'agent.message',
       await encryptWithContentKey({ text: 'hi' }, contentKey),
     );
-    expect(await cipher.tryDecrypt(frame)).toEqual({ text: 'hi' });
+    expect(await cipher.tryDecrypt(frame)).toEqual({ decrypted: true, payload: { text: 'hi' } });
   });
 
   it('encrypts a follow-up under the session content key (daemon can open it)', async () => {
@@ -84,7 +85,6 @@ describe('browser session cipher', () => {
     const sealed = await cipher.encrypt('s', { text: 'follow up' });
     expect(JSON.stringify(sealed)).not.toContain('follow up');
     // The daemon decrypts it with the same content key (symmetric).
-    const { decryptWithContentKey } = await import('@telecode/protocol');
     expect(await decryptWithContentKey(sealed, contentKey)).toEqual({ text: 'follow up' });
   });
 
@@ -99,7 +99,7 @@ describe('browser session cipher', () => {
       status: 'error',
       payload: { status: 'error', error: 'device offline' },
     });
-    expect(await cipher.tryDecrypt(frame)).toBeNull();
+    expect(await cipher.tryDecrypt(frame)).toEqual({ decrypted: false });
   });
 
   it('is disabled when there is no daemon public key (pre-E2E device)', async () => {

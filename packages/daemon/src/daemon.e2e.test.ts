@@ -97,12 +97,19 @@ describe('daemon E2E encryption (Task 6)', () => {
     const PROMPT = 'delete all production data';
     await sendSealedLaunch(relay, { userId, deviceId, sessionId }, daemonKp, browserKp, PROMPT);
 
-    // 1. The daemon delivers the content key, box-wrapped to the browser's ephemeral pubkey (not plaintext).
+    // 1. The daemon delivers the content key, box-wrapped to the browser's ephemeral pubkey: the key
+    //    itself travels as opaque ciphertext (a base64 string), never plaintext.
     const keyFrame = await relay.waitForFrame(ofType('session.key', sessionId));
     expect(JSON.stringify(keyFrame)).not.toContain(PROMPT);
+    expect(typeof keyFrame.payload).toBe('string');
+    expect(keyFrame.nonce).not.toBe('');
     const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
 
-    // 2. The streamed frames are ciphertext under the content key; the browser decrypts them.
+    // 2. Even session.started (carrying only the correlation ref) is sealed under the content key.
+    const startedFrame = await relay.waitForFrame(ofType('session.started', sessionId));
+    expect(typeof startedFrame.payload).toBe('string');
+
+    // 3. The streamed frames are ciphertext under the content key; the browser decrypts them.
     const messageFrame = await relay.waitForFrame(ofType('agent.message', sessionId));
     expect(typeof messageFrame.payload).toBe('string');
     expect(JSON.stringify(messageFrame)).not.toContain('planning the change');

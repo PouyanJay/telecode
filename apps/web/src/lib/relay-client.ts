@@ -108,7 +108,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   // unlocks a session must be applied before the encrypted frames that follow it.
   let inbound: Promise<void> = Promise.resolve();
   socket.addEventListener('message', (event: MessageEvent<string>) => {
-    inbound = inbound.then(() => handleFrame(event.data)).catch(() => {});
+    // A failed frame (e.g. a decryption error from a key mismatch) surfaces as a connection error rather
+    // than silently dropping — consistent with the send chain's handler.
+    inbound = inbound.then(() => handleFrame(event.data)).catch(() => options.onStatus('error'));
   });
 
   async function handleFrame(data: string): Promise<void> {
@@ -127,8 +129,8 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       await cipher.receiveKey(envelope);
       return;
     }
-    const decrypted = await cipher.tryDecrypt(envelope);
-    options.onEvent(decrypted !== null ? { ...envelope, payload: decrypted } : envelope);
+    const result = await cipher.tryDecrypt(envelope);
+    options.onEvent(result.decrypted ? { ...envelope, payload: result.payload } : envelope);
   }
 
   socket.addEventListener('error', () => options.onStatus('error'));

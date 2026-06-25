@@ -36,11 +36,13 @@ export interface BrowserSessionCipher {
   /** Seal a payload under the session's content key (secretbox). */
   encrypt(sessionId: string, payload: unknown): Promise<EncryptedEnvelopeFields>;
   /**
-   * Decrypt an inbound frame's payload under its session content key, or return null when the frame is not
-   * encrypted (empty nonce / non-string payload — e.g. a relay-generated control message), so the caller
-   * uses the envelope as-is.
+   * Decrypt an inbound frame's payload under its session content key. Returns `{ decrypted: false }` when
+   * the frame is not encrypted (empty nonce / non-string payload — e.g. a relay-generated control
+   * message), so the caller uses the envelope as-is.
    */
-  tryDecrypt(envelope: Envelope): Promise<unknown>;
+  tryDecrypt(
+    envelope: Envelope,
+  ): Promise<{ decrypted: true; payload: unknown } | { decrypted: false }>;
 }
 
 export function createBrowserSessionCipher(
@@ -93,7 +95,9 @@ export function createBrowserSessionCipher(
       return encryptWithContentKey(payload, requireKey(sessionId));
     },
 
-    async tryDecrypt(envelope): Promise<unknown> {
+    async tryDecrypt(
+      envelope,
+    ): Promise<{ decrypted: true; payload: unknown } | { decrypted: false }> {
       const sessionId = envelope.session_id;
       if (
         sessionId === undefined ||
@@ -101,9 +105,12 @@ export function createBrowserSessionCipher(
         typeof envelope.payload !== 'string' ||
         !contentKeys.has(sessionId)
       ) {
-        return null;
+        return { decrypted: false };
       }
-      return decryptWithContentKey(envelope, requireKey(sessionId));
+      return {
+        decrypted: true,
+        payload: await decryptWithContentKey(envelope, requireKey(sessionId)),
+      };
     },
   };
 }

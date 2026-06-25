@@ -23,7 +23,7 @@ import {
  */
 export interface SessionCipher {
   /** Whether this daemon has a keypair and can run E2E sessions. */
-  readonly capable: boolean;
+  readonly enabled: boolean;
   /** Whether a content key has been established for `sessionId` (i.e. it is an E2E session). */
   isEncrypted(sessionId: string): boolean;
   /** Open a box-sealed launch payload using the browser pubkey on the envelope. Throws if not capable. */
@@ -45,12 +45,12 @@ export function createSessionCipher(privateKeyBase64?: string): SessionCipher {
 
   function requireKey(sessionId: string): string {
     const key = contentKeys.get(sessionId);
-    if (key === undefined) throw new Error(`no content key established for session ${sessionId}`);
+    if (key === undefined) throw new Error(`no content key for session ${sessionId}`);
     return key;
   }
 
   return {
-    capable: privateKey !== undefined,
+    enabled: privateKey !== undefined,
 
     isEncrypted(sessionId): boolean {
       return contentKeys.has(sessionId);

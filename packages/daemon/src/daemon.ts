@@ -9,7 +9,9 @@ import {
   parseEnvelope,
   permissionDecisionPayloadSchema,
   sessionControlPayloadSchema,
+  sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
+  sessionStatusPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   type Envelope,
@@ -165,9 +167,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * carry their state in the payload (the relay derives those from the message `type`).
    */
   function cleartextStatusFor(type: MessageType, payload: unknown): SessionStatusName | undefined {
-    const status = (payload as { status?: unknown }).status;
-    if (type === 'session.ended') return status === 'error' ? 'error' : 'done';
-    if (type === 'session.status' && typeof status === 'string') return status as SessionStatusName;
+    if (type === 'session.ended') {
+      const parsed = sessionEndedPayloadSchema.safeParse(payload);
+      return parsed.success ? parsed.data.status : 'done';
+    }
+    if (type === 'session.status') {
+      const parsed = sessionStatusPayloadSchema.safeParse(payload);
+      return parsed.success ? parsed.data.status : undefined;
+    }
     return undefined;
   }
 
@@ -496,7 +503,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // and deliver it (session.key) to the launching browser before any encrypted stream frame.
     let launchPayload: unknown = envelope.payload;
     const browserPublicKey = envelope.sender_public_key;
-    if (cipher.capable && browserPublicKey !== undefined && envelope.session_id !== undefined) {
+    if (cipher.enabled && browserPublicKey !== undefined && envelope.session_id !== undefined) {
       try {
         launchPayload = await cipher.decryptLaunch(envelope);
       } catch (err) {
@@ -643,7 +650,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // E2E reconnect: re-deliver the session key to the (possibly new) browser pubkey it announced, so
         // it can decrypt the backfilled history that follows. Subscribe itself stays cleartext (`{}`).
         if (
-          cipher.capable &&
+          cipher.enabled &&
           envelope.sender_public_key !== undefined &&
           sessionId !== undefined &&
           cipher.isEncrypted(sessionId)
