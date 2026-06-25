@@ -7,6 +7,7 @@
 
   import TopBar from '$lib/components/TopBar.svelte';
   import { launchRepo } from '$lib/launch-repo';
+  import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
   import type { SessionState, SessionStatus } from '$lib/session';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
@@ -71,12 +72,18 @@
   let selectedRepoId = $state('');
   let launching = $state(false);
   let launchError: string | null = $state(null);
+  let pushState = $state<PushState>('unsupported');
 
   onMount(() => {
+    pushState = pushPermission();
     if (device) {
       void ensureConnection({ relayUrl: RELAY_URL, userId: user?.id ?? '', deviceId: device.id });
     }
   });
+
+  async function onEnableNotifications(): Promise<void> {
+    pushState = await subscribeToPush(env.PUBLIC_VAPID_KEY ?? '');
+  }
 
   async function onLaunch(event: Event): Promise<void> {
     event.preventDefault();
@@ -133,6 +140,19 @@
     </aside>
 
     <section class="body" aria-label="Sessions">
+      {#if pushState === 'default'}
+        <div class="notify hairline-b">
+          <span class="notify-text">Get pinged when a session needs your input.</span>
+          <Button variant="secondary" size="sm" onclick={onEnableNotifications}>
+            Enable notifications
+          </Button>
+        </div>
+      {:else if pushState === 'denied'}
+        <div class="notify hairline-b">
+          <span class="notify-text muted">Notifications are blocked in your browser settings.</span>
+        </div>
+      {/if}
+
       <form class="launch" onsubmit={onLaunch} aria-label="Launch a session">
         <p class="eyebrow">LAUNCH A SESSION ON {device.name}</p>
         {#if data.githubConnected && repos.length > 0}
@@ -293,6 +313,21 @@
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+  }
+  .notify {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface);
+  }
+  .notify-text {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+  .notify-text.muted {
+    color: var(--text-muted);
   }
   .launch {
     display: flex;

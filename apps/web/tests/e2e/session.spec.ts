@@ -241,6 +241,10 @@ test('pause reports paused and resume clears it', async ({ page }) => {
   await expect(page.getByText('PAUSED')).toHaveCount(0);
 });
 
+// NOTE: the "Enable notifications" affordance can't be e2e'd — headless Chromium reports web push
+// `unsupported` (no PushManager/Notification), and real push delivery needs a push service. The pure
+// VAPID-key conversion is unit-tested (push-key.test.ts); the SW + subscribe flow are verified manually.
+
 test('the launch form prompts to connect GitHub when no repo is available (dev user)', async ({
   page,
 }) => {

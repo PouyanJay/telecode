@@ -202,6 +202,35 @@ export async function listRepos(sessionToken: string): Promise<RepoList> {
   };
 }
 
+/**
+ * Register the browser's push subscription with the relay (session-token authed). The `subscription` is
+ * the browser's `PushSubscription.toJSON()` (`{ endpoint, keys: { p256dh, auth } }`). Resolves true on
+ * success.
+ */
+export async function savePushSubscription(
+  sessionToken: string,
+  subscription: unknown,
+): Promise<boolean> {
+  const res = await fetch(`${RELAY_HTTP_URL}/me/push-subscriptions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${sessionToken}` },
+    body: JSON.stringify(subscription),
+  });
+  return res.ok;
+}
+
+/** Remove a push subscription by endpoint (session-token authed). Best-effort. */
+export async function deletePushSubscription(
+  sessionToken: string,
+  endpoint: string,
+): Promise<void> {
+  await fetch(`${RELAY_HTTP_URL}/me/push-subscriptions`, {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${sessionToken}` },
+    body: JSON.stringify({ endpoint }),
+  });
+}
+
 /** Exchange a session token for a short-lived channel token, or null if the session is invalid. */
 export async function mintChannelToken(sessionToken: string): Promise<string | null> {
   const res = await fetch(`${RELAY_HTTP_URL}/channel-token`, {
