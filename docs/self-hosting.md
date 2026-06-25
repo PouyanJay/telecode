@@ -47,9 +47,10 @@ curl -fsS http://localhost:8080/healthz   # → {"status":"ok"}
 
 ## 3. Point your daemon + browser at it
 
-- **Daemon (the laptop running agents):** set the relay URL via `TELECODE_RELAY_URL`, e.g.
-  `TELECODE_RELAY_URL=wss://relay.example.com/ws`. On first run it prints a pairing code; enter it in the
-  web app to bind the device.
+- **Daemon (the laptop running agents):** point it at your relay with the `--relay-url` flag, e.g.
+  `npx telecode --relay-url wss://relay.example.com/ws` (or set `TELECODE_RELAY_URL`; the flag wins). The
+  URL must be `ws://` or `wss://`. On first run it prints a pairing code; enter it in the web app to bind
+  the device.
 - **Web app (the PWA):** set `PUBLIC_TELECODE_RELAY_URL` to the same relay, and — if you enabled push —
   `PUBLIC_VAPID_KEY` to your `VAPID_PUBLIC_KEY`. GitHub OAuth (sign-in + the repo token) is configured in
   the web tier; the relay only stores the resulting token, encrypted, when `TOKEN_ENCRYPTION_KEY` is set.

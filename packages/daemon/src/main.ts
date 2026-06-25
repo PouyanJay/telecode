@@ -7,6 +7,7 @@ import { pino } from 'pino';
 import { loadCredentials, saveCredentials } from './credentials';
 import { createDaemon } from './daemon';
 import { pairDevice } from './pairing';
+import { resolveRelayUrl } from './relay-url';
 import { createGitRepoManager } from './sessions/repo-manager';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
 
@@ -39,7 +40,16 @@ const log = pino({
     censor: '[redacted]',
   },
 });
-const relayWsUrl = process.env.TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
+// `--relay-url <wss://…/ws>` (or `TELECODE_RELAY_URL`) points the daemon at a self-hosted relay; the
+// default is the local relay. Validated as ws/wss so a typo fails fast.
+let relayWsUrl: string;
+try {
+  relayWsUrl = resolveRelayUrl(process.argv.slice(2), process.env);
+} catch (err) {
+  log.error({ err }, 'daemon: invalid relay URL');
+  process.exit(1);
+}
+log.info({ relayUrl: relayWsUrl }, 'daemon: using relay');
 // Derive the relay's HTTP base for the pairing endpoints (ws→http, wss→https, strip the /ws path).
 const relayHttpUrl = relayWsUrl.replace(/^ws/, 'http').replace(/\/ws$/, '');
 
