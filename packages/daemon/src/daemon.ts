@@ -28,6 +28,7 @@ import {
   type PermissionRequest,
 } from './agent-adapter';
 import { createClaudeAgentAdapter } from './claude-agent-adapter';
+import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
@@ -46,6 +47,12 @@ export interface DaemonOptions {
   readonly deviceId: string;
   /** Device token presented on `hello`; the relay verifies it when device auth is configured. */
   readonly deviceToken?: string;
+  /**
+   * This device's X25519 keypair (base64), persisted at pairing. When provided, the daemon runs sessions
+   * end-to-end encrypted (Phase 3): it decrypts the sealed launch, mints a per-session content key,
+   * delivers it to the browser, and encrypts the stream. Omitted runs sessions in cleartext (pre-E2E).
+   */
+  readonly keyPair?: { readonly publicKey: string; readonly privateKey: string };
   /** Agent runtime. Defaults to the real Claude Agent SDK adapter; tests inject a fake. */
   readonly agentAdapter?: AgentAdapter;
   /**
@@ -78,7 +85,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const worktreeManager = options.worktreeManager;
   const repoManager = options.repoManager;
   const defaultRepoPath = options.defaultRepoPath;
+  // E2E key management (Phase 3): holds the daemon private key + per-session content keys. Cleartext when
+  // no keypair is configured (existing tests / pre-E2E daemons).
+  const cipher = createSessionCipher(options.keyPair?.privateKey);
   let socket: WebSocket | null = null;
+
+  // Outbound frames are built asynchronously (encryption is async), so we serialize them through a chain
+  // to preserve stream order — a later `agent.message` must never overtake the `session.key` /
+  // `session.started` it depends on. Mirrors the relay's per-connection processing queue.
+  let sendChain: Promise<void> = Promise.resolve();
+  function enqueueSend(buildFrame: () => Promise<string>): void {
+    sendChain = sendChain
+      .then(async () => {
+        const frame = await buildFrame();
+        socket?.send(frame);
+      })
+      .catch((err: unknown) => log.error({ err }, 'daemon: failed to send a frame'));
+  }
 
   // Tool requests the agent is blocked on, keyed by the correlation id we send to the browser; each is
   // resolved when its matching `permission.decision` returns. Single-session in Phase 1, but keyed so it
@@ -136,19 +159,75 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (sessionId !== undefined) recordFor(sessionId).status = status;
   }
 
-  /** Send an envelope on the daemon's channel, carrying the session id when present. */
+  /**
+   * The cleartext lifecycle status to stamp on a frame's envelope so the relay can update its registry
+   * without reading the (encrypted) payload — only for the lifecycle types the relay acts on. Other types
+   * carry their state in the payload (the relay derives those from the message `type`).
+   */
+  function cleartextStatusFor(type: MessageType, payload: unknown): SessionStatusName | undefined {
+    const status = (payload as { status?: unknown }).status;
+    if (type === 'session.ended') return status === 'error' ? 'error' : 'done';
+    if (type === 'session.status' && typeof status === 'string') return status as SessionStatusName;
+    return undefined;
+  }
+
+  /**
+   * Send a session frame on the daemon's channel. For an E2E session the payload is sealed under the
+   * session's content key (the relay only ever forwards ciphertext); lifecycle frames also carry the
+   * cleartext `status` routing field. Cleartext sessions send the payload as-is (pre-E2E path).
+   */
   function sendForSession(source: Envelope, type: MessageType, payload: unknown): void {
-    socket?.send(
-      JSON.stringify(
+    const sessionId = source.session_id;
+    const status = cleartextStatusFor(type, payload);
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        sessionId !== undefined && cipher.isEncrypted(sessionId)
+          ? await cipher.encrypt(sessionId, payload)
+          : { payload, nonce: '' };
+      return JSON.stringify(
         makeEnvelope({
           type,
           userId: source.user_id,
           deviceId: source.device_id,
-          ...(source.session_id !== undefined ? { sessionId: source.session_id } : {}),
-          payload,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          ...(status !== undefined ? { status } : {}),
+          payload: fields.payload,
+          nonce: fields.nonce,
         }),
-      ),
-    );
+      );
+    });
+  }
+
+  /** Deliver a session's content key, box-wrapped to a browser's ephemeral pubkey (`session.key`). */
+  function deliverKey(source: Envelope, browserPublicKey: string): void {
+    const sessionId = source.session_id;
+    if (sessionId === undefined) return;
+    enqueueSend(async () => {
+      const fields = await cipher.keyDelivery(sessionId, browserPublicKey);
+      return JSON.stringify(
+        makeEnvelope({
+          type: 'session.key',
+          userId: source.user_id,
+          deviceId: source.device_id,
+          sessionId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
+  /**
+   * Read an inbound session payload as plaintext: decrypt it under the session content key for an E2E
+   * session (follow-up / decision / control are secretbox-sealed by the browser), or return it as-is in
+   * cleartext mode.
+   */
+  async function readSessionPayload(envelope: Envelope): Promise<unknown> {
+    const sessionId = envelope.session_id;
+    if (sessionId !== undefined && cipher.isEncrypted(sessionId)) {
+      return cipher.decrypt(envelope);
+    }
+    return envelope.payload;
   }
 
   /**
@@ -413,7 +492,25 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
   /** Launch a new session: announce it started, then run the first turn. */
   async function runSession(envelope: Envelope): Promise<void> {
-    const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
+    // E2E: the launch payload is box-sealed to this daemon. Decrypt it, mint the session's content key,
+    // and deliver it (session.key) to the launching browser before any encrypted stream frame.
+    let launchPayload: unknown = envelope.payload;
+    const browserPublicKey = envelope.sender_public_key;
+    if (cipher.capable && browserPublicKey !== undefined && envelope.session_id !== undefined) {
+      try {
+        launchPayload = await cipher.decryptLaunch(envelope);
+      } catch (err) {
+        log.warn({ err, deviceId: options.deviceId }, 'daemon: could not decrypt session.launch');
+        sendForSession(envelope, 'session.ended', {
+          status: 'error',
+          error: 'could not decrypt launch',
+        });
+        return;
+      }
+      cipher.establish(envelope.session_id);
+      deliverKey(envelope, browserPublicKey);
+    }
+    const launch = sessionLaunchPayloadSchema.safeParse(launchPayload);
     if (!launch.success) {
       // The relay already minted a `starting` row; fail it cleanly so it can't stick at `starting`.
       log.warn(
@@ -447,7 +544,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
   /** Run a follow-up turn for an existing session by resuming its agent conversation. */
   async function runFollowUp(envelope: Envelope): Promise<void> {
-    const message = userMessagePayloadSchema.safeParse(envelope.payload);
+    const message = userMessagePayloadSchema.safeParse(await readSessionPayload(envelope));
     if (!message.success) {
       log.warn({ deviceId: options.deviceId }, 'daemon: dropped user.message with invalid payload');
       return;
@@ -486,7 +583,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     await runTurn(envelope, message.data.text, resume, cwd);
   }
 
-  function handleMessage(raw: Buffer, onReady: () => void): void {
+  async function handleFrame(raw: Buffer, onReady: () => void): Promise<void> {
     let envelope: Envelope;
     try {
       envelope = parseEnvelope(JSON.parse(raw.toString()));
@@ -543,6 +640,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // that doesn't hold it (e.g. after a restart) can't backfill — report it not-live so the UI
         // falls back to the registry status instead of showing a phantom transcript.
         const sessionId = envelope.session_id;
+        // E2E reconnect: re-deliver the session key to the (possibly new) browser pubkey it announced, so
+        // it can decrypt the backfilled history that follows. Subscribe itself stays cleartext (`{}`).
+        if (
+          cipher.capable &&
+          envelope.sender_public_key !== undefined &&
+          sessionId !== undefined &&
+          cipher.isEncrypted(sessionId)
+        ) {
+          deliverKey(envelope, envelope.sender_public_key);
+        }
         const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
         const payload: SessionHistoryPayload = rec
           ? { status: rec.status, entries: rec.transcript }
@@ -555,7 +662,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
         return;
       }
       case 'permission.decision': {
-        const decision = permissionDecisionPayloadSchema.safeParse(envelope.payload);
+        const decision = permissionDecisionPayloadSchema.safeParse(
+          await readSessionPayload(envelope),
+        );
         if (!decision.success) {
           log.warn(
             { deviceId: options.deviceId },
@@ -597,7 +706,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         return;
       }
       case 'session.control': {
-        const control = sessionControlPayloadSchema.safeParse(envelope.payload);
+        const control = sessionControlPayloadSchema.safeParse(await readSessionPayload(envelope));
         if (!control.success) {
           log.warn(
             { deviceId: options.deviceId },
@@ -620,7 +729,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
       await new Promise<void>((resolve, reject) => {
         const onReady = (): void => resolve();
-        ws.on('message', (raw: Buffer) => handleMessage(raw, onReady));
+        // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
+        // handled before the next — a follow-up can't decrypt before the launch establishes the key.
+        let inbound: Promise<void> = Promise.resolve();
+        ws.on('message', (raw: Buffer) => {
+          inbound = inbound
+            .then(() => handleFrame(raw, onReady))
+            .catch((err: unknown) => log.error({ err }, 'daemon: frame handling failed'));
+        });
         ws.once('open', () => {
           ws.send(
             JSON.stringify(

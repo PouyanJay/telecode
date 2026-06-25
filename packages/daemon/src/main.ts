@@ -63,6 +63,8 @@ const daemon = createDaemon({
   userId: credentials.userId,
   deviceId: credentials.deviceId,
   deviceToken: credentials.deviceToken,
+  // The persisted X25519 keypair: run every session end-to-end encrypted (Phase 3).
+  keyPair: { publicKey: credentials.publicKey, privateKey: credentials.privateKey },
   logger: log,
   worktreeManager,
   repoManager,
