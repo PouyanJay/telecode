@@ -4,6 +4,7 @@
   import { buildFileDiff } from '$lib/diff';
   import type { TranscriptEntry } from '$lib/session';
 
+  import Code from './Code.svelte';
   import DiffView from './DiffView.svelte';
 
   /**
@@ -36,7 +37,7 @@
   {#if diff}
     <DiffView {diff} />
   {:else}
-    <pre class="input"><code>{inputJson}</code></pre>
+    <Code code={inputJson} language="json" />
   {/if}
 
   {#if entry.decision === 'pending'}
@@ -92,20 +93,6 @@
     font-size: var(--text-sm);
     font-weight: 500;
     color: var(--text);
-  }
-  .input {
-    margin: 0;
-    padding: var(--space-3);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow-x: auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: var(--lh-xs);
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-word;
   }
   .actions {
     display: flex;

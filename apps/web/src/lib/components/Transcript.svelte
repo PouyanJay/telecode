@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { TranscriptEntry } from '$lib/session';
 
+  import MessageBody from './MessageBody.svelte';
   import PermissionGate from './PermissionGate.svelte';
 
   /**
@@ -54,11 +55,11 @@
       {#if entry.kind === 'user'}
         <div class="from-user">
           <p class="who">YOU</p>
-          <p class="message">{entry.text}</p>
+          <div class="message"><MessageBody text={entry.text} /></div>
         </div>
       {:else if entry.kind === 'message'}
         <p class="who">AGENT</p>
-        <p class="message">{entry.text}</p>
+        <div class="message"><MessageBody text={entry.text} /></div>
       {:else if entry.kind === 'tool'}
         {@const inputJson = toolInput(entry.input)}
         <div class="tool">
@@ -113,13 +114,14 @@
     letter-spacing: 0.14em;
     color: var(--text-muted);
   }
+  /* A flow container for MessageBody: prose spans own their own pre-wrap, so the container stays
+     `normal` and collapses template whitespace (no stray indentation between segments). */
   .message {
     margin: 0;
     max-width: 70ch;
     color: var(--text);
     font-size: var(--text-base);
     line-height: var(--lh-base);
-    white-space: pre-wrap;
     word-break: break-word;
   }
   .tool {

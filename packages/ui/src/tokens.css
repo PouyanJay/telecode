@@ -57,6 +57,15 @@
   --neutral: #eceef1;
   --neutral-text: #0a0b0d;
 
+  /* Syntax highlighting — deliberately muted (the amber accent is a scalpel, never a syntax color).
+     A handful of low-saturation hues, ≥4.5:1 on the code surfaces; punctuation/plain reuse text tokens. */
+  --syntax-keyword: #c191d6;
+  --syntax-string: #9ab87f;
+  --syntax-number: #6cb6b0;
+  --syntax-comment: #838d99;
+  --syntax-punctuation: var(--text-secondary);
+  --syntax-plain: var(--text);
+
   /* Typography */
   --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Geist Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
@@ -135,6 +144,10 @@
   --danger: #cb4a40;
   --neutral: #12151c;
   --neutral-text: #ffffff;
+  --syntax-keyword: #8250df;
+  --syntax-string: #3f7e4e;
+  --syntax-number: #1f7a73;
+  --syntax-comment: #6b7280;
 }
 
 /* Hairline dividers — render crisply at the device's smallest line. */
