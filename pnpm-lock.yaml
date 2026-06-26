@@ -154,6 +154,9 @@ importers:
       pino:
         specifier: ^9.6.0
         version: 9.14.0
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
       ws:
         specifier: ^8.18.0
         version: 8.21.0
@@ -164,9 +167,6 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
-      tsx:
-        specifier: ^4.19.2
-        version: 4.22.4
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

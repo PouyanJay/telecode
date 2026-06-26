@@ -3,6 +3,14 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "description": "The telecode daemon — runs Claude Code agents on your machine, dialing out to the relay.",
+  "bin": {
+    "telecode": "bin/telecode.mjs"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
@@ -18,12 +26,12 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.186",
     "@telecode/protocol": "workspace:*",
     "pino": "^9.6.0",
+    "tsx": "^4.19.2",
     "ws": "^8.18.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/ws": "^8.5.13",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
   }
