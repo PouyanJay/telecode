@@ -9,6 +9,7 @@ import { createPushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceRegistry } from './registry/device-registry';
 import { createSessionRegistry } from './registry/session-registry';
 import { buildRelay } from './relay';
+import { createTelemetry } from './telemetry';
 
 /** Dev/prod entry point for the relay (`pnpm --filter @telecode/relay start`). */
 loadDotenv();
@@ -104,11 +105,18 @@ const maxWsPerIp = process.env.MAX_WS_CONNECTIONS_PER_IP
 const validBodyLimit = Number.isInteger(bodyLimit) && bodyLimit > 0 ? bodyLimit : 65_536;
 const validMaxWsPerIp = Number.isInteger(maxWsPerIp) && maxWsPerIp > 0 ? maxWsPerIp : 32;
 
+// Telemetry is OFF by default — telecode collects nothing. Opt in with TELECODE_TELEMETRY=on; events then
+// go to THIS relay's own logs (no network/third-party sink exists in the codebase). See docs/telemetry.md.
+const telemetryEnabled = ['1', 'true', 'on'].includes(process.env.TELECODE_TELEMETRY ?? '');
+const telemetry = createTelemetry({ enabled: telemetryEnabled, logger: log });
+log.info({ telemetry: telemetryEnabled }, 'relay: telemetry');
+
 const app = await buildRelay({
   logger: log,
   ...(trustProxy ? { trustProxy } : {}),
   bodyLimit: validBodyLimit,
   maxConnectionsPerIp: validMaxWsPerIp,
+  telemetry,
   ...(rateLimit ? { rateLimit } : {}),
   ...(dbHandle ? { sessionRegistry: createSessionRegistry(dbHandle) } : {}),
   ...(authEnabled && dbHandle && channelTokenSecret && serviceSecret

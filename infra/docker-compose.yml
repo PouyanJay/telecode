@@ -77,6 +77,10 @@ services:
       RATELIMIT_WINDOW: ${RATELIMIT_WINDOW:-}
       RATELIMIT_ALLOWLIST: ${RATELIMIT_ALLOWLIST:-}
       RATELIMIT_DISABLED: ${RATELIMIT_DISABLED:-}
+      BODY_LIMIT: ${BODY_LIMIT:-}
+      MAX_WS_CONNECTIONS_PER_IP: ${MAX_WS_CONNECTIONS_PER_IP:-}
+      # Telemetry is OFF unless you opt in (aggregate, identifier-free, to your own logs). See docs/telemetry.md.
+      TELECODE_TELEMETRY: ${TELECODE_TELEMETRY:-}
     ports:
       - '${RELAY_PORT:-8080}:8080'
     depends_on:

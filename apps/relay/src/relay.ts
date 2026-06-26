@@ -21,6 +21,7 @@ import { type PushSender } from './push/push-sender';
 import { type PushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { registerRateLimit, type RateLimitConfig } from './rate-limit';
+import { createTelemetry, type Telemetry } from './telemetry';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceListRoute } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
@@ -110,6 +111,12 @@ export interface RelayOptions {
    * (existing tests untouched); `main.ts` sets a default (env `MAX_WS_CONNECTIONS_PER_IP`).
    */
   readonly maxConnectionsPerIp?: number;
+  /**
+   * Opt-in telemetry sink (Phase 5). Defaults to a no-op — telecode records nothing unless an operator
+   * explicitly opts in (`main.ts` wires it from `TELECODE_TELEMETRY`). Events are aggregate (a role, never
+   * identifiers or session content).
+   */
+  readonly telemetry?: Telemetry;
 }
 
 /** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
@@ -189,6 +196,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       log.warn({ err, sessionId }, 'relay: failed to replay cached frames');
     }
   }
+  const telemetry = options.telemetry ?? createTelemetry();
   const sessionRegistry = options.sessionRegistry;
   const authService = options.auth?.service;
   const deviceRegistry = options.deviceRegistry;
@@ -552,6 +560,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         browsers.set(channel, set);
       }
       log.info({ channel, role }, 'relay: peer registered');
+      // Opt-in telemetry: aggregate connection count by role — no identifiers (default no-op).
+      telemetry.record({ name: 'peer_connected', role });
       socket.send(
         JSON.stringify(
           makeEnvelope({
@@ -607,6 +617,9 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         }
       } else if (peer.role === 'browser') {
         browsers.get(peer.channel)?.delete(socket);
+      }
+      if (peer.role === 'daemon' || peer.role === 'browser') {
+        telemetry.record({ name: 'peer_disconnected', role: peer.role });
       }
       log.info({ channel: peer.channel, role: peer.role }, 'relay: peer disconnected');
     });
