@@ -15,24 +15,29 @@ import { selectEnabledProviders } from './provider-selection';
 function build(): Map<string, OAuthProvider> {
   const providers = new Map<string, OAuthProvider>();
   const appUrl = env.APP_URL ?? 'http://127.0.0.1:5173';
+  const githubClientId = env.GITHUB_CLIENT_ID;
+  const githubClientSecret = env.GITHUB_CLIENT_SECRET;
   const enabled = selectEnabledProviders({
     dev,
-    ...(env.GITHUB_CLIENT_ID ? { githubClientId: env.GITHUB_CLIENT_ID } : {}),
-    ...(env.GITHUB_CLIENT_SECRET ? { githubClientSecret: env.GITHUB_CLIENT_SECRET } : {}),
+    ...(githubClientId ? { githubClientId } : {}),
+    ...(githubClientSecret ? { githubClientSecret } : {}),
   });
 
   for (const id of enabled) {
     switch (id) {
       case 'github':
-        // selectEnabledProviders only yields 'github' when both credentials are present.
-        providers.set(
-          'github',
-          createGithubProvider(
-            env.GITHUB_CLIENT_ID!,
-            env.GITHUB_CLIENT_SECRET!,
-            `${appUrl}/auth/github/callback`,
-          ),
-        );
+        // The guard narrows the captured credentials to strings; selectEnabledProviders already
+        // guarantees both are present when it yields 'github'.
+        if (githubClientId && githubClientSecret) {
+          providers.set(
+            'github',
+            createGithubProvider(
+              githubClientId,
+              githubClientSecret,
+              `${appUrl}/auth/github/callback`,
+            ),
+          );
+        }
         break;
       case 'dev':
         providers.set('dev', createDevProvider());
