@@ -27,6 +27,28 @@ Session content is end-to-end encrypted, so the server in the middle only ever f
 | **Relay**  | A stateless multiplexer + device/session registry. Forwards ciphertext; never runs agents.     |
 | **Web**    | A SvelteKit PWA: launch sessions, watch the stream, approve tool calls, steer with follow-ups. |
 
+```mermaid
+flowchart LR
+    subgraph machine["Your machine"]
+        D["Daemon<br/>(Claude Agent SDK)"]
+        A["Agent session<br/>your code · tools · keys"]
+        D -->|"approval gate"| A
+    end
+    subgraph cloud["Relay — runs anywhere"]
+        R["Multiplexer<br/>ciphertext + routing only"]
+    end
+    B["Browser / PWA<br/>encrypts + decrypts"]
+
+    B -->|"dials out · WSS"| R
+    D -->|"dials out · WSS"| R
+    R -.->|"end-to-end encrypted"| B
+    R -.->|"end-to-end encrypted"| D
+```
+
+Both the browser and the daemon **dial out** to the relay — nothing reaches into your machine. The relay
+multiplexes encrypted frames between them and can't read any of it; agent work, your code, and your keys
+never leave your machine.
+
 ## Quick start
 
 1. **Run the daemon** on the machine you want to control — it prints a pairing code. _(The published
@@ -47,7 +69,14 @@ reachability).
   drops, and laptop sleep.
 - [Self-hosting the relay](docs/self-hosting.md) — run your own relay with Docker.
 - [Threat model](docs/threat-model.md) — what each part can and cannot see, and how to verify it.
+- [Telemetry & privacy](docs/telemetry.md) — telecode collects nothing by default.
 - [Publishing the CLI](docs/publishing.md) — maintainer runbook for shipping the `telecode` command.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the change bar, and the
+[Code of Conduct](CODE_OF_CONDUCT.md). Found a security issue? Please report it privately per the
+[Security Policy](SECURITY.md). Release history lives in the [CHANGELOG](CHANGELOG.md).
 
 ## Development
 

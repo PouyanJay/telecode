@@ -2,7 +2,7 @@
 #
 # install-telecode.sh — one-line installer for the telecode daemon.
 #
-#   curl -fsSL https://telecode.pouyan.ai/install.sh | bash
+#   curl -fsSL https://telecode.io/install.sh | bash
 #
 # Installs the `telecode` command globally via npm, then tells you how to pair this machine. The daemon
 # runs Claude Code agents locally and dials OUT to the relay — nothing ever reaches into your machine.

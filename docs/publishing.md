@@ -30,8 +30,8 @@ dependency), but the actual publish is deferred until the npm name and account a
    `"version"`, and confirm `bin`, `files`, and the `tsx` runtime dependency are intact.
 4. **Publish:** `npm publish --access public` from `packages/daemon` (after `pnpm install` and a green
    `pnpm typecheck && pnpm lint && pnpm test`).
-5. **Host the installer:** serve `scripts/install-telecode.sh` at `https://telecode.pouyan.ai/install.sh`
-   so `curl -fsSL https://telecode.pouyan.ai/install.sh | bash` works.
+5. **Host the installer:** serve `scripts/install-telecode.sh` at `https://telecode.io/install.sh`
+   so `curl -fsSL https://telecode.io/install.sh | bash` works.
 6. **Verify on a clean machine:** `npx telecode doctor` (preflight) and `npx telecode` (pairing) with no
    repo checkout.
 
@@ -39,7 +39,7 @@ dependency), but the actual publish is deferred until the npm name and account a
 
 ```sh
 # one-liner
-curl -fsSL https://telecode.pouyan.ai/install.sh | bash
+curl -fsSL https://telecode.io/install.sh | bash
 
 # or directly
 npm install -g telecode
