@@ -1,7 +1,6 @@
 import {
   deriveSharedKey,
   exportIdentityPublicKey,
-  generateIdentityKeyPair,
   importContentKey,
   importIdentityPublicKey,
   openPayload,
@@ -12,6 +11,8 @@ import {
   type EncryptedEnvelopeFields,
   type Envelope,
 } from '@telecode/protocol';
+
+import { loadOrCreateIdentityKeyPair } from './keystore';
 
 /**
  * Browser side of the E2E session cipher (Phase 3, migrated to WebCrypto in Phase 4) — the mirror of the
@@ -51,7 +52,9 @@ export interface BrowserSessionCipher {
 
 export function createBrowserSessionCipher(
   daemonPublicKey: string | null | undefined,
-  keyPairFactory: () => Promise<CryptoKeyPairHandle> = () => generateIdentityKeyPair(false),
+  // By default the identity keypair is loaded from (or created in) IndexedDB, so it persists across
+  // reopens — a same-device reload reuses the same non-extractable key (Phase 4 Task 7). Tests inject one.
+  keyPairFactory: () => Promise<CryptoKeyPairHandle> = loadOrCreateIdentityKeyPair,
 ): BrowserSessionCipher {
   const enabled = Boolean(daemonPublicKey);
   // The daemon's public key, imported once on first use.

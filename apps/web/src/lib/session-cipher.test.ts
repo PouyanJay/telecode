@@ -9,11 +9,13 @@ import {
   openPayload,
   sealPayload,
   type CryptoKeyHandle,
+  type CryptoKeyPairHandle,
   type EncryptedEnvelopeFields,
   type Envelope,
 } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
+import { loadOrCreateIdentityKeyPair, type IdentityKeyStore } from './keystore';
 import { createBrowserSessionCipher } from './session-cipher';
 
 /**
@@ -33,6 +35,11 @@ const sessionEnvelope = (type: string, fields: { payload: unknown; nonce: string
     nonce: fields.nonce,
   });
 
+// These scenarios only need a working identity, not persistence — inject a fresh non-extractable keypair
+// so they don't reach for IndexedDB (the default factory, exercised by the persistence test below).
+const browserCipher = (daemonPublicKey: string): ReturnType<typeof createBrowserSessionCipher> =>
+  createBrowserSessionCipher(daemonPublicKey, () => generateIdentityKeyPair(false));
+
 /** Play the daemon: wrap a content key to the browser's announced public key (`session.key` fields). */
 async function daemonWrapKey(
   daemonPrivateKey: CryptoKeyHandle,
@@ -49,7 +56,7 @@ async function daemonWrapKey(
 describe('browser session cipher', () => {
   it('seals a launch the daemon can open, announcing the browser public key', async () => {
     const daemon = await generateIdentityKeyPair(true);
-    const cipher = createBrowserSessionCipher(await exportIdentityPublicKey(daemon.publicKey));
+    const cipher = browserCipher(await exportIdentityPublicKey(daemon.publicKey));
 
     const sealed = await cipher.sealLaunch({ prompt: 'do the thing' });
     expect(JSON.stringify(sealed)).not.toContain('do the thing');
@@ -66,7 +73,7 @@ describe('browser session cipher', () => {
 
   it('unwraps the delivered content key and decrypts a streamed frame', async () => {
     const daemon = await generateIdentityKeyPair(true);
-    const cipher = createBrowserSessionCipher(await exportIdentityPublicKey(daemon.publicKey));
+    const cipher = browserCipher(await exportIdentityPublicKey(daemon.publicKey));
     const browserPublicKey = await cipher.publicKey();
     expect(browserPublicKey).toBeDefined();
 
@@ -83,7 +90,7 @@ describe('browser session cipher', () => {
 
   it('encrypts a follow-up under the session content key (daemon can open it)', async () => {
     const daemon = await generateIdentityKeyPair(true);
-    const cipher = createBrowserSessionCipher(await exportIdentityPublicKey(daemon.publicKey));
+    const cipher = browserCipher(await exportIdentityPublicKey(daemon.publicKey));
     const browserPublicKey = await cipher.publicKey();
     const contentKey = await generateContentKey(true);
     const wrapped = await daemonWrapKey(daemon.privateKey, browserPublicKey!, contentKey);
@@ -97,7 +104,7 @@ describe('browser session cipher', () => {
 
   it('passes a cleartext frame through (empty nonce — e.g. a relay-generated message)', async () => {
     const daemon = await generateIdentityKeyPair(true);
-    const cipher = createBrowserSessionCipher(await exportIdentityPublicKey(daemon.publicKey));
+    const cipher = browserCipher(await exportIdentityPublicKey(daemon.publicKey));
     const frame = makeEnvelope({
       type: 'session.ended',
       userId: 'u',
@@ -111,7 +118,7 @@ describe('browser session cipher', () => {
 
   it('throws on a tampered encrypted frame instead of passing it through as cleartext', async () => {
     const daemon = await generateIdentityKeyPair(true);
-    const cipher = createBrowserSessionCipher(await exportIdentityPublicKey(daemon.publicKey));
+    const cipher = browserCipher(await exportIdentityPublicKey(daemon.publicKey));
     const browserPublicKey = await cipher.publicKey();
     const contentKey = await generateContentKey(true);
     const wrapped = await daemonWrapKey(daemon.privateKey, browserPublicKey!, contentKey);
@@ -131,5 +138,28 @@ describe('browser session cipher', () => {
     const cipher = createBrowserSessionCipher(null);
     expect(cipher.enabled).toBe(false);
     expect(await cipher.publicKey()).toBeUndefined();
+  });
+
+  it('reuses the persisted identity across reopens — a stable browser public key (Phase 4 T7)', async () => {
+    // A shared keystore stands in for IndexedDB surviving a reload.
+    const map = new Map<string, CryptoKeyPairHandle>();
+    const store: IdentityKeyStore = {
+      get: (id) => Promise.resolve(map.get(id)),
+      put: (id, kp) => {
+        map.set(id, kp);
+        return Promise.resolve();
+      },
+    };
+    const factory = (): Promise<CryptoKeyPairHandle> => loadOrCreateIdentityKeyPair(store);
+    const daemonPub = await exportIdentityPublicKey(
+      (await generateIdentityKeyPair(true)).publicKey,
+    );
+
+    const before = createBrowserSessionCipher(daemonPub, factory);
+    const firstKey = await before.publicKey();
+    // A "reopen": a brand-new cipher backed by the same persisted keystore.
+    const after = createBrowserSessionCipher(daemonPub, factory);
+
+    expect(await after.publicKey()).toBe(firstKey);
   });
 });
