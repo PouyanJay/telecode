@@ -57,21 +57,46 @@ if (authEnabled && !pushEnabled) {
   log.warn('relay: VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set — web push disabled');
 }
 
-// HTTP rate limiting (Phase 5): ON by default so a public relay sheds abuse; tune with RATELIMIT_MAX /
-// RATELIMIT_WINDOW (a humanized duration, e.g. '1 minute'), or set RATELIMIT_DISABLED=true to turn off.
-const rateLimitDisabled = ['1', 'true'].includes(process.env.RATELIMIT_DISABLED ?? '');
+// Defaults for the abuse-prevention caps (overridable by env). 64 KB covers the relay's tiny JSON bodies;
+// 32 WS connections per IP accommodates a daemon plus several browser tabs sharing a NAT egress IP.
+const DEFAULT_BODY_LIMIT_BYTES = 65_536;
+const DEFAULT_MAX_WS_CONNECTIONS_PER_IP = 32;
+const ENV_TRUE = ['1', 'true'];
+
+function isValidPositiveInt(value: number | undefined): value is number {
+  return value !== undefined && Number.isInteger(value) && value > 0;
+}
+
+/** Read a positive-integer env var, warning and falling back to `fallback` when unset or malformed. */
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!isValidPositiveInt(parsed)) {
+    log.warn(
+      { [name]: raw },
+      `relay: ${name} is not a positive integer — using default ${fallback}`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
+// HTTP rate limiting: ON by default so a public relay sheds abuse; tune with RATELIMIT_MAX / RATELIMIT_WINDOW
+// (a humanized duration, e.g. '1 minute'), or set RATELIMIT_DISABLED=true to turn off. Behind a reverse
+// proxy, TRUST_PROXY=true makes request.ip the real client so per-IP limiting is correct; RATELIMIT_ALLOWLIST
+// exempts the web tier's egress (its traffic aggregates every user); REDIS_URL shares the budget across
+// relay instances.
+const rateLimitDisabled = ENV_TRUE.includes(process.env.RATELIMIT_DISABLED ?? '');
 const rateLimitMaxRaw = process.env.RATELIMIT_MAX;
 const rateLimitMax = rateLimitMaxRaw ? Number(rateLimitMaxRaw) : undefined;
-if (rateLimitMax !== undefined && (!Number.isInteger(rateLimitMax) || rateLimitMax <= 0)) {
+if (rateLimitMaxRaw && !isValidPositiveInt(rateLimitMax)) {
   log.warn(
     { RATELIMIT_MAX: rateLimitMaxRaw },
     'relay: RATELIMIT_MAX is not a positive integer — using default',
   );
 }
-// Behind a reverse proxy / load balancer (the hosted topology), TRUST_PROXY=true makes request.ip the
-// real client so per-IP limiting is correct. RATELIMIT_ALLOWLIST exempts trusted IPs (the web tier's
-// egress, whose traffic aggregates every user). REDIS_URL shares the budget across relay instances.
-const trustProxy = ['1', 'true'].includes(process.env.TRUST_PROXY ?? '');
+const trustProxy = ENV_TRUE.includes(process.env.TRUST_PROXY ?? '');
 const rateLimitAllowList = (process.env.RATELIMIT_ALLOWLIST ?? '')
   .split(',')
   .map((ip) => ip.trim())
@@ -79,9 +104,7 @@ const rateLimitAllowList = (process.env.RATELIMIT_ALLOWLIST ?? '')
 const rateLimit = rateLimitDisabled
   ? undefined
   : {
-      ...(rateLimitMax !== undefined && Number.isInteger(rateLimitMax) && rateLimitMax > 0
-        ? { max: rateLimitMax }
-        : {}),
+      ...(isValidPositiveInt(rateLimitMax) ? { max: rateLimitMax } : {}),
       ...(process.env.RATELIMIT_WINDOW ? { timeWindow: process.env.RATELIMIT_WINDOW } : {}),
       ...(process.env.REDIS_URL ? { redisUrl: process.env.REDIS_URL } : {}),
       ...(rateLimitAllowList.length > 0 ? { allowList: rateLimitAllowList } : {}),
@@ -95,27 +118,25 @@ if (rateLimit && !trustProxy) {
   );
 }
 
-// Abuse prevention (Phase 5): a small body cap rejects oversized HTTP payloads (bodies are all tiny JSON),
-// and a per-IP WebSocket cap bounds how many sockets one client can hold open. Both tunable; both on by
-// default with sane values.
-const bodyLimit = process.env.BODY_LIMIT ? Number(process.env.BODY_LIMIT) : 65_536;
-const maxWsPerIp = process.env.MAX_WS_CONNECTIONS_PER_IP
-  ? Number(process.env.MAX_WS_CONNECTIONS_PER_IP)
-  : 32;
-const validBodyLimit = Number.isInteger(bodyLimit) && bodyLimit > 0 ? bodyLimit : 65_536;
-const validMaxWsPerIp = Number.isInteger(maxWsPerIp) && maxWsPerIp > 0 ? maxWsPerIp : 32;
+// Abuse prevention: a small body cap rejects oversized HTTP payloads with 413 before buffering, and a per-IP
+// WebSocket cap bounds how many sockets one client can hold open. Both on by default with sane values.
+const bodyLimit = parsePositiveIntEnv('BODY_LIMIT', DEFAULT_BODY_LIMIT_BYTES);
+const maxConnectionsPerIp = parsePositiveIntEnv(
+  'MAX_WS_CONNECTIONS_PER_IP',
+  DEFAULT_MAX_WS_CONNECTIONS_PER_IP,
+);
 
 // Telemetry is OFF by default — telecode collects nothing. Opt in with TELECODE_TELEMETRY=on; events then
 // go to THIS relay's own logs (no network/third-party sink exists in the codebase). See docs/telemetry.md.
-const telemetryEnabled = ['1', 'true', 'on'].includes(process.env.TELECODE_TELEMETRY ?? '');
+const telemetryEnabled = [...ENV_TRUE, 'on'].includes(process.env.TELECODE_TELEMETRY ?? '');
 const telemetry = createTelemetry({ enabled: telemetryEnabled, logger: log });
-log.info({ telemetry: telemetryEnabled }, 'relay: telemetry');
+log.info({ telemetry_enabled: telemetryEnabled }, 'relay: telemetry configured');
 
 const app = await buildRelay({
   logger: log,
   ...(trustProxy ? { trustProxy } : {}),
-  bodyLimit: validBodyLimit,
-  maxConnectionsPerIp: validMaxWsPerIp,
+  bodyLimit,
+  maxConnectionsPerIp,
   telemetry,
   ...(rateLimit ? { rateLimit } : {}),
   ...(dbHandle ? { sessionRegistry: createSessionRegistry(dbHandle) } : {}),

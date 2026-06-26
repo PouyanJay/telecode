@@ -1,7 +1,7 @@
 import type { Logger } from 'pino';
 
 /**
- * Opt-in telemetry seam (Phase 5).
+ * Opt-in telemetry seam.
  *
  * telecode collects **nothing** by default — privacy is the product. This module exists so an operator of
  * a hosted relay *can* opt into aggregate operational metrics, while the default stays a no-op and the

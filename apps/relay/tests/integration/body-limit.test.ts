@@ -40,14 +40,16 @@ describe('request body-size cap', () => {
     await handle?.close();
   });
 
-  it('rejects a body over the limit with 413 but serves one under it', async () => {
+  it('rejects a body over the limit with 413', async () => {
     const oversized = await app.inject({
       method: 'POST',
       url: '/device/code',
       payload: { name: 'x'.repeat(4096) },
     });
     expect(oversized.statusCode).toBe(413);
+  });
 
+  it('serves a body under the limit', async () => {
     const ok = await app.inject({
       method: 'POST',
       url: '/device/code',

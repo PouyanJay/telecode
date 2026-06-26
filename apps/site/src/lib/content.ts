@@ -36,7 +36,7 @@ export interface CallToAction {
 }
 
 export interface HowItWorksStep {
-  readonly n: number;
+  readonly stepNumber: number;
   readonly title: string;
   readonly body: string;
   /** An optional terminal command shown in a mono chip (the data-as-signature house style). */
@@ -94,18 +94,18 @@ export const siteContent: SiteContent = {
   ],
   howItWorks: [
     {
-      n: 1,
+      stepNumber: 1,
       title: 'Install on your machine',
       body: 'Run one command where your agents should work. The daemon dials out to the relay — nothing ever reaches into your laptop.',
       command: 'npx telecode',
     },
     {
-      n: 2,
+      stepNumber: 2,
       title: 'Pair from the browser',
       body: 'The daemon prints a short code. Sign in to the dashboard, enter the code, and this machine is bound to your account.',
     },
     {
-      n: 3,
+      stepNumber: 3,
       title: 'Launch & steer',
       body: 'Pick a device, point at a repo, and send a prompt. Watch output stream and approve each consequential tool call — from your phone or laptop.',
     },

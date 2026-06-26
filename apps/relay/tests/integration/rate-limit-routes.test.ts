@@ -53,7 +53,8 @@ describe('per-route rate limits on abuse-prone endpoints', () => {
     }
     const overBudget = await app.inject({ method: 'POST', url: '/device/code', payload: {} });
 
-    expect(accepted.every((code) => code === 200)).toBe(true);
+    // Every request within the budget is served; the explicit count makes a failure message informative.
+    expect(accepted).toEqual(Array<number>(budget).fill(200));
     expect(overBudget.statusCode).toBe(429);
 
     // The pairing flood did not consume the global budget: a different route under the same caller serves.

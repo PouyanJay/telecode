@@ -3,10 +3,10 @@ import type { FastifyInstance } from 'fastify';
 import { Redis } from 'ioredis';
 
 /**
- * Rate-limit configuration for the relay (Phase 5). The relay is telecode's only publicly reachable
- * surface, so a hosted instance must shed abusive traffic before it reaches auth or the database. This is
- * a DI'd option on `buildRelay`: when absent the limiter is OFF (the echo path and the test suite stay
- * untouched), and `main.ts` turns it ON from the environment for production.
+ * Rate-limit configuration for the relay. The relay is telecode's only publicly reachable surface, so a
+ * hosted instance must shed abusive traffic before it reaches auth or the database. This is a DI'd option
+ * on `buildRelay`: when absent the limiter is OFF (the echo path and the test suite stay untouched), and
+ * `main.ts` turns it ON from the environment for production.
  *
  * The budget is keyed by client IP — which is only meaningful when `buildRelay({ trustProxy })` makes
  * `request.ip` the real client behind a reverse proxy. The store is in-memory by default (correct for a
@@ -14,9 +14,9 @@ import { Redis } from 'ioredis';
  * scaled relay instances.
  */
 export interface RateLimitConfig {
-  /** Max requests per window, per caller key (the client IP). Default 300. */
+  /** Max requests per window, per caller key (the client IP). Default {@link DEFAULT_RATE_LIMIT_MAX}. */
   readonly max?: number;
-  /** Window length — milliseconds (number) or a humanized string like `'1 minute'`. Default `'1 minute'`. */
+  /** Window length — milliseconds (number) or a humanized string like `'1 minute'`. */
   readonly timeWindow?: number | string;
   /** When set, share the budget across relay instances via a Redis store (else in-memory, per process). */
   readonly redisUrl?: string;
@@ -24,13 +24,25 @@ export interface RateLimitConfig {
   readonly allowList?: readonly string[];
 }
 
+/** Default global budget: requests per window, per IP. Generous — abuse-prone routes set tighter caps. */
+export const DEFAULT_RATE_LIMIT_MAX = 300;
+/** Default window for every budget (global and per-route). */
+export const DEFAULT_RATE_LIMIT_WINDOW = '1 minute';
+
 /** Builds the Redis client backing a shared rate-limit store. Injected in tests so no live Redis is needed. */
 export type RedisClientFactory = (url: string) => Redis;
 
+// Fail fast on a Redis hiccup rather than hanging request handling — paired with `skipOnError` below the
+// limiter then fails open (a brief Redis outage degrades to "no limiting", never to a relay outage).
+const REDIS_CONNECT_TIMEOUT_MS = 500;
+const REDIS_MAX_RETRIES_PER_REQUEST = 1;
+
 const defaultCreateRedis: RedisClientFactory = (url) =>
-  // Fail fast on a Redis hiccup rather than hanging request handling — paired with `skipOnError` below the
-  // limiter then fails open (a brief Redis outage degrades to "no limiting", never to a relay outage).
-  new Redis(url, { connectTimeout: 500, maxRetriesPerRequest: 1, enableOfflineQueue: false });
+  new Redis(url, {
+    connectTimeout: REDIS_CONNECT_TIMEOUT_MS,
+    maxRetriesPerRequest: REDIS_MAX_RETRIES_PER_REQUEST,
+    enableOfflineQueue: false,
+  });
 
 /**
  * Tight per-route budget for `/device/code` — the most abusable public endpoint (each call allocates an
@@ -39,7 +51,7 @@ const defaultCreateRedis: RedisClientFactory = (url) =>
  */
 export const PAIRING_CODE_RATE_LIMIT = {
   max: 10,
-  timeWindow: '1 minute',
+  timeWindow: DEFAULT_RATE_LIMIT_WINDOW,
 } satisfies RateLimitOptions;
 
 /**
@@ -48,7 +60,7 @@ export const PAIRING_CODE_RATE_LIMIT = {
  */
 export const PAIRING_POLL_RATE_LIMIT = {
   max: 90,
-  timeWindow: '1 minute',
+  timeWindow: DEFAULT_RATE_LIMIT_WINDOW,
 } satisfies RateLimitOptions;
 
 /**
@@ -61,8 +73,8 @@ export async function registerRateLimit(
   createRedis: RedisClientFactory = defaultCreateRedis,
 ): Promise<void> {
   const options: RateLimitPluginOptions = {
-    max: config.max ?? 300,
-    timeWindow: config.timeWindow ?? '1 minute',
+    max: config.max ?? DEFAULT_RATE_LIMIT_MAX,
+    timeWindow: config.timeWindow ?? DEFAULT_RATE_LIMIT_WINDOW,
     // Fail open if the (Redis) store errors: a store outage must never take the relay down.
     skipOnError: true,
     ...(config.allowList ? { allowList: [...config.allowList] } : {}),

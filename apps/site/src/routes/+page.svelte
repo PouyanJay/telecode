@@ -60,9 +60,9 @@
   <section class="how" aria-labelledby="how-title">
     <h2 id="how-title" class="section-title">How it works</h2>
     <ol class="steps">
-      {#each howItWorks as step (step.n)}
+      {#each howItWorks as step (step.stepNumber)}
         <li class="step">
-          <span class="step-n" aria-hidden="true">{step.n}</span>
+          <span class="step-n" aria-hidden="true">{step.stepNumber}</span>
           <div class="step-body">
             <h3>{step.title}</h3>
             <p>{step.body}</p>
@@ -201,7 +201,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 40px;
+    height: var(--space-10);
     padding: 0 var(--space-5);
     border: 1px solid transparent;
     border-radius: var(--radius-md);

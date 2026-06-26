@@ -86,7 +86,7 @@ export interface RelayOptions {
    */
   readonly cache?: { readonly maxFramesPerSession?: number; readonly maxSessions?: number };
   /**
-   * HTTP rate limiting (Phase 5). When provided, the relay registers a global per-IP window budget so a
+   * HTTP rate limiting. When provided, the relay registers a global per-IP window budget so a
    * hosted instance sheds abusive traffic before it reaches auth or the database. Absent (the default) the
    * limiter is OFF — the echo path and the test suite are unaffected; `main.ts` turns it on for production.
    */
@@ -99,25 +99,31 @@ export interface RelayOptions {
    */
   readonly trustProxy?: boolean;
   /**
-   * Max request body size in bytes (Phase 5 abuse prevention). The relay's HTTP bodies are all tiny JSON,
+   * Max request body size in bytes (abuse prevention). The relay's HTTP bodies are all tiny JSON,
    * so a small cap rejects oversized payloads with 413 before buffering them. Absent → Fastify's 1MB
    * default; `main.ts` tightens it (env `BODY_LIMIT`).
    */
   readonly bodyLimit?: number;
   /**
-   * Max concurrent WebSocket connections per client IP (Phase 5 abuse prevention). Rate limiting bounds how
+   * Max concurrent WebSocket connections per client IP (abuse prevention). Rate limiting bounds how
    * fast connections open; this bounds how many are held, so one client can't exhaust memory by holding
    * many sockets. Counts the real client IP (needs `trustProxy` behind a proxy). Absent → unlimited
    * (existing tests untouched); `main.ts` sets a default (env `MAX_WS_CONNECTIONS_PER_IP`).
    */
   readonly maxConnectionsPerIp?: number;
   /**
-   * Opt-in telemetry sink (Phase 5). Defaults to a no-op — telecode records nothing unless an operator
+   * Opt-in telemetry sink. Defaults to a no-op — telecode records nothing unless an operator
    * explicitly opts in (`main.ts` wires it from `TELECODE_TELEMETRY`). Events are aggregate (a role, never
    * identifiers or session content).
    */
   readonly telemetry?: Telemetry;
 }
+
+/**
+ * WebSocket close code for a connection refused by the per-IP connection cap (application range 4000–4999).
+ * Exported so tests assert against the same constant rather than a duplicated magic number.
+ */
+export const WS_CLOSE_CODE_CONNECTION_CAP = 4029;
 
 /** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
 const CACHEABLE_TYPES = new Set<string>([
@@ -155,7 +161,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // last ping round. A socket that misses a round is half-open (sleep / silent drop) and gets terminated.
   const sockets = new Set<WebSocket>();
   const liveness = new WeakMap<WebSocket, boolean>();
-  // Per-IP concurrent WebSocket count, for the connection cap (Phase 5 abuse prevention). Unbounded when
+  // Per-IP concurrent WebSocket count, for the connection cap (abuse prevention). Unbounded when
   // the cap is unset.
   const maxConnectionsPerIp = options.maxConnectionsPerIp;
   const connectionsByIp = new Map<string, number>();
@@ -396,7 +402,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   await app.register(websocket);
 
-  // HTTP rate limiting (Phase 5): registered before any route so the global per-IP budget covers them all.
+  // HTTP rate limiting: registered before any route so the global per-IP budget covers them all.
   // Off unless configured, so the echo path and existing tests are untouched (see RelayOptions.rateLimit).
   if (options.rateLimit) {
     await registerRateLimit(app, options.rateLimit);
@@ -470,7 +476,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   app.get('/ws', { websocket: true }, (socket: WebSocket, request) => {
-    // Per-IP connection cap (Phase 5 abuse prevention): refuse a caller already at the cap before it can
+    // Per-IP connection cap (abuse prevention): refuse a caller already at the cap before it can
     // register, so one client can't hold open enough sockets to exhaust memory. `request.ip` is the real
     // client when trustProxy is on. Decremented on close below.
     const ip = request.ip;
@@ -478,7 +484,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       const current = connectionsByIp.get(ip) ?? 0;
       if (current >= maxConnectionsPerIp) {
         log.warn({ ip }, 'relay: refusing WS connection — per-IP cap reached');
-        socket.close(4029, 'too many connections');
+        socket.close(WS_CLOSE_CODE_CONNECTION_CAP, 'too many connections');
         return;
       }
       connectionsByIp.set(ip, current + 1);

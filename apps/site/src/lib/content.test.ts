@@ -39,7 +39,7 @@ describe('landing content', () => {
   });
 
   it('lays out the three-step how-it-works flow with sequential numbering', () => {
-    expect(siteContent.howItWorks.map((s) => s.n)).toEqual([1, 2, 3]);
+    expect(siteContent.howItWorks.map((s) => s.stepNumber)).toEqual([1, 2, 3]);
     for (const step of siteContent.howItWorks) {
       expect(step.title.trim().length).toBeGreaterThan(0);
       expect(step.body.trim().length).toBeGreaterThan(0);

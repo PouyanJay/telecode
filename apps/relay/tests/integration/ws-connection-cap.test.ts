@@ -6,16 +6,15 @@ import { pino } from 'pino';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildRelay } from '../../src/relay';
+import { buildRelay, WS_CLOSE_CODE_CONNECTION_CAP } from '../../src/relay';
 import { waitForEnvelope } from '../_helpers/ws';
 
 /**
- * Per-IP WebSocket connection cap (Phase 5 Task 3). Rate limiting bounds how *fast* connections open; this
- * bounds how *many* are held at once, so a single client can't exhaust the relay's memory by holding open
- * thousands of sockets. Proven over the real WS server: once a caller is at the cap, the next connection is
- * closed with the app close code before it can register.
+ * Per-IP WebSocket connection cap. Rate limiting bounds how *fast* connections open; this bounds how *many*
+ * are held at once, so a single client can't exhaust the relay's memory by holding open thousands of
+ * sockets. Proven over the real WS server: once a caller is at the cap, the next connection is closed with
+ * the app close code before it can register.
  */
-const CONNECTION_CAP_CLOSE_CODE = 4029;
 
 describe('per-IP WebSocket connection cap', () => {
   let app: FastifyInstance | undefined;
@@ -65,7 +64,7 @@ describe('per-IP WebSocket connection cap', () => {
       third.once('close', (code) => resolve(code));
     });
 
-    expect(closeCode).toBe(CONNECTION_CAP_CLOSE_CODE);
+    expect(closeCode).toBe(WS_CLOSE_CODE_CONNECTION_CAP);
   });
 
   it('frees a slot when a connection closes', async () => {

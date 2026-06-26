@@ -29,9 +29,9 @@ export interface DeviceAuthOptions {
   intervalSec?: number;
   now?: () => number;
   /**
-   * Brute-force lockout (Phase 5): after this many invalid approve attempts within
-   * `approveFailureWindowMs`, an approving user is refused (defends a victim's short pending `user_code`
-   * against guessing). Defaults to 10 failures / 10 minutes; the relay wires sensible defaults.
+   * Brute-force lockout: after this many invalid approve attempts within `approveFailureWindowMs`, an
+   * approving user is refused (defends a victim's short pending `user_code` against guessing). Defaults to
+   * 10 failures / 10 minutes; the relay wires sensible defaults.
    */
   maxApproveFailures?: number;
   approveFailureWindowMs?: number;
@@ -80,12 +80,17 @@ export function hashDeviceToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+/** Default brute-force lockout thresholds (see {@link DeviceAuthOptions}). */
+export const DEFAULT_MAX_APPROVE_FAILURES = 10;
+export const DEFAULT_APPROVE_FAILURE_WINDOW_MS = 10 * 60_000;
+
 export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthService {
   const now = options.now ?? ((): number => Date.now());
   const expiresInMs = options.expiresInMs ?? 5 * 60_000;
   const intervalSec = options.intervalSec ?? 1;
-  const maxApproveFailures = options.maxApproveFailures ?? 10;
-  const approveFailureWindowMs = options.approveFailureWindowMs ?? 10 * 60_000;
+  const maxApproveFailures = options.maxApproveFailures ?? DEFAULT_MAX_APPROVE_FAILURES;
+  const approveFailureWindowMs =
+    options.approveFailureWindowMs ?? DEFAULT_APPROVE_FAILURE_WINDOW_MS;
   const byDeviceCode = new Map<string, PendingRecord>();
   const userCodeToDeviceCode = new Map<string, string>();
   // Recent invalid-approve timestamps per approving user, for the brute-force lockout.
@@ -100,10 +105,10 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
     return false;
   }
 
-  /** True once a user has spent its invalid-attempt budget within the window (prunes stale entries). */
+  /** Guards a victim's short user_code against distributed guessing. Prunes expired attempts as it reads. */
   function lockedOut(userId: string): boolean {
     const recent = (approveFailures.get(userId) ?? []).filter(
-      (at) => at > now() - approveFailureWindowMs,
+      (failedAt) => failedAt > now() - approveFailureWindowMs,
     );
     if (recent.length > 0) approveFailures.set(userId, recent);
     else approveFailures.delete(userId);

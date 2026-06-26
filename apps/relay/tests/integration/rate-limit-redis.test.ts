@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { FastifyInstance } from 'fastify';
 import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -28,8 +30,9 @@ describe.skipIf(!REDIS_URL)('Redis-backed rate limiting (live)', () => {
       rateLimit: { max: 2, timeWindow: 60_000, redisUrl: REDIS_URL! },
     });
 
-    // A unique client IP so the bucket starts empty regardless of prior runs.
-    const ip = `198.51.100.${Math.floor((Date.now() % 250) + 1)}`;
+    // A per-run unique client IP (doc IPv6 range) so the Redis bucket starts empty even across repeated
+    // runs within the same time window — Date.now()-derived octets could collide; a UUID won't.
+    const ip = `2001:db8::${randomUUID().slice(0, 8)}`;
     const headers = { 'x-forwarded-for': ip };
     const codes: number[] = [];
     for (let i = 0; i < 3; i += 1) {

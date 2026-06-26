@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createTelemetry, type TelemetryEvent } from '../src/telemetry';
 
 /**
- * Variant coverage (Phase 5 Task 10) for the telemetry seam: every event type across the enabled/disabled
- * matrix, and the privacy invariant that no event ever carries an identifier or session content.
+ * Variant coverage for the telemetry seam: every event type across the enabled/disabled matrix, and the
+ * privacy invariant that no event ever carries an identifier or session content.
  */
 const ALL_EVENTS: TelemetryEvent[] = [
   { name: 'peer_connected', role: 'daemon' },
@@ -14,14 +14,16 @@ const ALL_EVENTS: TelemetryEvent[] = [
 ];
 
 describe('telemetry variants', () => {
-  it.each(ALL_EVENTS)('records %o only when enabled', (event) => {
-    const onSink = vi.fn();
-    expect(createTelemetry({ enabled: false, sink: onSink }).record(event)).toBeUndefined();
-    expect(onSink).not.toHaveBeenCalled();
+  it.each(ALL_EVENTS)('does not record %o when telemetry is disabled', (event) => {
+    const sink = vi.fn();
+    createTelemetry({ enabled: false, sink }).record(event);
+    expect(sink).not.toHaveBeenCalled();
+  });
 
-    const offSink = vi.fn();
-    createTelemetry({ enabled: true, sink: offSink }).record(event);
-    expect(offSink).toHaveBeenCalledWith(event);
+  it.each(ALL_EVENTS)('records %o to the sink when telemetry is enabled', (event) => {
+    const sink = vi.fn();
+    createTelemetry({ enabled: true, sink }).record(event);
+    expect(sink).toHaveBeenCalledWith(event);
   });
 
   it('emits no identifiers or session content in any event', () => {
