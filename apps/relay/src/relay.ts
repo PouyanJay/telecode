@@ -97,6 +97,19 @@ export interface RelayOptions {
    * Default false (direct connection / local dev). `main.ts` wires it from `TRUST_PROXY`.
    */
   readonly trustProxy?: boolean;
+  /**
+   * Max request body size in bytes (Phase 5 abuse prevention). The relay's HTTP bodies are all tiny JSON,
+   * so a small cap rejects oversized payloads with 413 before buffering them. Absent → Fastify's 1MB
+   * default; `main.ts` tightens it (env `BODY_LIMIT`).
+   */
+  readonly bodyLimit?: number;
+  /**
+   * Max concurrent WebSocket connections per client IP (Phase 5 abuse prevention). Rate limiting bounds how
+   * fast connections open; this bounds how many are held, so one client can't exhaust memory by holding
+   * many sockets. Counts the real client IP (needs `trustProxy` behind a proxy). Absent → unlimited
+   * (existing tests untouched); `main.ts` sets a default (env `MAX_WS_CONNECTIONS_PER_IP`).
+   */
+  readonly maxConnectionsPerIp?: number;
 }
 
 /** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
@@ -122,7 +135,11 @@ interface PeerState {
 
 export async function buildRelay(options: RelayOptions = {}): Promise<FastifyInstance> {
   const log = options.logger ?? pino({ name: 'relay' });
-  const app = Fastify({ logger: false, trustProxy: options.trustProxy ?? false });
+  const app = Fastify({
+    logger: false,
+    trustProxy: options.trustProxy ?? false,
+    ...(options.bodyLimit !== undefined ? { bodyLimit: options.bodyLimit } : {}),
+  });
 
   // One daemon per channel; any number of browsers watching a channel.
   const daemons = new Map<string, WebSocket>();
@@ -131,6 +148,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // last ping round. A socket that misses a round is half-open (sleep / silent drop) and gets terminated.
   const sockets = new Set<WebSocket>();
   const liveness = new WeakMap<WebSocket, boolean>();
+  // Per-IP concurrent WebSocket count, for the connection cap (Phase 5 abuse prevention). Unbounded when
+  // the cap is unset.
+  const maxConnectionsPerIp = options.maxConnectionsPerIp;
+  const connectionsByIp = new Map<string, number>();
   // Bounded per-session ciphertext cache (Task 8): the latest `session.key` frame + a ring of recent
   // stream frames, all stored as the opaque forwarded strings (the relay never decrypts them).
   const cacheMaxFrames = options.cache?.maxFramesPerSession ?? 64;
@@ -440,7 +461,26 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
   }
 
-  app.get('/ws', { websocket: true }, (socket: WebSocket) => {
+  app.get('/ws', { websocket: true }, (socket: WebSocket, request) => {
+    // Per-IP connection cap (Phase 5 abuse prevention): refuse a caller already at the cap before it can
+    // register, so one client can't hold open enough sockets to exhaust memory. `request.ip` is the real
+    // client when trustProxy is on. Decremented on close below.
+    const ip = request.ip;
+    if (maxConnectionsPerIp !== undefined) {
+      const current = connectionsByIp.get(ip) ?? 0;
+      if (current >= maxConnectionsPerIp) {
+        log.warn({ ip }, 'relay: refusing WS connection — per-IP cap reached');
+        socket.close(4029, 'too many connections');
+        return;
+      }
+      connectionsByIp.set(ip, current + 1);
+      socket.on('close', () => {
+        const remaining = (connectionsByIp.get(ip) ?? 1) - 1;
+        if (remaining <= 0) connectionsByIp.delete(ip);
+        else connectionsByIp.set(ip, remaining);
+      });
+    }
+
     const peer: PeerState = { role: 'unknown', channel: null, userId: null, deviceId: null };
 
     // Heartbeat liveness: track this socket and mark it alive on every pong (the ws client auto-replies

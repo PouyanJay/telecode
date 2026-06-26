@@ -94,9 +94,21 @@ if (rateLimit && !trustProxy) {
   );
 }
 
+// Abuse prevention (Phase 5): a small body cap rejects oversized HTTP payloads (bodies are all tiny JSON),
+// and a per-IP WebSocket cap bounds how many sockets one client can hold open. Both tunable; both on by
+// default with sane values.
+const bodyLimit = process.env.BODY_LIMIT ? Number(process.env.BODY_LIMIT) : 65_536;
+const maxWsPerIp = process.env.MAX_WS_CONNECTIONS_PER_IP
+  ? Number(process.env.MAX_WS_CONNECTIONS_PER_IP)
+  : 32;
+const validBodyLimit = Number.isInteger(bodyLimit) && bodyLimit > 0 ? bodyLimit : 65_536;
+const validMaxWsPerIp = Number.isInteger(maxWsPerIp) && maxWsPerIp > 0 ? maxWsPerIp : 32;
+
 const app = await buildRelay({
   logger: log,
   ...(trustProxy ? { trustProxy } : {}),
+  bodyLimit: validBodyLimit,
+  maxConnectionsPerIp: validMaxWsPerIp,
   ...(rateLimit ? { rateLimit } : {}),
   ...(dbHandle ? { sessionRegistry: createSessionRegistry(dbHandle) } : {}),
   ...(authEnabled && dbHandle && channelTokenSecret && serviceSecret

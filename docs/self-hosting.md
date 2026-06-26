@@ -59,6 +59,9 @@ The relay is the only publicly reachable piece, so it ships safe to leave runnin
   every user, so its traffic aggregates under one IP — without exempting it the limiter could throttle your
   whole user base. Tune the budget with `RATELIMIT_MAX` / `RATELIMIT_WINDOW`, or disable entirely (not
   recommended) with `RATELIMIT_DISABLED=true`.
+- **More abuse limits are on by default:** a request body cap (`BODY_LIMIT`, default 64 KB — the relay's
+  bodies are tiny), a per-IP concurrent WebSocket cap (`MAX_WS_CONNECTIONS_PER_IP`, default 32), and a
+  brute-force lockout on device pairing approval. These need no configuration for a typical deployment.
 
 ## 3. Point your daemon + browser at it
 

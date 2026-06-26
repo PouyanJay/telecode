@@ -28,13 +28,23 @@ export interface DeviceAuthOptions {
   expiresInMs?: number;
   intervalSec?: number;
   now?: () => number;
+  /**
+   * Brute-force lockout (Phase 5): after this many invalid approve attempts within
+   * `approveFailureWindowMs`, an approving user is refused (defends a victim's short pending `user_code`
+   * against guessing). Defaults to 10 failures / 10 minutes; the relay wires sensible defaults.
+   */
+  maxApproveFailures?: number;
+  approveFailureWindowMs?: number;
 }
+
+/** The outcome of an approve attempt: bound, invalid code, or the approver is brute-force locked out. */
+export type ApproveOutcome = 'approved' | 'invalid' | 'rate_limited';
 
 export interface DeviceAuthService {
   requestCode(input: { name?: string; publicKey?: string }): DeviceCodeResponse;
   poll(deviceCode: string): PollResult;
-  /** Persist + bind the device to `userId` (server-derived). Resolves true if the code was valid. */
-  approve(userCode: string, userId: string): Promise<boolean>;
+  /** Persist + bind the device to `userId` (server-derived). See {@link ApproveOutcome}. */
+  approve(userCode: string, userId: string): Promise<ApproveOutcome>;
 }
 
 interface PendingRecord {
@@ -74,8 +84,12 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
   const now = options.now ?? ((): number => Date.now());
   const expiresInMs = options.expiresInMs ?? 5 * 60_000;
   const intervalSec = options.intervalSec ?? 1;
+  const maxApproveFailures = options.maxApproveFailures ?? 10;
+  const approveFailureWindowMs = options.approveFailureWindowMs ?? 10 * 60_000;
   const byDeviceCode = new Map<string, PendingRecord>();
   const userCodeToDeviceCode = new Map<string, string>();
+  // Recent invalid-approve timestamps per approving user, for the brute-force lockout.
+  const approveFailures = new Map<string, number[]>();
 
   function expired(deviceCode: string, record: PendingRecord): boolean {
     if (now() > record.expiresAt) {
@@ -84,6 +98,22 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       return true;
     }
     return false;
+  }
+
+  /** True once a user has spent its invalid-attempt budget within the window (prunes stale entries). */
+  function lockedOut(userId: string): boolean {
+    const recent = (approveFailures.get(userId) ?? []).filter(
+      (at) => at > now() - approveFailureWindowMs,
+    );
+    if (recent.length > 0) approveFailures.set(userId, recent);
+    else approveFailures.delete(userId);
+    return recent.length >= maxApproveFailures;
+  }
+
+  function recordFailure(userId: string): void {
+    const recent = approveFailures.get(userId) ?? [];
+    recent.push(now());
+    approveFailures.set(userId, recent);
   }
 
   return {
@@ -134,12 +164,19 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       return { status: 'authorization_pending' };
     },
 
-    async approve(userCode, userId): Promise<boolean> {
+    async approve(userCode, userId): Promise<ApproveOutcome> {
+      if (lockedOut(userId)) return 'rate_limited';
       const deviceCode = userCodeToDeviceCode.get(userCode);
-      if (deviceCode === undefined) return false;
+      if (deviceCode === undefined) {
+        recordFailure(userId);
+        return 'invalid';
+      }
       const record = byDeviceCode.get(deviceCode);
-      if (!record || expired(deviceCode, record)) return false;
-      if (record.approved) return true; // idempotent
+      if (!record || expired(deviceCode, record)) {
+        recordFailure(userId);
+        return 'invalid';
+      }
+      if (record.approved) return 'approved'; // idempotent
 
       const rawToken = `dt_${randomBytes(24).toString('base64url')}`;
       const deviceId = await options.registry.createDevice({
@@ -152,7 +189,7 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       record.userId = userId;
       record.deviceId = deviceId;
       record.deviceToken = rawToken;
-      return true;
+      return 'approved';
     },
   };
 }
@@ -205,7 +242,11 @@ export function registerDeviceAuthRoutes(
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_request' });
     }
-    if (!(await service.approve(parsed.data.user_code, parsed.data.user_id))) {
+    const outcome = await service.approve(parsed.data.user_code, parsed.data.user_id);
+    if (outcome === 'rate_limited') {
+      return reply.code(429).send({ error: 'too_many_attempts' });
+    }
+    if (outcome === 'invalid') {
       return reply.code(404).send({ error: 'invalid_user_code' });
     }
     return { ok: true };
