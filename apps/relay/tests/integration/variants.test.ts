@@ -164,10 +164,13 @@ describe('session variants: broadcast, error paths, and the one-turn-at-a-time g
     launch(browser, 'do it');
     await col.waitForCount('session.ended', 1);
 
-    expect(col.frames.map((f) => f.type)).toEqual(['session.ended']);
-    expect(sessionEndedPayloadSchema.parse(col.frames[0]!.payload).status).toBe('error');
+    // The browser connected with no daemon, so it first gets a `device.presence` offline frame (Phase 4
+    // Task 3) — orthogonal to this test, which asserts the launch fails rather than sticking at `starting`.
+    const lifecycle = col.frames.filter((f) => f.type !== 'device.presence');
+    expect(lifecycle.map((f) => f.type)).toEqual(['session.ended']);
+    expect(sessionEndedPayloadSchema.parse(lifecycle[0]!.payload).status).toBe('error');
 
-    const sessionId = col.frames[0]?.session_id;
+    const sessionId = lifecycle[0]?.session_id;
     const row = await admin.query<{ status: string }>('select status from sessions where id = $1', [
       sessionId,
     ]);

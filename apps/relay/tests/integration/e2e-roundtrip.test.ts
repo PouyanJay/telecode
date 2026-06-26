@@ -1,17 +1,12 @@
 import type { AddressInfo } from 'node:net';
 
-import {
-  generateKeyPair,
-  makeEnvelope,
-  openEnvelopePayload,
-  sealEnvelopePayload,
-  type KeyPair,
-} from '@telecode/protocol';
+import { generateKeyPair, makeEnvelope, type KeyPair } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { pino } from 'pino';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { buildRelay } from '../../src/relay';
+import { openEnvelopePayload, sealEnvelopePayload } from '../_helpers/browser-crypto';
 import { connectBrowser, connectDaemon, waitForEnvelope } from '../_helpers/ws';
 
 /**

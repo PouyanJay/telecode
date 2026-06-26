@@ -1,7 +1,11 @@
 <script lang="ts">
   import { Button } from '@telecode/ui';
 
+  import { buildFileDiff } from '$lib/diff';
   import type { TranscriptEntry } from '$lib/session';
+
+  import Code from './Code.svelte';
+  import DiffView from './DiffView.svelte';
 
   /**
    * The human-in-the-loop gate (enterprise-ui §7): the agent has paused on a consequential tool and is
@@ -19,6 +23,9 @@
 
   const inputJson = $derived(JSON.stringify(entry.input, null, 2));
   const isInFlight = $derived(entry.decision === 'approving' || entry.decision === 'rejecting');
+  // A file-mutating tool shows its proposed change as a diff (the signature human-in-the-loop view);
+  // anything else falls back to the raw, monospace input.
+  const diff = $derived(buildFileDiff(entry.toolName, entry.input));
 </script>
 
 <section class="gate" data-state={entry.decision} aria-label="Permission request">
@@ -27,7 +34,11 @@
     <code class="name">{entry.toolName}</code>
   </header>
 
-  <pre class="input"><code>{inputJson}</code></pre>
+  {#if diff}
+    <DiffView {diff} />
+  {:else}
+    <Code code={inputJson} language="json" />
+  {/if}
 
   {#if entry.decision === 'pending'}
     <div class="actions">
@@ -82,20 +93,6 @@
     font-size: var(--text-sm);
     font-weight: 500;
     color: var(--text);
-  }
-  .input {
-    margin: 0;
-    padding: var(--space-3);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow-x: auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: var(--lh-xs);
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-word;
   }
   .actions {
     display: flex;

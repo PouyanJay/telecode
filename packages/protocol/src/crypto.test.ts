@@ -1,62 +1,16 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import {
-  generateKeyPair,
-  generateSecretKey,
-  open,
-  openSecret,
-  ready,
-  seal,
-  sealSecret,
-} from './crypto';
+import { generateKeyPair, generateSecretKey, openSecret, sealSecret } from './crypto';
 
-describe('crypto (libsodium crypto_box round-trip)', () => {
-  beforeAll(async () => {
-    await ready();
-  });
-
-  it('generates 32-byte X25519 keypairs', async () => {
+describe('crypto: X25519 keypair generation', () => {
+  it('generates 32-byte X25519 keypairs (the daemon device identity)', async () => {
     const kp = await generateKeyPair();
     expect(kp.publicKey).toHaveLength(32);
     expect(kp.privateKey).toHaveLength(32);
   });
-
-  it('seals and opens a message between two parties', async () => {
-    const browser = await generateKeyPair();
-    const daemon = await generateKeyPair();
-
-    const sealed = await seal('launch session', daemon.publicKey, browser.privateKey);
-    expect(sealed.ciphertext).not.toContain('launch session');
-
-    const recovered = await open(sealed, browser.publicKey, daemon.privateKey);
-    expect(recovered).toBe('launch session');
-  });
-
-  it('fails to open with the wrong recipient key', async () => {
-    const browser = await generateKeyPair();
-    const daemon = await generateKeyPair();
-    const attacker = await generateKeyPair();
-
-    const sealed = await seal('secret', daemon.publicKey, browser.privateKey);
-
-    await expect(open(sealed, browser.publicKey, attacker.privateKey)).rejects.toThrow();
-  });
-
-  it('fails to open tampered ciphertext', async () => {
-    const browser = await generateKeyPair();
-    const daemon = await generateKeyPair();
-
-    const sealed = await seal('secret', daemon.publicKey, browser.privateKey);
-    const tampered = {
-      ...sealed,
-      ciphertext: sealed.ciphertext.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A')),
-    };
-
-    await expect(open(tampered, browser.publicKey, daemon.privateKey)).rejects.toThrow();
-  });
 });
 
-describe('secretbox (symmetric at-rest encryption)', () => {
+describe('secretbox (symmetric at-rest encryption — the relay OAuth-token store)', () => {
   it('generates a 32-byte secret key', () => {
     expect(generateSecretKey()).toHaveLength(32);
   });

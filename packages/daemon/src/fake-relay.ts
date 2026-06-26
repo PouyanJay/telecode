@@ -12,6 +12,10 @@ export interface FakeRelay {
   readonly url: string;
   send(envelope: Envelope): void;
   waitForFrame(predicate: (e: Envelope) => boolean): Promise<Envelope>;
+  /** Resolve on the next `hello` the daemon sends — i.e. its (re-)registration. */
+  waitForHello(): Promise<void>;
+  /** Drop the current daemon connection (simulates a transient network loss), forcing it to reconnect. */
+  dropConnection(): void;
   close(): Promise<void>;
 }
 
@@ -25,6 +29,7 @@ export async function startFakeRelay(userId: string, deviceId: string): Promise<
   let socket: RelaySocket | null = null;
   const buffered: Envelope[] = [];
   const waiters: { predicate: (e: Envelope) => boolean; resolve: (e: Envelope) => void }[] = [];
+  let helloWaiters: (() => void)[] = [];
 
   function deliver(envelope: Envelope): void {
     const index = waiters.findIndex((w) => w.predicate(envelope));
@@ -45,6 +50,10 @@ export async function startFakeRelay(userId: string, deviceId: string): Promise<
         conn.send(
           JSON.stringify(makeEnvelope({ type: 'hello.ack', userId, deviceId, payload: {} })),
         );
+        // Notify anyone awaiting a (re-)registration.
+        const pending = helloWaiters;
+        helloWaiters = [];
+        pending.forEach((w) => w());
         return;
       }
       deliver(envelope);
@@ -71,6 +80,13 @@ export async function startFakeRelay(userId: string, deviceId: string): Promise<
           },
         });
       });
+    },
+    waitForHello(): Promise<void> {
+      return new Promise<void>((resolve) => helloWaiters.push(resolve));
+    },
+    dropConnection(): void {
+      socket?.close();
+      socket = null;
     },
     close(): Promise<void> {
       return new Promise((resolve) => server.close(() => resolve()));

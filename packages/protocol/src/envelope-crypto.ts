@@ -1,12 +1,10 @@
-import { open, seal } from './crypto';
 import { ProtocolError } from './errors';
 
 /**
- * Bridge the crypto primitives ({@link seal}/{@link open}) to the wire envelope's `{ payload, nonce }`
- * fields: the sealed ciphertext travels as the envelope `payload` (a base64 string) and the box nonce as
- * the envelope `nonce`. This is the single chokepoint every peer uses to put a payload on the wire under
- * E2E — feature code stays plaintext-facing; only the transport seam seals/opens, so the relay (which
- * forwards the frame verbatim) only ever observes ciphertext.
+ * Shared helpers for the encrypted slice of the wire envelope: the `{ payload, nonce }` shape every E2E
+ * frame uses (base64 ciphertext + base64 nonce), plus the narrowing/parse guards every decrypt path runs.
+ * The actual seal/open lives in `webcrypto.ts` (AES-GCM); these are the format-level contracts it shares
+ * with the cipher seams — so the relay, which forwards frames verbatim, only ever observes ciphertext.
  */
 
 /** The encrypted slice of an envelope: base64 ciphertext in `payload`, base64 nonce alongside it. */
@@ -26,41 +24,6 @@ export function requireCiphertext(envelope: { readonly payload?: unknown }): str
     throw new ProtocolError('encrypted envelope payload must be a base64 ciphertext string');
   }
   return envelope.payload;
-}
-
-/** Seal a JSON-serializable payload for `recipient`, returning the envelope's `{ payload, nonce }`. */
-export async function sealEnvelopePayload(
-  payload: unknown,
-  recipientPublicKey: Uint8Array,
-  senderPrivateKey: Uint8Array,
-): Promise<EncryptedEnvelopeFields> {
-  const sealed = await seal(JSON.stringify(payload), recipientPublicKey, senderPrivateKey);
-  return { payload: sealed.ciphertext, nonce: sealed.nonce };
-}
-
-/**
- * Open the encrypted `payload`/`nonce` of a received envelope and JSON-parse it back to its value.
- * Throws a {@link ProtocolError} if the payload is not a ciphertext string, if authentication/decryption
- * fails (wrong key or tampered ciphertext — NaCl authenticates before decrypting), or if the decrypted
- * bytes are not valid JSON. The underlying failure is attached via `cause`.
- */
-export async function openEnvelopePayload(
-  envelope: { readonly payload?: unknown; readonly nonce: string },
-  senderPublicKey: Uint8Array,
-  recipientPrivateKey: Uint8Array,
-): Promise<unknown> {
-  const ciphertext = requireCiphertext(envelope);
-  let plaintext: string;
-  try {
-    plaintext = await open(
-      { ciphertext, nonce: envelope.nonce },
-      senderPublicKey,
-      recipientPrivateKey,
-    );
-  } catch (err) {
-    throw new ProtocolError('failed to open sealed envelope payload', { cause: err });
-  }
-  return parsePlaintext(plaintext);
 }
 
 /** JSON-parse a decrypted plaintext, surfacing a non-JSON body as a {@link ProtocolError} (not a raw SyntaxError). */

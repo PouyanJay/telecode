@@ -1,7 +1,9 @@
 <script lang="ts">
   import type { TranscriptEntry } from '$lib/session';
 
+  import MessageBody from './MessageBody.svelte';
   import PermissionGate from './PermissionGate.svelte';
+  import ToolEntry from './ToolEntry.svelte';
 
   /**
    * The session stream (enterprise-ui §7): an append-only transcript of agent messages, tool calls, and
@@ -31,10 +33,6 @@
     entries.length; // re-run when a line is appended
     if (isPinned && listEl) listEl.scrollTop = listEl.scrollHeight;
   });
-
-  function toolInput(input: Record<string, unknown>): string {
-    return JSON.stringify(input, null, 2);
-  }
 </script>
 
 <!-- A scrollable transcript must be keyboard-reachable so non-mouse users can scroll history (WCAG
@@ -54,23 +52,13 @@
       {#if entry.kind === 'user'}
         <div class="from-user">
           <p class="who">YOU</p>
-          <p class="message">{entry.text}</p>
+          <div class="message"><MessageBody text={entry.text} /></div>
         </div>
       {:else if entry.kind === 'message'}
         <p class="who">AGENT</p>
-        <p class="message">{entry.text}</p>
+        <div class="message"><MessageBody text={entry.text} /></div>
       {:else if entry.kind === 'tool'}
-        {@const inputJson = toolInput(entry.input)}
-        <div class="tool">
-          <span class="who">TOOL</span>
-          <code class="tool-name">{entry.toolName}</code>
-          {#if inputJson !== '{}'}
-            <details class="tool-input">
-              <summary>input</summary>
-              <pre><code>{inputJson}</code></pre>
-            </details>
-          {/if}
-        </div>
+        <ToolEntry toolName={entry.toolName} input={entry.input} />
       {:else}
         <PermissionGate
           {entry}
@@ -113,54 +101,15 @@
     letter-spacing: 0.14em;
     color: var(--text-muted);
   }
+  /* A flow container for MessageBody: prose spans own their own pre-wrap, so the container stays
+     `normal` and collapses template whitespace (no stray indentation between segments). */
   .message {
     margin: 0;
     max-width: 70ch;
     color: var(--text);
     font-size: var(--text-base);
     line-height: var(--lh-base);
-    white-space: pre-wrap;
     word-break: break-word;
-  }
-  .tool {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-  }
-  .tool .who {
-    margin: 0;
-  }
-  .tool-name {
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-  }
-  .tool-input {
-    flex-basis: 100%;
-  }
-  .tool-input summary {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-  .tool-input summary:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--focus-ring);
-    border-radius: var(--radius-sm);
-  }
-  .tool-input pre {
-    margin: var(--space-2) 0 0;
-    padding: var(--space-3);
-    background: var(--bg-muted);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    overflow-x: auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: var(--lh-xs);
-    color: var(--text-secondary);
   }
   @media (prefers-reduced-motion: reduce) {
     .entry {

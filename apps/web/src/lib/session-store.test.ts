@@ -1,8 +1,9 @@
 import { makeEnvelope, type SessionLaunchPayload } from '@telecode/protocol';
+import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RelayConnection, type RelayConnectionOptions } from './relay-client';
-import { connect, disconnect, launch } from './session-store';
+import { connect, disconnect, launch, sessions } from './session-store';
 
 /**
  * Phase 2 Task 11 — the launch-correlation + timeout edges deferred from Task 5 (AD-P2-9). The relay
@@ -14,16 +15,19 @@ import { connect, disconnect, launch } from './session-store';
 const userId = 'user-1';
 const deviceId = 'device-1';
 
-/** A fake relay connection that records launch payloads and lets the test emit inbound frames. */
+/** A fake relay connection that records launch/subscribe calls and lets the test emit inbound frames. */
 function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
+  const subscribed: string[] = [];
   let emit: (envelope: ReturnType<typeof makeEnvelope>) => void = () => undefined;
+  let fireReconnect: () => void = () => undefined;
   const create = (options: RelayConnectionOptions): RelayConnection => {
     emit = options.onEvent;
+    fireReconnect = () => options.onReconnect?.();
     options.onStatus('connected');
     return {
       launch: (payload) => launched.push(payload),
-      subscribe: () => undefined,
+      subscribe: (id) => subscribed.push(id),
       sendUserMessage: () => undefined,
       decide: () => undefined,
       control: () => undefined,
@@ -33,6 +37,15 @@ function makeFakeConnection() {
   return {
     create,
     launched,
+    subscribed,
+    /** Simulate the connection re-authenticating after a dropped socket (browser auto-reconnect). */
+    reconnect() {
+      fireReconnect();
+    },
+    /** Simulate the relay's device.presence frame (daemon behind the channel connected/disconnected). */
+    presence(online: boolean) {
+      emit(makeEnvelope({ type: 'device.presence', userId, deviceId, payload: { online } }));
+    },
     /** Simulate the daemon's `session.started` echoing a clientRef for a minted session id. */
     started(sessionId: string, clientRef?: string) {
       emit(
@@ -60,7 +73,10 @@ afterEach(() => {
 describe('session-store launch correlation (Task 11)', () => {
   it('resolves launch() with the minted id when session.started echoes its clientRef', async () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
 
     const pending = launch({ prompt: 'do it' });
     const clientRef = fake.launched[0]?.clientRef;
@@ -72,7 +88,10 @@ describe('session-store launch correlation (Task 11)', () => {
 
   it('rejects launch() on timeout when no session.started arrives', async () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
 
     const pending = launch({ prompt: 'offline device' });
     const assertion = expect(pending).rejects.toThrow(/timed out/i);
@@ -80,9 +99,49 @@ describe('session-store launch correlation (Task 11)', () => {
     await assertion;
   });
 
+  it('re-subscribes every known session after a reconnect so the daemon backfills (Phase 4 T1)', () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+
+    // Two sessions are live in this browser (seeded via inbound frames).
+    fake.started('sess-1');
+    fake.started('sess-2');
+
+    // The socket drops and the client transparently re-authenticates → the store reattaches every known
+    // session (reopen = reconnect, invariant #7) so the daemon backfills their current transcripts.
+    fake.reconnect();
+    expect(fake.subscribed).toEqual(['sess-1', 'sess-2']);
+  });
+
+  it('pauses live sessions when the device goes offline, resumes them when it returns (Phase 4 T3)', () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started('sess-1');
+    fake.started('sess-2');
+
+    // The daemon behind the channel drops: the relay signals offline → live sessions pause.
+    fake.presence(false);
+    const paused = get(sessions);
+    expect(paused.get('sess-1')?.status).toBe('offline_paused');
+    expect(paused.get('sess-2')?.status).toBe('offline_paused');
+
+    // The daemon reconnects: the relay signals online → the store resubscribes to resume (backfill).
+    fake.presence(true);
+    expect(fake.subscribed).toEqual(['sess-1', 'sess-2']);
+  });
+
   it('a late frame for a timed-out launch never mis-resolves a later launch', async () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
 
     // Launch A times out (its clientRef is now stale).
     const launchA = launch({ prompt: 'A' });

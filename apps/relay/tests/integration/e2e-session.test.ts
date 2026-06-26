@@ -2,13 +2,10 @@ import type { AddressInfo } from 'node:net';
 
 import { createDaemon, createFakeAgentAdapter, type Daemon } from '@telecode/daemon';
 import {
-  decryptWithContentKey,
   encodeKey,
   generateKeyPair,
   makeEnvelope,
   parseEnvelope,
-  sealEnvelopePayload,
-  unwrapContentKey,
   type EncryptedEnvelopeFields,
   type Envelope,
   type KeyPair,
@@ -22,6 +19,11 @@ import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createSessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import {
+  decryptWithContentKey,
+  sealEnvelopePayload,
+  unwrapContentKey,
+} from '../_helpers/browser-crypto';
 import { connectBrowser, waitForEnvelope } from '../_helpers/ws';
 
 /**

@@ -1,15 +1,16 @@
 import {
+  devicePresencePayloadSchema,
   sessionStartedPayloadSchema,
   type Envelope,
   type PermissionDecisionPayload,
   type SessionControlAction,
   type SessionLaunchPayload,
 } from '@telecode/protocol';
-import { writable, type Readable } from 'svelte/store';
+import { get, writable, type Readable } from 'svelte/store';
 
 import { createRelayConnection, type ConnectionStatus, type RelayConnection } from './relay-client';
 import { appendUserMessage, markDeciding } from './session';
-import { foldSessionFrame, type SessionMap } from './sessions';
+import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
 /**
  * The browser's single live link to the device's channel, shared across routes (dashboard + session
@@ -24,7 +25,8 @@ export interface ConnectOptions {
   readonly relayUrl: string;
   readonly userId: string;
   readonly deviceId: string;
-  readonly channelToken: string;
+  /** Mint a short-lived channel token; called on connect AND each reconnect so an expired one is renewed. */
+  readonly getChannelToken: () => Promise<string>;
   /** The watched device's X25519 public key (base64) for E2E; null/undefined keeps the channel cleartext. */
   readonly daemonPublicKey?: string | null;
 }
@@ -54,6 +56,16 @@ export const sessions: Readable<SessionMap> = { subscribe: sessionMap.subscribe 
 export const connectionState: Readable<ConnectionState> = { subscribe: connState.subscribe };
 
 function handleEvent(envelope: Envelope): void {
+  // Device presence (Phase 4 Task 3) is channel-wide, not per-session: the daemon behind this channel
+  // (dis)connected. Offline → pause every live session; online → resubscribe so the daemon backfills
+  // and they resume. Handled here (not in foldSessionFrame, which routes by session_id).
+  if (envelope.type === 'device.presence') {
+    const presence = devicePresencePayloadSchema.safeParse(envelope.payload);
+    if (!presence.success) return;
+    if (presence.data.online) reattachSessions();
+    else sessionMap.update((map) => markChannelOffline(map));
+    return;
+  }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
   // A started session resolves the launch carrying its correlation id (offline launches never start —
   // they reject on the launch timeout instead, since the relay can't read the opaque clientRef).
@@ -81,11 +93,36 @@ export function connect(
     relayUrl: options.relayUrl,
     userId: options.userId,
     deviceId: options.deviceId,
-    channelToken: options.channelToken,
+    getChannelToken: options.getChannelToken,
     daemonPublicKey: options.daemonPublicKey,
     onStatus: (status) => connState.set(status),
     onEvent: handleEvent,
+    onReconnect: reattachSessions,
   });
+}
+
+/** Mint a fresh channel token from the web backend (the cookie → a short-lived signed token, BFF). */
+async function fetchChannelToken(): Promise<string> {
+  const res = await fetch('/api/channel-token');
+  if (!res.ok) throw new Error('Could not mint a channel token.');
+  // Validate at the boundary: an error/empty body must surface as a thrown error, not a silent
+  // `undefined` token that the relay would later reject with a 4001 (an unexplained reconnect loop).
+  const body = (await res.json()) as { channelToken?: unknown };
+  if (typeof body.channelToken !== 'string' || body.channelToken === '') {
+    throw new Error('The channel-token endpoint returned no token.');
+  }
+  return body.channelToken;
+}
+
+/**
+ * After the connection transparently reconnects, re-subscribe every session this browser knows about so
+ * the daemon backfills its current transcript (reopen = reconnect — architecture invariant #7). Terminal
+ * sessions backfill harmlessly; active ones resume streaming, with no page reload.
+ */
+function reattachSessions(): void {
+  const conn = connection;
+  if (!conn) return;
+  for (const id of get(sessionMap).keys()) conn.subscribe(id);
 }
 
 /** Whether the shared connection has been opened (so a route doesn't re-fetch a channel token). */
@@ -93,12 +130,11 @@ export function isConnected(): boolean {
   return connection !== null;
 }
 
-let connecting: Promise<void> | null = null;
-
 /**
- * Open the shared connection if it isn't already: mint a channel token (server-side, from the cookie)
- * and connect. Idempotent and browser-only — both the dashboard and the session view call it on mount;
- * a shared in-flight promise keeps a concurrent pair of callers from minting two tokens.
+ * Open the shared connection if it isn't already, minting channel tokens on demand — on the first connect
+ * and on every reconnect, so a token that lapsed during a sleep is renewed (Phase 4 Task 4). Idempotent
+ * and browser-only — both the dashboard and the session view call it on mount; `connect`'s own guard
+ * makes concurrent callers safe.
  */
 export function ensureConnection(options: {
   relayUrl: string;
@@ -106,23 +142,8 @@ export function ensureConnection(options: {
   deviceId: string;
   daemonPublicKey?: string | null;
 }): Promise<void> {
-  if (connection) return Promise.resolve();
-  connecting ??= (async () => {
-    try {
-      const res = await fetch('/api/channel-token');
-      if (!res.ok) {
-        connState.set('error');
-        return;
-      }
-      const { channelToken } = (await res.json()) as { channelToken: string };
-      connect({ ...options, channelToken });
-    } catch {
-      connState.set('error');
-    }
-  })().finally(() => {
-    connecting = null;
-  });
-  return connecting;
+  if (!connection) connect({ ...options, getChannelToken: fetchChannelToken });
+  return Promise.resolve();
 }
 
 /** Launch a session; resolves with the relay-minted id once the daemon reports it started. */
@@ -199,4 +220,7 @@ export function disconnect(): void {
   connection?.close();
   connection = null;
   connState.set('idle');
+  // Full teardown (sign-out): drop watched-session state. A later reconnect re-fetches the list from the
+  // registry and backfills transcripts, so nothing stale should linger across a disconnect.
+  sessionMap.set(new Map());
 }

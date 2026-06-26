@@ -70,6 +70,12 @@ export interface DaemonOptions {
    * daemon cwd.
    */
   readonly defaultRepoPath?: string;
+  /**
+   * Reconnect backoff bounds (Phase 4). The daemon dials *out* to the relay; if that link drops it
+   * redials with exponential backoff + jitter between `baseMs` and `maxMs`. Defaults to 500ms → 10s;
+   * tests inject small values for speed.
+   */
+  readonly reconnect?: { readonly baseMs?: number; readonly maxMs?: number };
   readonly logger?: Logger;
 }
 
@@ -90,6 +96,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // no keypair is configured (existing tests / pre-E2E daemons).
   const cipher = createSessionCipher(options.keyPair?.privateKey);
   let socket: WebSocket | null = null;
+  // Reconnect state (Phase 4 Task 2): the daemon dials *out*, so a dropped link is its own to recover —
+  // it redials with exponential backoff + jitter, keeping all in-memory session state, until stop().
+  let stopped = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  const reconnectBaseMs = options.reconnect?.baseMs ?? 500;
+  const reconnectMaxMs = options.reconnect?.maxMs ?? 10_000;
 
   // Outbound frames are built asynchronously (encryption is async), so we serialize them through a chain
   // to preserve stream order — a later `agent.message` must never overtake the `session.key` /
@@ -563,6 +576,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
     switch (envelope.type) {
       case 'hello.ack': {
+        // A successful (re-)registration resets the backoff so the next drop starts fresh.
+        reconnectAttempts = 0;
         log.info({ deviceId: options.deviceId }, 'daemon: registered with relay');
         onReady();
         return;
@@ -693,41 +708,89 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
   }
 
+  /** The cleartext `hello` that registers this daemon for `(userId, deviceId)` on (re)connect. */
+  function helloFrame(): string {
+    return JSON.stringify(
+      makeEnvelope({
+        type: 'hello',
+        userId: options.userId,
+        deviceId: options.deviceId,
+        payload: {
+          role: 'daemon',
+          ...(options.deviceToken !== undefined ? { token: options.deviceToken } : {}),
+        },
+      }),
+    );
+  }
+
+  /**
+   * Open one relay connection and wire its lifecycle. Called on first connect and on every reconnect.
+   * `onReady` fires on each `hello.ack`; `onFirstError` (first connect only) lets {@link start} reject a
+   * failed initial dial. An unexpected `close` schedules a redial — the daemon recovers its own link.
+   */
+  function openConnection(onReady: () => void, onFirstError?: (err: unknown) => void): void {
+    const ws = new WebSocket(options.relayUrl);
+    socket = ws;
+    // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
+    // handled before the next — a follow-up can't decrypt before the launch establishes the key. Each
+    // socket gets its own chain; the cipher + outbound chain persist across reconnects.
+    let inbound: Promise<void> = Promise.resolve();
+    ws.on('message', (raw: Buffer) => {
+      inbound = inbound
+        .then(() => handleFrame(raw, onReady))
+        .catch((err: unknown) => log.error({ err }, 'daemon: frame handling failed'));
+    });
+    ws.once('open', () => ws.send(helloFrame()));
+    ws.once('error', (err: unknown) => onFirstError?.(err));
+    ws.once('close', () => {
+      // An intentional stop() is terminal; an unexpected drop redials so the daemon stays reachable.
+      if (stopped) return;
+      scheduleReconnect(onReady);
+    });
+  }
+
+  /** Schedule a redial with exponential backoff + jitter (capped), until the daemon is stopped. */
+  function scheduleReconnect(onReady: () => void): void {
+    if (stopped || reconnectTimer !== null) return;
+    const ceiling = Math.min(reconnectMaxMs, reconnectBaseMs * 2 ** reconnectAttempts);
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2); // full-jitter half-range
+    reconnectAttempts += 1;
+    log.warn(
+      { deviceId: options.deviceId, attempt: reconnectAttempts },
+      'daemon: relay link lost — reconnecting',
+    );
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      openConnection(onReady);
+    }, delay);
+  }
+
   return {
     async start(): Promise<void> {
-      const ws = new WebSocket(options.relayUrl);
-      socket = ws;
-
       await new Promise<void>((resolve, reject) => {
-        const onReady = (): void => resolve();
-        // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
-        // handled before the next — a follow-up can't decrypt before the launch establishes the key.
-        let inbound: Promise<void> = Promise.resolve();
-        ws.on('message', (raw: Buffer) => {
-          inbound = inbound
-            .then(() => handleFrame(raw, onReady))
-            .catch((err: unknown) => log.error({ err }, 'daemon: frame handling failed'));
-        });
-        ws.once('open', () => {
-          ws.send(
-            JSON.stringify(
-              makeEnvelope({
-                type: 'hello',
-                userId: options.userId,
-                deviceId: options.deviceId,
-                payload: {
-                  role: 'daemon',
-                  ...(options.deviceToken !== undefined ? { token: options.deviceToken } : {}),
-                },
-              }),
-            ),
-          );
-        });
-        ws.once('error', reject);
+        let settled = false;
+        const onReady = (): void => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        };
+        const onFirstError = (err: unknown): void => {
+          if (!settled) {
+            settled = true;
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+        };
+        openConnection(onReady, onFirstError);
       });
     },
 
     async stop(): Promise<void> {
+      stopped = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       // Unblock any in-flight turns waiting on a human decision so their runs can finish instead of
       // hanging on a closed socket.
       for (const { resolve } of pendingPermissions.values()) {

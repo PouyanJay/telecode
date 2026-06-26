@@ -18,16 +18,23 @@ output, tool inputs, diffs, and the backfilled transcript — is encrypted in th
 
 ## How the encryption works
 
+The handshake is **ECDH on X25519 → HKDF-SHA256 → AES-256-GCM**, via the platform's WebCrypto
+(`crypto.subtle`) in both the browser and the daemon (Node 22+) — no native dependencies.
+
 - Each **device** (daemon) generates an X25519 keypair on first run and registers its _public_ key with
   the relay at pairing. The private key never leaves the laptop (`~/.telecode/credentials.json`).
-- Each **browser** session generates an ephemeral X25519 keypair (in memory, regenerated per page load).
-- On launch, the browser seals the prompt to the daemon's public key (`box`) and announces its own public
-  key. The daemon decrypts it, mints a per-session symmetric **content key**, and delivers that key wrapped
-  to the browser's public key (`session.key`).
-- Every subsequent session message — in both directions — is encrypted under the content key
-  (`secretbox`). One encrypted frame fans out to every browser tab watching the session.
-- All crypto lives in `packages/protocol` (libsodium-family primitives via `tweetnacl`); no component
-  encrypts ad hoc.
+- Each **browser** holds an X25519 identity keypair whose private key is a **non-extractable** `CryptoKey`
+  persisted in the browser's IndexedDB. The page can _use_ it to decrypt while on the origin, but can never
+  read out or exfiltrate the raw key — so injected script can't steal it, and reopening on the same device
+  reuses the same identity (no re-handshake).
+- On launch, the browser and daemon derive a shared key by ECDH (each side's private key + the other's
+  public key) and run it through HKDF. The daemon mints a per-session symmetric **content key** (AES-GCM)
+  and delivers it wrapped under that derived key to the browser (`session.key`).
+- Every subsequent session message — in both directions — is encrypted under the content key with
+  AES-256-GCM (the wire `nonce` is the 12-byte GCM IV). One encrypted frame fans out to every browser tab
+  watching the session.
+- All crypto lives in `packages/protocol` (WebCrypto helpers in `webcrypto.ts`); no component encrypts ad
+  hoc. (One unrelated use of `tweetnacl` remains: sealing the relay's stored GitHub token at rest.)
 
 ## What the relay can and cannot see
 
@@ -71,8 +78,11 @@ The guarantee is enforced by tests and is observable in the relay's own logs.
   relay could attempt a man-in-the-middle by substituting keys. The daemon's key is registered over TLS at
   pairing and stored server-side, and connections use WSS, but out-of-band key verification is not yet
   implemented. Self-hosting removes the untrusted-relay assumption entirely.
-- **Browser keys are ephemeral.** A browser regenerates its keypair each page load, so it cannot decrypt
-  history that was encrypted to a previous key; on reconnect the daemon re-delivers the content key and
-  re-sends the transcript. Persisting browser keys (IndexedDB) for instant same-device reload is planned.
+- **Relay-cached ciphertext.** To make reopen instant, the relay keeps a small, bounded ring of the most
+  recent **ciphertext** frames per session (plus the latest wrapped `session.key`). This is still
+  ciphertext the relay cannot read; it only shortens the time to first paint on reconnect. The daemon
+  remains the authoritative source and reseeds the transcript on resubscribe.
 - **A powered-off laptop cannot run agents.** Execution is local by design; if the daemon is offline, the
-  session list still renders from the registry but the session is paused until the laptop reconnects.
+  session list still renders from the registry but the session is paused until the laptop reconnects. A
+  fully restarted daemon loses the in-memory transcript of a running session — see
+  [reconnect-and-offline.md](./reconnect-and-offline.md).
