@@ -46,7 +46,7 @@ export interface RelayConnection {
   sendUserMessage(sessionId: string, text: string): void;
   /** Send the human's verdict for a pending `agent.permission_request` on `sessionId`. */
   decide(sessionId: string, decision: PermissionDecisionPayload): void;
-  /** Send an operator control (end / interrupt / pause / resume) for `sessionId`. */
+  /** Send an operator control (interrupt / end) for `sessionId`. */
   control(sessionId: string, action: SessionControlAction): void;
   close(): void;
 }

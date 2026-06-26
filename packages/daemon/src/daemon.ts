@@ -11,7 +11,6 @@ import {
   sessionControlPayloadSchema,
   sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
-  sessionStatusPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   type Envelope,
@@ -122,12 +121,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // The in-flight turn's abort handle per session (Task 9): interrupt/end abort it. Set at turn start,
   // cleared at turn end.
   const sessionAborts = new Map<string, AbortController>();
-  // Per-session operator control (Task 9): `paused` refuses new turns; `ended` is terminal (refuse
-  // follow-ups); `prePauseStatus` is restored on resume.
-  const sessionControls = new Map<
-    string,
-    { paused: boolean; ended: boolean; prePauseStatus: SessionStatusName }
-  >();
+  // Sessions the operator has ended (Task 9): terminal — further follow-ups are refused.
+  const endedSessions = new Set<string>();
   // The live transcript + status the daemon holds for each session (architecture invariant #3/#7: the
   // session lives on the laptop). A reopened browser re-attaches with `session.subscribe` and we backfill
   // this as `session.history` — so the relay never needs the plaintext (E2E-consistent in Phase 3). Kept
@@ -170,10 +165,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (type === 'session.ended') {
       const parsed = sessionEndedPayloadSchema.safeParse(payload);
       return parsed.success ? parsed.data.status : 'done';
-    }
-    if (type === 'session.status') {
-      const parsed = sessionStatusPayloadSchema.safeParse(payload);
-      return parsed.success ? parsed.data.status : undefined;
     }
     return undefined;
   }
@@ -284,20 +275,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return { behavior: 'deny', message: payload.message ?? 'Denied by the operator' };
   }
 
-  /** The operator-control record for a session, created on first use. */
-  function controlFor(sessionId: string): {
-    paused: boolean;
-    ended: boolean;
-    prePauseStatus: SessionStatusName;
-  } {
-    let existing = sessionControls.get(sessionId);
-    if (!existing) {
-      existing = { paused: false, ended: false, prePauseStatus: 'running' };
-      sessionControls.set(sessionId, existing);
-    }
-    return existing;
-  }
-
   /**
    * Stop a session's in-flight turn (Task 9 interrupt/end): settle its pending gates with `deny` (so a
    * blocked `canUseTool` can't strand) — recording the verdict so a later backfill shows them decided —
@@ -323,45 +300,27 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return false;
   }
 
-  /** Apply an operator control (`end` / `interrupt` / `pause` / `resume`) to a session. */
+  /** Apply an operator control (`interrupt` / `end`) to a session. */
   function handleControl(envelope: Envelope, action: SessionControlAction): void {
     const sessionId = envelope.session_id;
     if (sessionId === undefined) return;
-    const control = controlFor(sessionId);
     switch (action) {
       case 'interrupt': {
-        // Abort the in-flight turn; the aborted run ends cleanly (`done`) and the session stays followable.
+        // Like Esc: abort the in-flight turn; the aborted run ends cleanly (`done`) and the session stays
+        // followable, so the human just sends another message to continue.
         const aborted = stopTurn(sessionId, 'interrupted by operator');
         log.info({ deviceId: options.deviceId, sessionId, aborted }, 'daemon: interrupt');
         return;
       }
       case 'end': {
         // Terminal: refuse future follow-ups, abort any in-flight turn. If none was running, end directly.
-        control.ended = true;
+        endedSessions.add(sessionId);
         const aborted = stopTurn(sessionId, 'session ended by operator');
         log.info({ deviceId: options.deviceId, sessionId, aborted }, 'daemon: end');
         if (!aborted) {
           setStatus(sessionId, 'done');
           sendForSession(envelope, 'session.ended', { status: 'done' });
         }
-        return;
-      }
-      case 'pause': {
-        // Refuse new turns + report `paused`; an in-flight turn keeps running (use interrupt to stop it).
-        if (control.paused) return;
-        control.prePauseStatus = sessionRecords.get(sessionId)?.status ?? 'running';
-        control.paused = true;
-        setStatus(sessionId, 'paused');
-        sendForSession(envelope, 'session.status', { status: 'paused' });
-        log.info({ deviceId: options.deviceId, sessionId }, 'daemon: paused');
-        return;
-      }
-      case 'resume': {
-        if (!control.paused) return;
-        control.paused = false;
-        setStatus(sessionId, control.prePauseStatus);
-        sendForSession(envelope, 'session.status', { status: control.prePauseStatus });
-        log.info({ deviceId: options.deviceId, sessionId }, 'daemon: resumed');
         return;
       }
       default: {
@@ -557,20 +516,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return;
     }
     const sessionId = envelope.session_id;
-    // Operator controls gate follow-ups: an ended session takes no more turns; a paused one is closed to
-    // new work until resumed (an in-flight turn is unaffected — A-6).
-    const control = sessionId !== undefined ? sessionControls.get(sessionId) : undefined;
-    if (control?.ended) {
+    // An ended session takes no more turns (interrupt, by contrast, leaves the session followable).
+    if (sessionId !== undefined && endedSessions.has(sessionId)) {
       log.warn(
         { deviceId: options.deviceId, sessionId },
         'daemon: follow-up refused — session ended',
-      );
-      return;
-    }
-    if (control?.paused) {
-      log.warn(
-        { deviceId: options.deviceId, sessionId },
-        'daemon: follow-up refused — session paused',
       );
       return;
     }

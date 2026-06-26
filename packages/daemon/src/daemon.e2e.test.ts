@@ -253,7 +253,7 @@ describe('daemon E2E variants (Task 11)', () => {
     expect(prompts).toEqual(['first task', 'second task']);
   });
 
-  it('decrypts an encrypted session.control and emits an encrypted status + cleartext status field', async () => {
+  it('decrypts an encrypted session.control (interrupt) and ends the turn with a cleartext status', async () => {
     const ids = mkIds();
     const daemonKp = await generateKeyPair();
     const browserKp = await generateKeyPair();
@@ -266,10 +266,11 @@ describe('daemon E2E variants (Task 11)', () => {
     const contentKey = await launchAndKey(relay, ids, daemonKp, browserKp, 'gated task');
     await relay.waitForFrame(ofType('agent.permission_request', ids.sessionId)); // mid-session, gate open
 
-    await sendEncrypted(relay, 'session.control', ids, contentKey, { action: 'pause' });
-    const statusFrame = await relay.waitForFrame(ofType('session.status', ids.sessionId));
-    expect(statusFrame.status).toBe('paused'); // cleartext status the relay reads
-    expect(await decryptWithContentKey(statusFrame, contentKey)).toEqual({ status: 'paused' });
+    // The browser sends an ENCRYPTED interrupt; the daemon must decrypt it to abort the in-flight turn.
+    await sendEncrypted(relay, 'session.control', ids, contentKey, { action: 'interrupt' });
+    const endedFrame = await relay.waitForFrame(ofType('session.ended', ids.sessionId));
+    expect(endedFrame.status).toBe('done'); // cleartext status the relay reads
+    expect(await decryptWithContentKey(endedFrame, contentKey)).toMatchObject({ status: 'done' });
   });
 
   it('re-delivers the same content key to a second browser on subscribe (multi-tab fan-out)', async () => {

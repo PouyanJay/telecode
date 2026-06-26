@@ -4,7 +4,6 @@ import {
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
   sessionHistoryPayloadSchema,
-  sessionStatusPayloadSchema,
   type Envelope,
   type SessionStatusName,
 } from '@telecode/protocol';
@@ -146,11 +145,6 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
     case 'session.ended': {
       const parsed = sessionEndedPayloadSchema.safeParse(envelope.payload);
       return { ...base, status: parsed.success ? parsed.data.status : 'done' };
-    }
-
-    case 'session.status': {
-      const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
-      return parsed.success ? { ...base, status: parsed.data.status } : base;
     }
 
     case 'session.history': {

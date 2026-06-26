@@ -38,7 +38,6 @@ export const MESSAGE_TYPES = [
   // reconnect (web <-> daemon)
   'session.subscribe',
   'session.history',
-  'session.status',
   // E2E key delivery (daemon -> web): the per-session content key, box-sealed to the browser's pubkey
   'session.key',
 ] as const;

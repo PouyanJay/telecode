@@ -122,7 +122,7 @@ function control(
   userId: string,
   deviceId: string,
   sessionId: string,
-  action: 'end' | 'interrupt' | 'pause' | 'resume',
+  action: 'end' | 'interrupt',
 ): void {
   relay.send(
     makeEnvelope({ type: 'session.control', userId, deviceId, sessionId, payload: { action } }),
@@ -159,8 +159,6 @@ const ended = (sessionId: string) => (e: Envelope) =>
   e.type === 'session.ended' && e.session_id === sessionId;
 const gate = (sessionId: string) => (e: Envelope) =>
   e.type === 'agent.permission_request' && e.session_id === sessionId;
-const status = (sessionId: string) => (e: Envelope) =>
-  e.type === 'session.status' && e.session_id === sessionId;
 
 afterEach(async () => {
   await Promise.all(daemons.splice(0).map((d) => d.stop()));
@@ -246,29 +244,21 @@ describe('daemon: per-session controls (Task 9)', () => {
     expect(prompts).toEqual(['first', 'new session']);
   });
 
-  it('pause refuses new turns and reports paused; resume re-enables them', async () => {
+  it('a session stays followable after interrupt — a follow-up resumes it', async () => {
     const userId = randomUUID();
     const deviceId = randomUUID();
     const prompts: string[] = [];
-    const relay = await startDaemon(userId, deviceId, quickAdapter(prompts));
+    const relay = await startDaemon(userId, deviceId, blockingAdapter(prompts));
     const sid = randomUUID();
 
-    launch(relay, userId, deviceId, sid, 'first');
+    launch(relay, userId, deviceId, sid, 'run forever');
+    await relay.waitForFrame((e) => e.type === 'agent.message' && e.session_id === sid);
+    control(relay, userId, deviceId, sid, 'interrupt');
     await relay.waitForFrame(ended(sid));
 
-    control(relay, userId, deviceId, sid, 'pause');
-    const paused = await relay.waitForFrame(status(sid));
-    expect((paused.payload as { status: string }).status).toBe('paused');
-
-    // Refused while paused.
-    followUp(relay, userId, deviceId, sid, 'while paused');
-
-    control(relay, userId, deviceId, sid, 'resume');
-    await relay.waitForFrame(status(sid));
-
-    // Accepted after resume — and the paused follow-up never ran.
-    followUp(relay, userId, deviceId, sid, 'after resume');
-    await relay.waitForFrame(ended(sid));
-    expect(prompts).toEqual(['first', 'after resume']);
+    // Unlike end, interrupt leaves the session open: the next message just continues it.
+    followUp(relay, userId, deviceId, sid, 'keep going');
+    await relay.waitForFrame((e) => e.type === 'agent.message' && e.session_id === sid);
+    expect(prompts).toEqual(['run forever', 'keep going']);
   });
 });

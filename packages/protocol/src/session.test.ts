@@ -7,7 +7,6 @@ import {
   sessionHistoryPayloadSchema,
   sessionKeyPayloadSchema,
   sessionLaunchPayloadSchema,
-  sessionStatusPayloadSchema,
   userMessagePayloadSchema,
 } from './session';
 
@@ -151,20 +150,16 @@ describe('sessionLaunchPayloadSchema: repo selection (Task 8)', () => {
 
 describe('sessionControlPayloadSchema: per-session controls (Task 9)', () => {
   it('parses each control action', () => {
-    for (const action of ['end', 'interrupt', 'pause', 'resume'] as const) {
+    for (const action of ['end', 'interrupt'] as const) {
       expect(sessionControlPayloadSchema.parse({ action }).action).toBe(action);
     }
   });
 
-  it('rejects an unknown control action', () => {
+  it('rejects an unknown control action (pause/resume were removed)', () => {
+    expect(sessionControlPayloadSchema.safeParse({ action: 'pause' }).success).toBe(false);
+    expect(sessionControlPayloadSchema.safeParse({ action: 'resume' }).success).toBe(false);
     expect(sessionControlPayloadSchema.safeParse({ action: 'restart' }).success).toBe(false);
     expect(sessionControlPayloadSchema.safeParse({}).success).toBe(false);
-  });
-});
-
-describe('sessionStatusPayloadSchema: paused status (Task 9)', () => {
-  it('accepts the paused status', () => {
-    expect(sessionStatusPayloadSchema.parse({ status: 'paused' }).status).toBe('paused');
   });
 });
 

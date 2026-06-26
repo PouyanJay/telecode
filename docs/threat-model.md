@@ -36,7 +36,7 @@ output, tool inputs, diffs, and the backfilled transcript — is encrypted in th
 | That a session exists; its id, owning user + device                             | Your prompts                                   |
 | Timing and approximate message sizes                                            | The agent's output, messages, diffs            |
 | Message `type` (e.g. `agent.message`, `session.ended`)                          | Tool names and tool inputs                     |
-| Lifecycle `status` (`running` / `awaiting_input` / `done` / `error` / `paused`) | The session transcript                         |
+| Lifecycle `status` (`running` / `awaiting_input` / `done` / `error`)            | The session transcript                         |
 | Public keys (they are public by definition)                                     | Any private key or the per-session content key |
 
 **Honest caveat:** this metadata exposure is real and is _not_ encrypted in v1 — full metadata privacy

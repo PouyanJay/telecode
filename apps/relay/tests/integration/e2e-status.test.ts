@@ -114,30 +114,4 @@ describe('relay reads session status from the cleartext envelope field (E2E)', (
     daemon.close();
     browser.close();
   });
-
-  it('marks the transition from a session.status whose payload is opaque ciphertext (paused)', async () => {
-    const daemon = await connectDaemon(relayUrl, userId, deviceId);
-    const browser = await connectBrowser(relayUrl, userId, deviceId);
-    const sessionId = await launchSession(daemon, browser);
-
-    const statusSeen = waitForEnvelope(browser, (e) => e.type === 'session.status');
-    daemon.send(
-      JSON.stringify(
-        makeEnvelope({
-          type: 'session.status',
-          userId,
-          deviceId,
-          sessionId,
-          status: 'paused',
-          payload: 'opaque-ciphertext',
-        }),
-      ),
-    );
-    await statusSeen;
-
-    expect(await statusOf(sessionId)).toBe('paused');
-
-    daemon.close();
-    browser.close();
-  });
 });

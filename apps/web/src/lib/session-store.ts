@@ -186,7 +186,7 @@ export function decide(sessionId: string, decision: PermissionDecisionPayload): 
   conn.decide(sessionId, decision);
 }
 
-/** Send an operator control (end / interrupt / pause / resume); the daemon reports the resulting status. */
+/** Send an operator control (interrupt / end); the daemon reports the resulting status. */
 export function sendControl(sessionId: string, action: SessionControlAction): void {
   connection?.control(sessionId, action);
 }

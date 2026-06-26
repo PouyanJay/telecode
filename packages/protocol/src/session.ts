@@ -82,10 +82,8 @@ export const SESSION_STATUSES = [
   'awaiting_input',
   'done',
   'error',
+  // The device is off, so the session can't run; it resumes when the daemon reconnects.
   'offline_paused',
-  // Operator-paused: the daemon refuses new turns until resumed (Task 9). Distinct from `offline_paused`
-  // (the device is off). TS-enum only — the `status` column is plain text, so no migration is needed.
-  'paused',
 ] as const;
 export const sessionStatusSchema = z.enum(SESSION_STATUSES);
 export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
@@ -107,10 +105,6 @@ export const sessionEndedPayloadSchema = z.object({
   error: z.string().optional(),
 });
 export type SessionEndedPayload = z.infer<typeof sessionEndedPayloadSchema>;
-
-/** Payload for `session.status` (daemon → web): a status transition. */
-export const sessionStatusPayloadSchema = z.object({ status: sessionStatusSchema });
-export type SessionStatusPayload = z.infer<typeof sessionStatusPayloadSchema>;
 
 /**
  * Decrypted payload for `session.key` (daemon → web, E2E): the per-session symmetric content key, base64.
@@ -162,12 +156,11 @@ export const userMessagePayloadSchema = z.object({ text: z.string().min(1) });
 export type UserMessagePayload = z.infer<typeof userMessagePayloadSchema>;
 
 /**
- * Payload for `session.control` (web → daemon): an operator control for a running session (Task 9).
- * `interrupt` aborts the in-flight turn (the session stays followable); `end` terminates the session
- * (no more turns); `pause` makes the daemon refuse new turns (reporting `paused`) without freezing an
- * in-flight turn; `resume` re-enables turns. The session id is on the envelope.
+ * Payload for `session.control` (web → daemon): an operator control for a session. `interrupt` aborts the
+ * in-flight turn (like pressing Esc) — the session stays followable, so the human just sends another
+ * message to continue; `end` terminates the session (no more turns). The session id is on the envelope.
  */
-export const sessionControlActionSchema = z.enum(['end', 'interrupt', 'pause', 'resume']);
+export const sessionControlActionSchema = z.enum(['end', 'interrupt']);
 export type SessionControlAction = z.infer<typeof sessionControlActionSchema>;
 export const sessionControlPayloadSchema = z.object({ action: sessionControlActionSchema });
 export type SessionControlPayload = z.infer<typeof sessionControlPayloadSchema>;

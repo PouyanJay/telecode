@@ -38,10 +38,10 @@
       session.status === 'running' ||
       session.status === 'awaiting_input',
   );
-  // Operator controls (Task 9). Interrupt stops the in-flight turn; pause/resume gate new work; end
-  // terminates the session. They need a live channel; nothing is actionable on a terminal session.
+  // Operator controls (Task 9). Interrupt stops the in-flight turn (the session stays followable, so you
+  // continue by sending another message); end terminates it. They need a live channel; nothing is
+  // actionable on a terminal session.
   const connected = $derived($connectionState === 'connected');
-  const isPaused = $derived(session.status === 'paused');
   const isTerminal = $derived(session.status === 'done' || session.status === 'error');
   const showControls = $derived(known && session.status !== 'idle');
 
@@ -102,15 +102,6 @@
             Interrupt
           </Button>
         {/if}
-        {#if isPaused}
-          <Button variant="secondary" size="sm" disabled={!connected} onclick={() => onControl('resume')}>
-            Resume
-          </Button>
-        {:else if !isTerminal}
-          <Button variant="secondary" size="sm" disabled={!connected} onclick={() => onControl('pause')}>
-            Pause
-          </Button>
-        {/if}
         {#if !isTerminal}
           <Button variant="danger" size="sm" disabled={!connected} onclick={() => onControl('end')}>
             End
@@ -144,9 +135,9 @@
     {/if}
     <div class="dock hairline-t">
       <Composer
-        isBusy={isBusy || isPaused}
+        isBusy={isBusy}
         submitLabel="Send"
-        placeholder={isPaused ? 'Paused — resume to send a follow-up…' : 'Send a follow-up instruction…'}
+        placeholder="Send a follow-up instruction…"
         onsend={submitPrompt}
       />
     </div>

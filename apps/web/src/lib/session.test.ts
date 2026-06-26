@@ -165,12 +165,10 @@ describe('session reducer', () => {
   });
 });
 
-// Variant coverage (Task 11): every wire session status must fold through the reducer's session.status
-// case and have a display — a parametrized guard so adding a status without handling both fails here.
+// Variant coverage (Task 11): every wire session status must have a display mapping — a parametrized
+// guard so adding a status without a display fails here.
 describe('session status coverage', () => {
-  it.each(SESSION_STATUSES)('folds session.status %s and has a display mapping', (status) => {
-    const state = applyEnvelope(startingState(), frame('session.status', { status }));
-    expect(state.status).toBe(status);
+  it.each(SESSION_STATUSES)('has a display mapping for %s', (status) => {
     expect(SESSION_DISPLAY[status]).toBeDefined();
   });
 });
