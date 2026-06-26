@@ -28,31 +28,38 @@
       <p class="error" role="alert">{form.error}</p>
     {/if}
 
-    <form
-      method="POST"
-      action="?/login"
-      use:enhance={({ submitter }) => {
-        submitting = submitter instanceof HTMLButtonElement ? submitter.value : null;
-        return async ({ update }) => {
-          await update();
-          submitting = null;
-        };
-      }}
-    >
-      {#each data.providers as provider, i (provider.id)}
-        <Button
-          type="submit"
-          name="provider"
-          value={provider.id}
-          variant={i === 0 ? 'primary' : 'secondary'}
-          size="lg"
-          loading={submitting === provider.id}
-          disabled={submitting !== null}
-        >
-          {provider.label}
-        </Button>
-      {/each}
-    </form>
+    {#if data.providers.length === 0}
+      <p class="error" role="alert">
+        No sign-in provider is configured on this server. Set <code>GITHUB_CLIENT_ID</code> and
+        <code>GITHUB_CLIENT_SECRET</code> to enable GitHub sign-in.
+      </p>
+    {:else}
+      <form
+        method="POST"
+        action="?/login"
+        use:enhance={({ submitter }) => {
+          submitting = submitter instanceof HTMLButtonElement ? submitter.value : null;
+          return async ({ update }) => {
+            await update();
+            submitting = null;
+          };
+        }}
+      >
+        {#each data.providers as provider, i (provider.id)}
+          <Button
+            type="submit"
+            name="provider"
+            value={provider.id}
+            variant={i === 0 ? 'primary' : 'secondary'}
+            size="lg"
+            loading={submitting === provider.id}
+            disabled={submitting !== null}
+          >
+            {provider.label}
+          </Button>
+        {/each}
+      </form>
+    {/if}
 
     <p class="foot">Open-source · self-hostable · end-to-end encrypted</p>
   </section>
@@ -119,6 +126,10 @@
     background: var(--danger-soft);
     color: var(--text);
     font-size: var(--text-sm);
+  }
+  .error code {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
   }
   form {
     display: flex;
