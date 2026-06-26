@@ -3,6 +3,35 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "description": "telecode's wire contract — shared zod schemas and end-to-end crypto helpers.",
+  "license": "AGPL-3.0-only",
+  "author": "Pouyan Jahangiri",
+  "homepage": "https://telecode.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PouyanJay/telecode.git",
+    "directory": "packages/protocol"
+  },
+  "bugs": {
+    "url": "https://github.com/PouyanJay/telecode/issues"
+  },
+  "keywords": [
+    "telecode",
+    "end-to-end-encryption",
+    "x25519",
+    "zod",
+    "protocol"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
