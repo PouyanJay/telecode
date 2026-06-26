@@ -141,6 +141,25 @@ function followUp(
   );
 }
 
+function decide(
+  relay: FakeRelay,
+  userId: string,
+  deviceId: string,
+  sessionId: string,
+  requestId: string,
+  behavior: 'allow' | 'deny',
+): void {
+  relay.send(
+    makeEnvelope({
+      type: 'permission.decision',
+      userId,
+      deviceId,
+      sessionId,
+      payload: { requestId, behavior },
+    }),
+  );
+}
+
 /** Subscribe and resolve with the backfilled history (the daemon's authoritative session state). */
 async function history(
   relay: FakeRelay,
@@ -216,6 +235,36 @@ describe('daemon: per-session controls (Task 9)', () => {
     expect(backfill.status).toBe('done');
     const permission = backfill.entries.find((e) => e.kind === 'permission');
     // Settled (no longer actionable on reopen), not stranded as `pending`.
+    expect(permission && permission.kind === 'permission' ? permission.decision : null).toBe(
+      'deny',
+    );
+  });
+
+  it('replies with authoritative history when a decision races a settle (no stranded spinner)', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, gatedAdapter([]));
+    const sid = randomUUID();
+
+    launch(relay, userId, deviceId, sid, 'do a thing');
+    const gateFrame = await relay.waitForFrame(gate(sid));
+    const { requestId } = gateFrame.payload as { requestId: string };
+
+    // Interrupt settles + removes the gate, then the turn ends cleanly (done).
+    control(relay, userId, deviceId, sid, 'interrupt');
+    await relay.waitForFrame(ended(sid));
+
+    // The operator clicked Approve before the end frame landed: the decision arrives with no pending
+    // gate. It must NOT be silently dropped (which strands the browser's "Approving…" spinner) — the
+    // daemon replies with the authoritative state so the browser reconciles, exactly as a reload would.
+    decide(relay, userId, deviceId, sid, requestId, 'allow');
+    const backfill = await relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === sid,
+    );
+    const payload = backfill.payload as { status: string; entries: SessionHistoryEntry[] };
+    expect(payload.status).toBe('done');
+    const permission = payload.entries.find((e) => e.kind === 'permission');
+    // The interrupt recorded the gate as denied; the reconciliation reflects that, not the late approve.
     expect(permission && permission.kind === 'permission' ? permission.decision : null).toBe(
       'deny',
     );

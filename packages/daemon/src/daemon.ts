@@ -157,6 +157,18 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
+   * The authoritative history for a session — the daemon's own live record (status + transcript), or an
+   * offline fallback for a session it no longer holds. Backfilled on `session.subscribe` (reconnect) and
+   * sent to reconcile a `permission.decision` that raced a settle (see the decision handler).
+   */
+  function historyPayloadFor(sessionId: string | undefined): SessionHistoryPayload {
+    const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
+    return rec
+      ? { status: rec.status, entries: rec.transcript }
+      : { status: 'offline_paused', entries: [] };
+  }
+
+  /**
    * The cleartext lifecycle status to stamp on a frame's envelope so the relay can update its registry
    * without reading the (encrypted) payload — only for the lifecycle types the relay acts on. Other types
    * carry their state in the payload (the relay derives those from the message `type`).
@@ -608,14 +620,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
           deliverKey(envelope, envelope.sender_public_key);
         }
         const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
-        const payload: SessionHistoryPayload = rec
-          ? { status: rec.status, entries: rec.transcript }
-          : { status: 'offline_paused', entries: [] };
         log.info(
           { deviceId: options.deviceId, sessionId, known: rec !== undefined },
           'daemon: session subscribe — backfilling history',
         );
-        sendForSession(envelope, 'session.history', payload);
+        sendForSession(envelope, 'session.history', historyPayloadFor(sessionId));
         return;
       }
       case 'permission.decision': {
@@ -631,10 +640,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
         }
         const pending = pendingPermissions.get(decision.data.requestId);
         if (!pending) {
-          log.warn(
+          // The gate was already settled + removed (interrupt/end) before this decision arrived — the
+          // interrupt-then-approve race. Dropping it silently strands the browser's "Approving…"
+          // spinner forever; instead reconcile it with the authoritative session state (status + the
+          // recorded verdict), exactly as a reopen's backfill would.
+          log.info(
             { deviceId: options.deviceId, requestId: decision.data.requestId },
-            'daemon: no pending permission for decision',
+            'daemon: decision for a settled gate — reconciling with session state',
           );
+          sendForSession(envelope, 'session.history', historyPayloadFor(envelope.session_id));
           return;
         }
         pendingPermissions.delete(decision.data.requestId);
