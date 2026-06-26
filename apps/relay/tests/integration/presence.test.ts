@@ -7,7 +7,7 @@ import WebSocket from 'ws';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { buildRelay } from '../../src/relay';
-import { connectBrowser, connectDaemon, waitForEnvelope } from '../_helpers/ws';
+import { connectBrowser, connectDaemon, sendEcho, waitForEnvelope } from '../_helpers/ws';
 
 /**
  * Phase 4 Task 3 — device presence. The relay tells watching browsers when the daemon behind their
@@ -99,7 +99,7 @@ describe('relay: device presence (Phase 4 Task 3)', () => {
 
   it('does not send a cold browser an offline frame when its daemon is already online', async () => {
     const deviceId = 'device-already-online';
-    await connectDaemon(relayUrl, userId, deviceId); // daemon online first
+    const daemon = await connectDaemon(relayUrl, userId, deviceId); // daemon online first
 
     const ws = new WebSocket(relayUrl);
     await new Promise<void>((resolve, reject) => {
@@ -114,8 +114,12 @@ describe('relay: device presence (Phase 4 Task 3)', () => {
       ),
     );
     await waitForEnvelope(ws, (e) => e.type === 'hello.ack');
-    // Give any stray presence frame a tick to arrive, then assert none did.
-    await new Promise((r) => setTimeout(r, 50));
+    // The relay sends the ack BEFORE its presence decision, so the ack alone isn't a barrier. Send an
+    // echo and wait for the relay to forward it to the online daemon: same-socket ordering guarantees the
+    // relay finished this browser's hello (presence decision included) first, so any stray presence frame
+    // is already in `frames`. No timing wait.
+    sendEcho(ws, userId, deviceId, 'barrier');
+    await waitForEnvelope(daemon, (e) => e.type === 'echo');
     expect(frames.some(presenceOf)).toBe(false);
     ws.close();
   });

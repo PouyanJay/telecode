@@ -16,7 +16,9 @@
     return `${n} ${unit}${n === 1 ? '' : 's'}`;
   }
 
-  const summary = $derived(`Diff for ${diff.path}: ${plural(diff.additions, 'addition')}, ${plural(diff.deletions, 'deletion')}`);
+  const added = $derived(plural(diff.additions, 'addition'));
+  const removed = $derived(plural(diff.deletions, 'deletion'));
+  const summary = $derived(`Diff for ${diff.path}: ${added}, ${removed}`);
 </script>
 
 <figure class="diff" aria-label={summary}>

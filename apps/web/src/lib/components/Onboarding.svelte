@@ -10,6 +10,9 @@
    */
   let { steps }: { steps: readonly OnboardingStep[] } = $props();
 
+  /** How long the "Copied" affordance stays up after a successful copy. */
+  const CLIPBOARD_FEEDBACK_MS = 2000;
+
   // Verification-free, local affordance: copying a command is safe to be optimistic about.
   let copiedCommand = $state<string | null>(null);
 
@@ -19,7 +22,7 @@
       copiedCommand = command;
       setTimeout(() => {
         if (copiedCommand === command) copiedCommand = null;
-      }, 2000);
+      }, CLIPBOARD_FEEDBACK_MS);
     } catch {
       // Clipboard unavailable (insecure context / denied) — the command stays on screen to copy by hand.
     }
@@ -97,6 +100,8 @@
     line-height: var(--lh-base);
   }
   .steps {
+    /* The marker diameter is a single component-internal constant the rail + columns derive from. */
+    --marker-size: 28px;
     list-style: none;
     margin: 0;
     padding: 0;
@@ -105,7 +110,7 @@
   }
   .step {
     display: grid;
-    grid-template-columns: 28px 1fr;
+    grid-template-columns: var(--marker-size) 1fr;
     gap: var(--space-4);
     padding-bottom: var(--space-6);
     position: relative;
@@ -114,8 +119,8 @@
   .step:not(:last-child)::before {
     content: '';
     position: absolute;
-    left: 13.5px;
-    top: 28px;
+    left: calc(var(--marker-size) / 2 - 0.5px);
+    top: var(--marker-size);
     bottom: 0;
     width: 1px;
     background: var(--border);
@@ -125,8 +130,8 @@
   }
   .marker {
     z-index: 1;
-    width: 28px;
-    height: 28px;
+    width: var(--marker-size);
+    height: var(--marker-size);
     display: grid;
     place-items: center;
     border-radius: var(--radius-full);
@@ -146,7 +151,7 @@
     color: var(--success);
   }
   .title {
-    margin: 3px 0 var(--space-1);
+    margin: var(--space-1) 0;
     font-size: var(--text-base);
     font-weight: 600;
   }

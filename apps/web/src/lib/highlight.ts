@@ -164,6 +164,32 @@ function rulesFor(
 }
 
 /**
+ * Match the first applicable rule at `pos`. Returns the consumed length and the resolved token type — an
+ * `identifier` rule resolves to `keyword` or `plain` by the keyword set. A null type means no rule matched
+ * (the caller advances one character as plain).
+ */
+function matchRuleAt(
+  code: string,
+  pos: number,
+  spec: { rules: readonly Rule[]; keywords: Set<string> },
+): { consumed: number; type: HighlightTokenType | null } {
+  for (const rule of spec.rules) {
+    rule.re.lastIndex = pos;
+    const match = rule.re.exec(code);
+    if (match && match[0].length > 0) {
+      const type =
+        rule.type === 'identifier'
+          ? spec.keywords.has(match[0])
+            ? 'keyword'
+            : 'plain'
+          : rule.type;
+      return { consumed: match[0].length, type };
+    }
+  }
+  return { consumed: 0, type: null };
+}
+
+/**
  * Tokenize `code` for `language`. Scans left to right: at each position the first matching rule consumes
  * its match; an unmatched character (whitespace, punctuation the grammar ignores) becomes plain. Adjacent
  * plain slices are coalesced so the DOM stays lean. `plain` (or an empty string) returns a single token.
@@ -176,7 +202,6 @@ export function highlight(code: string, language: HighlightLanguage): HighlightT
   const tokens: HighlightToken[] = [];
   let plainStart = -1;
   let pos = 0;
-
   const flushPlain = (end: number): void => {
     if (plainStart >= 0) {
       tokens.push({ type: 'plain', text: code.slice(plainStart, end) });
@@ -185,29 +210,13 @@ export function highlight(code: string, language: HighlightLanguage): HighlightT
   };
 
   while (pos < code.length) {
-    let consumed = 0;
-    let type: HighlightTokenType | null = null;
-    for (const rule of spec.rules) {
-      rule.re.lastIndex = pos;
-      const match = rule.re.exec(code);
-      if (match && match[0].length > 0) {
-        consumed = match[0].length;
-        type =
-          rule.type === 'identifier'
-            ? spec.keywords.has(match[0])
-              ? 'keyword'
-              : 'plain'
-            : rule.type;
-        break;
-      }
-    }
-
+    const { consumed, type } = matchRuleAt(code, pos, spec);
     if (type !== null && type !== 'plain') {
       flushPlain(pos);
       tokens.push({ type, text: code.slice(pos, pos + consumed) });
       pos += consumed;
     } else {
-      // Unmatched, or an identifier that turned out to be a plain word: extend the current plain run.
+      // Unmatched, or an identifier that resolved to a plain word: extend the current plain run.
       if (plainStart < 0) plainStart = pos;
       pos += consumed > 0 ? consumed : 1;
     }

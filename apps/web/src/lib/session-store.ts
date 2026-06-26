@@ -105,8 +105,13 @@ export function connect(
 async function fetchChannelToken(): Promise<string> {
   const res = await fetch('/api/channel-token');
   if (!res.ok) throw new Error('Could not mint a channel token.');
-  const { channelToken } = (await res.json()) as { channelToken: string };
-  return channelToken;
+  // Validate at the boundary: an error/empty body must surface as a thrown error, not a silent
+  // `undefined` token that the relay would later reject with a 4001 (an unexplained reconnect loop).
+  const body = (await res.json()) as { channelToken?: unknown };
+  if (typeof body.channelToken !== 'string' || body.channelToken === '') {
+    throw new Error('The channel-token endpoint returned no token.');
+  }
+  return body.channelToken;
 }
 
 /**

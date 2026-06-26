@@ -56,17 +56,19 @@ function diffLines(
   oldLines: readonly string[],
   newLines: readonly string[],
 ): Array<{ kind: DiffLineKind; text: string }> {
-  const n = oldLines.length;
-  const m = newLines.length;
-  // Flat row-major LCS table, zero-initialized; `at` reads an in-range cell (the `?? 0` only satisfies
-  // noUncheckedIndexedAccess — every index below is provably in bounds).
-  const width = m + 1;
-  const dp = new Int32Array((n + 1) * width);
-  const at = (i: number, j: number): number => dp[i * width + j] ?? 0;
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i * width + j] =
-        oldLines[i] === newLines[j] ? at(i + 1, j + 1) + 1 : Math.max(at(i + 1, j), at(i, j + 1));
+  const oldLength = oldLines.length;
+  const newLength = newLines.length;
+  // Flat row-major LCS table, zero-initialized; `lcsAt` reads an in-range cell — the `?? 0` only
+  // satisfies noUncheckedIndexedAccess, as every index below is provably in bounds.
+  const width = newLength + 1;
+  const lcsTable = new Int32Array((oldLength + 1) * width);
+  const lcsAt = (i: number, j: number): number => lcsTable[i * width + j] ?? 0;
+  for (let i = oldLength - 1; i >= 0; i--) {
+    for (let j = newLength - 1; j >= 0; j--) {
+      lcsTable[i * width + j] =
+        oldLines[i] === newLines[j]
+          ? lcsAt(i + 1, j + 1) + 1
+          : Math.max(lcsAt(i + 1, j), lcsAt(i, j + 1));
     }
   }
 
@@ -74,14 +76,14 @@ function diffLines(
   let i = 0;
   let j = 0;
   // The index is always in range inside each guard, so the line reads are non-null by construction.
-  while (i < n && j < m) {
+  while (i < oldLength && j < newLength) {
     const before = oldLines[i]!;
     const after = newLines[j]!;
     if (before === after) {
       ops.push({ kind: 'context', text: before });
       i++;
       j++;
-    } else if (at(i + 1, j) >= at(i, j + 1)) {
+    } else if (lcsAt(i + 1, j) >= lcsAt(i, j + 1)) {
       ops.push({ kind: 'del', text: before });
       i++;
     } else {
@@ -89,8 +91,8 @@ function diffLines(
       j++;
     }
   }
-  while (i < n) ops.push({ kind: 'del', text: oldLines[i++]! });
-  while (j < m) ops.push({ kind: 'add', text: newLines[j++]! });
+  while (i < oldLength) ops.push({ kind: 'del', text: oldLines[i++]! });
+  while (j < newLength) ops.push({ kind: 'add', text: newLines[j++]! });
   return ops;
 }
 

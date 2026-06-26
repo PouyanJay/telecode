@@ -46,7 +46,7 @@ describe('telecode CLI packaging', () => {
     expect(installer.startsWith('#!/usr/bin/env')).toBe(true);
     expect(installer).toContain('set -e');
     expect(installer).toContain('telecode');
-    // Guards the Node floor that the daemon's WebCrypto needs.
-    expect(installer).toContain('22');
+    // Guards the Node floor that the daemon's WebCrypto needs (the version number, not an incidental 22).
+    expect(installer).toMatch(/\b22\b/);
   });
 });

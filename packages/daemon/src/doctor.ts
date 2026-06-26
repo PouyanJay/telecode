@@ -38,7 +38,7 @@ export interface DoctorDeps {
 /** Node floor: WebCrypto X25519 (the E2E handshake, Phase 4) needs Node 22+. */
 const MIN_NODE_MAJOR = 22;
 
-const check = (name: string, status: DoctorStatus, detail: string): DoctorCheck => ({
+const makeCheck = (name: string, status: DoctorStatus, detail: string): DoctorCheck => ({
   name,
   status,
   detail,
@@ -47,11 +47,11 @@ const check = (name: string, status: DoctorStatus, detail: string): DoctorCheck 
 function nodeCheck(nodeVersion: string): DoctorCheck {
   const major = Number.parseInt(nodeVersion.split('.')[0] ?? '', 10);
   if (Number.isNaN(major)) {
-    return check('Node.js', 'fail', `could not parse Node version "${nodeVersion}"`);
+    return makeCheck('Node.js', 'fail', `could not parse Node version "${nodeVersion}"`);
   }
   return major >= MIN_NODE_MAJOR
-    ? check('Node.js', 'pass', `v${nodeVersion} (>= ${MIN_NODE_MAJOR} required)`)
-    : check(
+    ? makeCheck('Node.js', 'pass', `v${nodeVersion} (>= ${MIN_NODE_MAJOR} required)`)
+    : makeCheck(
         'Node.js',
         'fail',
         `v${nodeVersion} is too old — Node ${MIN_NODE_MAJOR}+ is required for WebCrypto X25519`,
@@ -61,8 +61,8 @@ function nodeCheck(nodeVersion: string): DoctorCheck {
 function apiKeyCheck(env: NodeJS.ProcessEnv): DoctorCheck {
   const key = env.ANTHROPIC_API_KEY;
   return key && key.trim() !== ''
-    ? check('Anthropic API key', 'pass', 'ANTHROPIC_API_KEY is set')
-    : check(
+    ? makeCheck('Anthropic API key', 'pass', 'ANTHROPIC_API_KEY is set')
+    : makeCheck(
         'Anthropic API key',
         'fail',
         'ANTHROPIC_API_KEY is not set — agent sessions cannot run without it',
@@ -72,8 +72,8 @@ function apiKeyCheck(env: NodeJS.ProcessEnv): DoctorCheck {
 async function pairingCheck(loadCredentials: DoctorDeps['loadCredentials']): Promise<DoctorCheck> {
   const credentials = await loadCredentials();
   return credentials
-    ? check('Device pairing', 'pass', `paired as device ${credentials.deviceId}`)
-    : check('Device pairing', 'warn', 'not paired yet — run `telecode` to pair this device');
+    ? makeCheck('Device pairing', 'pass', `paired as device ${credentials.deviceId}`)
+    : makeCheck('Device pairing', 'warn', 'not paired yet — run `telecode` to pair this device');
 }
 
 /** Derive the relay's HTTP health URL from its ws/wss URL (ws→http, wss→https, `/ws`→`/healthz`). */
@@ -87,12 +87,12 @@ async function relayCheck(
   probeRelay: DoctorDeps['probeRelay'],
 ): Promise<DoctorCheck> {
   if ('error' in relay) {
-    return check('Relay reachability', 'fail', `relay URL is invalid — ${relay.error}`);
+    return makeCheck('Relay reachability', 'fail', `relay URL is invalid — ${relay.error}`);
   }
   const result = await probeRelay(healthUrlFor(relay.url));
   return result.ok
-    ? check('Relay reachability', 'pass', `reachable at ${relay.url}`)
-    : check(
+    ? makeCheck('Relay reachability', 'pass', `reachable at ${relay.url}`)
+    : makeCheck(
         'Relay reachability',
         'fail',
         `unreachable at ${relay.url}${result.error ? ` (${result.error})` : ''}`,

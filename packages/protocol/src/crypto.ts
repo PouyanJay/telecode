@@ -1,5 +1,7 @@
 import nacl from 'tweetnacl';
 
+import { ProtocolError } from './errors';
+
 /**
  * Crypto helpers (NaCl, via tweetnacl) — two primitives, both authenticated:
  *  - `box` (X25519-XSalsa20-Poly1305): E2E encryption between two parties — {@link seal}/{@link open}.
@@ -102,7 +104,7 @@ export async function openSecret(sealed: SealedMessage, key: Uint8Array): Promis
     key,
   );
   if (plaintext === null) {
-    throw new Error('decryption failed: wrong key or tampered ciphertext');
+    throw new ProtocolError('decryption failed: wrong key or tampered ciphertext');
   }
   return utf8Decoder.decode(plaintext);
 }

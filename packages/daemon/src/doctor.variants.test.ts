@@ -34,6 +34,7 @@ describe('doctor failure-mode matrix (T16)', () => {
   it.each([
     ['all healthy', {}, true, 0],
     ['node too old', NODE_OLD, false, 1],
+    ['node unparseable', { nodeVersion: 'not-a-version' }, false, 1],
     ['key missing', KEY_MISSING, false, 1],
     ['relay down', RELAY_DOWN, false, 1],
     ['relay url invalid', RELAY_BAD, false, 1],
