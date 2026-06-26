@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a problem with telecode
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please **do not report security vulnerabilities here** —
+        follow the [Security Policy](https://github.com/PouyanJay/telecode/blob/main/SECURITY.md) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected to happen instead.
+      placeholder: When I …, telecode …, but I expected …
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence of steps that triggers the bug.
+      placeholder: |
+        1. Run `npx telecode`
+        2. Pair the device
+        3. Launch a session with …
+        4. See …
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part?
+      description: Where does the bug appear?
+      options:
+        - Web app (the dashboard / PWA)
+        - Daemon (the machine running agents)
+        - Relay (the control plane)
+        - Self-hosting / Docker
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser, Node version (`node --version`), and whether you self-host the relay.
+      placeholder: macOS 15, Chrome 140, Node 22.5, self-hosted relay
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. **Redact any secrets, tokens, or private code** before pasting.
+      render: shell
+    validations:
+      required: false

@@ -4,12 +4,41 @@
   "private": true,
   "type": "module",
   "description": "The telecode daemon — runs Claude Code agents on your machine, dialing out to the relay.",
+  "license": "AGPL-3.0-only",
+  "author": "Pouyan Jahangiri",
+  "homepage": "https://telecode.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PouyanJay/telecode.git",
+    "directory": "packages/daemon"
+  },
+  "bugs": {
+    "url": "https://github.com/PouyanJay/telecode/issues"
+  },
+  "keywords": [
+    "telecode",
+    "claude",
+    "claude-code",
+    "agent",
+    "coding-agent",
+    "self-hosted",
+    "daemon",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "telecode": "bin/telecode.mjs"
   },
   "files": [
     "bin",
-    "src"
+    "src",
+    "!src/**/*.test.ts",
+    "!src/spike-agent-sdk.ts"
   ],
   "exports": {
     ".": "./src/index.ts"

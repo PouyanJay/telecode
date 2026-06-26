@@ -38,12 +38,30 @@ Optional features turn on only when their secret is present (the relay logs whic
 docker compose -f infra/docker-compose.yml up
 ```
 
-This starts Postgres, applies migrations once (a one-shot `migrate` step), then starts the relay on
+This starts Postgres, Redis, applies migrations once (a one-shot `migrate` step), then starts the relay on
 `http://localhost:8080` (change the host port with `RELAY_PORT`). Verify it:
 
 ```sh
 curl -fsS http://localhost:8080/healthz   # → {"status":"ok"}
 ```
+
+## Hardening for a public relay
+
+The relay is the only publicly reachable piece, so it ships safe to leave running:
+
+- **Rate limiting is on by default** — every HTTP request is limited per client IP (default 300 / minute;
+  the pairing endpoints are tighter). The bundle wires Redis automatically so the budget is shared across
+  relay instances; a single relay also works without Redis (in-memory fallback).
+- **Set `TRUST_PROXY=true` behind a reverse proxy** (the bundle defaults to this). It makes the per-IP
+  limit key on the real client from `X-Forwarded-For`. If you set it false while behind a proxy, every
+  client shares one budget; if true with no proxy, a client could spoof its IP — match it to your topology.
+- **Set `RATELIMIT_ALLOWLIST` to your web tier's egress IP(s).** The web tier calls the relay on behalf of
+  every user, so its traffic aggregates under one IP — without exempting it the limiter could throttle your
+  whole user base. Tune the budget with `RATELIMIT_MAX` / `RATELIMIT_WINDOW`, or disable entirely (not
+  recommended) with `RATELIMIT_DISABLED=true`.
+- **More abuse limits are on by default:** a request body cap (`BODY_LIMIT`, default 64 KB — the relay's
+  bodies are tiny), a per-IP concurrent WebSocket cap (`MAX_WS_CONNECTIONS_PER_IP`, default 32), and a
+  brute-force lockout on device pairing approval. These need no configuration for a typical deployment.
 
 ## 3. Point your daemon + browser at it
 

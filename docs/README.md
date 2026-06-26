@@ -10,5 +10,7 @@ Start with the project [README](../README.md) for what telecode is and why. Thes
   stays with you.
 - **[Threat model](./threat-model.md)** — exactly what each part can and cannot see, how the end-to-end
   encryption works, and how to verify the relay only sees ciphertext.
+- **[Telemetry & privacy](./telemetry.md)** — telecode collects nothing by default; what the self-host-only
+  opt-in operational metrics do and don't include.
 - **[Publishing the CLI](./publishing.md)** — maintainer runbook for shipping the `telecode` command to
   npm.

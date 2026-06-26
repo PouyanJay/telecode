@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 
 import { createDaemon, type Daemon } from '@telecode/daemon';
@@ -11,7 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createAuthService } from '../src/auth/auth-service';
 import { createDb, type DbHandle } from '../src/db/client';
 import { runMigrations } from '../src/db/migrate';
-import { hashDeviceToken } from '../src/device-auth';
+import { DEFAULT_MAX_APPROVE_FAILURES, hashDeviceToken } from '../src/device-auth';
 import { createDeviceRegistry } from '../src/registry/device-registry';
 import { buildRelay } from '../src/relay';
 
@@ -171,5 +172,30 @@ describe('device pairing: persisted, server-derived approval + daemon token auth
       ),
     );
     expect(await closed).toBe(4001);
+  });
+
+  it('returns 429 from /device/approve once an approver is brute-force locked out', async () => {
+    // A synthetic approver id keeps this test's failures isolated from the rest of the suite. The invalid
+    // code path is refused before the registry is touched, so no real user row is needed.
+    const approver = `lockout-${randomUUID()}`;
+    const badCode = 'ZZZZ-ZZZZ';
+    const approveBad = async (): Promise<number> =>
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/device/approve',
+          headers: { 'x-telecode-service-secret': SERVICE_SECRET },
+          payload: { user_code: badCode, user_id: approver },
+        })
+      ).statusCode;
+
+    const beforeLockout: number[] = [];
+    for (let i = 0; i < DEFAULT_MAX_APPROVE_FAILURES; i += 1) {
+      beforeLockout.push(await approveBad());
+    }
+
+    // Every attempt within the budget is a plain invalid-code 404; the next one is refused with 429.
+    expect(beforeLockout).toEqual(Array<number>(DEFAULT_MAX_APPROVE_FAILURES).fill(404));
+    expect(await approveBad()).toBe(429);
   });
 });

@@ -23,6 +23,17 @@ services:
       timeout: 3s
       retries: 20
 
+  # Backs the relay's HTTP rate limiter so the budget is shared across relay instances (and a relay
+  # restart). A single relay also works without it (in-memory fallback) — it matters when you scale out.
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   # One-shot: apply all migrations, then exit. The relay waits for this to complete.
   migrate:
     image: telecode/relay:local
@@ -57,10 +68,25 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@telecode.local}
+      # HTTP rate limiting (on by default). REDIS_URL shares the budget across instances; TRUST_PROXY
+      # must be true behind a reverse proxy so the per-IP limit keys on the real client; RATELIMIT_ALLOWLIST
+      # exempts trusted IPs (e.g. the web tier's egress). See docs/self-hosting.md.
+      REDIS_URL: redis://redis:6379
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      RATELIMIT_MAX: ${RATELIMIT_MAX:-}
+      RATELIMIT_WINDOW: ${RATELIMIT_WINDOW:-}
+      RATELIMIT_ALLOWLIST: ${RATELIMIT_ALLOWLIST:-}
+      RATELIMIT_DISABLED: ${RATELIMIT_DISABLED:-}
+      BODY_LIMIT: ${BODY_LIMIT:-}
+      MAX_WS_CONNECTIONS_PER_IP: ${MAX_WS_CONNECTIONS_PER_IP:-}
+      # Telemetry is OFF unless you opt in (aggregate, identifier-free, to your own logs). See docs/telemetry.md.
+      TELECODE_TELEMETRY: ${TELECODE_TELEMETRY:-}
     ports:
       - '${RELAY_PORT:-8080}:8080'
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
