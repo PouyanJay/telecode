@@ -5,8 +5,8 @@ import {
   permissionDecisionPayloadSchema,
   sessionControlPayloadSchema,
   sessionHistoryPayloadSchema,
+  sessionKeyPayloadSchema,
   sessionLaunchPayloadSchema,
-  sessionStatusPayloadSchema,
   userMessagePayloadSchema,
 } from './session';
 
@@ -150,20 +150,16 @@ describe('sessionLaunchPayloadSchema: repo selection (Task 8)', () => {
 
 describe('sessionControlPayloadSchema: per-session controls (Task 9)', () => {
   it('parses each control action', () => {
-    for (const action of ['end', 'interrupt', 'pause', 'resume'] as const) {
+    for (const action of ['end', 'interrupt'] as const) {
       expect(sessionControlPayloadSchema.parse({ action }).action).toBe(action);
     }
   });
 
-  it('rejects an unknown control action', () => {
+  it('rejects an unknown control action (pause/resume were removed)', () => {
+    expect(sessionControlPayloadSchema.safeParse({ action: 'pause' }).success).toBe(false);
+    expect(sessionControlPayloadSchema.safeParse({ action: 'resume' }).success).toBe(false);
     expect(sessionControlPayloadSchema.safeParse({ action: 'restart' }).success).toBe(false);
     expect(sessionControlPayloadSchema.safeParse({}).success).toBe(false);
-  });
-});
-
-describe('sessionStatusPayloadSchema: paused status (Task 9)', () => {
-  it('accepts the paused status', () => {
-    expect(sessionStatusPayloadSchema.parse({ status: 'paused' }).status).toBe('paused');
   });
 });
 
@@ -214,5 +210,24 @@ describe('sessionHistoryPayloadSchema', () => {
       entries: [{ kind: 'diff', text: 'x' }],
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('sessionKeyPayloadSchema', () => {
+  // A well-formed base64 32-byte content key (43 base64 chars + one `=` pad).
+  const VALID_KEY = `${'A'.repeat(43)}=`;
+
+  it('validates the wrapped per-session content key (base64 32-byte key)', () => {
+    expect(sessionKeyPayloadSchema.parse({ key: VALID_KEY }).key).toBe(VALID_KEY);
+  });
+
+  it('rejects a key that is not a base64 32-byte key', () => {
+    for (const bad of ['', 'YmFzZTY0a2V5', `${'A'.repeat(44)}`]) {
+      expect(sessionKeyPayloadSchema.safeParse({ key: bad }).success).toBe(false);
+    }
+  });
+
+  it('rejects a missing key', () => {
+    expect(sessionKeyPayloadSchema.safeParse({}).success).toBe(false);
   });
 });

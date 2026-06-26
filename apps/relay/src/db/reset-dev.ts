@@ -24,14 +24,25 @@ if (!/@(localhost|127\.0\.0\.1)(:\d+)?\//.test(url)) {
 const pool = new Pool({ connectionString: url });
 pool.on('error', (err) => log.warn({ err }, 'db: idle pool client error during reset'));
 try {
-  // Drop the registries + Drizzle's tracking; the migration re-creates them. The `telecode_app`
+  // Drop every table in `public` (enumerated dynamically, so this never goes stale as migrations add
+  // tables) plus Drizzle's tracking; the migrations re-create them from scratch. The `telecode_app`
   // role is left in place (its creation is idempotent — `IF NOT EXISTS`), avoiding cross-role
   // privilege issues when the relay connects as a non-superuser BYPASSRLS role.
   await pool.query('drop schema if exists drizzle cascade');
-  await pool.query('drop table if exists public.sessions cascade');
-  await pool.query('drop table if exists public.auth_sessions cascade');
-  await pool.query('drop table if exists public.devices cascade');
-  await pool.query('drop table if exists public.users cascade');
+  await pool.query(`
+    do $$
+    declare
+      drops text;
+    begin
+      select string_agg(format('drop table if exists public.%I cascade', tablename), '; ')
+        into drops
+        from pg_tables
+       where schemaname = 'public';
+      if drops is not null then
+        execute drops;
+      end if;
+    end $$;
+  `);
 } finally {
   await pool.end();
 }

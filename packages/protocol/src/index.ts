@@ -33,10 +33,29 @@ export {
 } from './crypto';
 export type { KeyPair, SealedMessage } from './crypto';
 
+export { ProtocolError } from './errors';
+
+export {
+  sealEnvelopePayload,
+  openEnvelopePayload,
+  requireCiphertext,
+  parsePlaintext,
+} from './envelope-crypto';
+export type { EncryptedEnvelopeFields } from './envelope-crypto';
+
+export {
+  generateContentKey,
+  wrapContentKey,
+  unwrapContentKey,
+  encryptWithContentKey,
+  decryptWithContentKey,
+} from './session-crypto';
+
 export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';
 export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device-auth';
 
 export {
+  base64KeySchema,
   permissionModeSchema,
   sessionRepoSchema,
   sessionLaunchPayloadSchema,
@@ -46,7 +65,7 @@ export {
   agentMessagePayloadSchema,
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
-  sessionStatusPayloadSchema,
+  sessionKeyPayloadSchema,
   agentPermissionRequestPayloadSchema,
   permissionDecisionPayloadSchema,
   userMessagePayloadSchema,
@@ -65,7 +84,7 @@ export type {
   AgentMessagePayload,
   AgentToolUsePayload,
   SessionEndedPayload,
-  SessionStatusPayload,
+  SessionKeyPayload,
   AgentPermissionRequestPayload,
   PermissionDecisionPayload,
   UserMessagePayload,

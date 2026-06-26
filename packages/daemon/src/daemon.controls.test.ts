@@ -122,7 +122,7 @@ function control(
   userId: string,
   deviceId: string,
   sessionId: string,
-  action: 'end' | 'interrupt' | 'pause' | 'resume',
+  action: 'end' | 'interrupt',
 ): void {
   relay.send(
     makeEnvelope({ type: 'session.control', userId, deviceId, sessionId, payload: { action } }),
@@ -138,6 +138,25 @@ function followUp(
 ): void {
   relay.send(
     makeEnvelope({ type: 'user.message', userId, deviceId, sessionId, payload: { text } }),
+  );
+}
+
+function decide(
+  relay: FakeRelay,
+  userId: string,
+  deviceId: string,
+  sessionId: string,
+  requestId: string,
+  behavior: 'allow' | 'deny',
+): void {
+  relay.send(
+    makeEnvelope({
+      type: 'permission.decision',
+      userId,
+      deviceId,
+      sessionId,
+      payload: { requestId, behavior },
+    }),
   );
 }
 
@@ -159,8 +178,6 @@ const ended = (sessionId: string) => (e: Envelope) =>
   e.type === 'session.ended' && e.session_id === sessionId;
 const gate = (sessionId: string) => (e: Envelope) =>
   e.type === 'agent.permission_request' && e.session_id === sessionId;
-const status = (sessionId: string) => (e: Envelope) =>
-  e.type === 'session.status' && e.session_id === sessionId;
 
 afterEach(async () => {
   await Promise.all(daemons.splice(0).map((d) => d.stop()));
@@ -223,6 +240,36 @@ describe('daemon: per-session controls (Task 9)', () => {
     );
   });
 
+  it('replies with authoritative history when a decision races a settle (no stranded spinner)', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, gatedAdapter([]));
+    const sid = randomUUID();
+
+    launch(relay, userId, deviceId, sid, 'do a thing');
+    const gateFrame = await relay.waitForFrame(gate(sid));
+    const { requestId } = gateFrame.payload as { requestId: string };
+
+    // Interrupt settles + removes the gate, then the turn ends cleanly (done).
+    control(relay, userId, deviceId, sid, 'interrupt');
+    await relay.waitForFrame(ended(sid));
+
+    // The operator clicked Approve before the end frame landed: the decision arrives with no pending
+    // gate. It must NOT be silently dropped (which strands the browser's "Approving…" spinner) — the
+    // daemon replies with the authoritative state so the browser reconciles, exactly as a reload would.
+    decide(relay, userId, deviceId, sid, requestId, 'allow');
+    const backfill = await relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === sid,
+    );
+    const payload = backfill.payload as { status: string; entries: SessionHistoryEntry[] };
+    expect(payload.status).toBe('done');
+    const permission = payload.entries.find((e) => e.kind === 'permission');
+    // The interrupt recorded the gate as denied; the reconciliation reflects that, not the late approve.
+    expect(permission && permission.kind === 'permission' ? permission.decision : null).toBe(
+      'deny',
+    );
+  });
+
   it('end terminates the session and refuses further follow-ups', async () => {
     const userId = randomUUID();
     const deviceId = randomUUID();
@@ -246,29 +293,21 @@ describe('daemon: per-session controls (Task 9)', () => {
     expect(prompts).toEqual(['first', 'new session']);
   });
 
-  it('pause refuses new turns and reports paused; resume re-enables them', async () => {
+  it('a session stays followable after interrupt — a follow-up resumes it', async () => {
     const userId = randomUUID();
     const deviceId = randomUUID();
     const prompts: string[] = [];
-    const relay = await startDaemon(userId, deviceId, quickAdapter(prompts));
+    const relay = await startDaemon(userId, deviceId, blockingAdapter(prompts));
     const sid = randomUUID();
 
-    launch(relay, userId, deviceId, sid, 'first');
+    launch(relay, userId, deviceId, sid, 'run forever');
+    await relay.waitForFrame((e) => e.type === 'agent.message' && e.session_id === sid);
+    control(relay, userId, deviceId, sid, 'interrupt');
     await relay.waitForFrame(ended(sid));
 
-    control(relay, userId, deviceId, sid, 'pause');
-    const paused = await relay.waitForFrame(status(sid));
-    expect((paused.payload as { status: string }).status).toBe('paused');
-
-    // Refused while paused.
-    followUp(relay, userId, deviceId, sid, 'while paused');
-
-    control(relay, userId, deviceId, sid, 'resume');
-    await relay.waitForFrame(status(sid));
-
-    // Accepted after resume — and the paused follow-up never ran.
-    followUp(relay, userId, deviceId, sid, 'after resume');
-    await relay.waitForFrame(ended(sid));
-    expect(prompts).toEqual(['first', 'after resume']);
+    // Unlike end, interrupt leaves the session open: the next message just continues it.
+    followUp(relay, userId, deviceId, sid, 'keep going');
+    await relay.waitForFrame((e) => e.type === 'agent.message' && e.session_id === sid);
+    expect(prompts).toEqual(['run forever', 'keep going']);
   });
 });

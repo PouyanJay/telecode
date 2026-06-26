@@ -1,0 +1,21 @@
+# Keep the build context small and never leak local installs or secrets into an image.
+**/node_modules
+**/.svelte-kit
+**/dist
+**/build
+**/.turbo
+**/coverage
+**/test-results
+**/playwright-report
+
+# Secrets + local state must never enter an image (compose injects env at run time).
+.env
+.env.*
+.run-state
+
+# Local-only tooling + history.
+.git
+.github
+.claude
+.memory
+**/*.log

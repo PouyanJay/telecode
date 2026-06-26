@@ -23,6 +23,7 @@ export function registerDeviceListRoute(
         id: device.id,
         name: device.name,
         last_seen_at: device.lastSeenAt?.toISOString() ?? null,
+        public_key: device.publicKey,
       })),
     });
   });

@@ -23,5 +23,4 @@ export const SESSION_DISPLAY: Record<SessionStatus, StatusDisplay> = {
   done: { tone: 'success', label: 'DONE', pulse: false },
   error: { tone: 'danger', label: 'ERROR', pulse: false },
   offline_paused: { tone: 'warning', label: 'OFFLINE', pulse: false },
-  paused: { tone: 'warning', label: 'PAUSED', pulse: false },
 };

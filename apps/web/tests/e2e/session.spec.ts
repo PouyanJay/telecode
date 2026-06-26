@@ -227,18 +227,16 @@ test('interrupt stops a running turn and the session ends (done)', async ({ page
   await expect(page.getByText('DONE')).toBeVisible();
 });
 
-test('pause reports paused and resume clears it', async ({ page }) => {
+test('interrupt stops the turn and the session stays followable', async ({ page }) => {
   await signIn(page);
-  await launchFromDashboard(page, 'a task to pause');
+  await launchFromDashboard(page, 'a task to interrupt');
   await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
 
-  await page.getByRole('button', { name: 'Pause' }).click();
-  await expect(page.getByText('PAUSED')).toBeVisible();
-  // The composer is closed to follow-ups while paused.
-  await expect(page.getByPlaceholder('Paused — resume to send a follow-up…')).toBeVisible();
-
-  await page.getByRole('button', { name: 'Resume' }).click();
-  await expect(page.getByText('PAUSED')).toHaveCount(0);
+  // Interrupt aborts the in-flight turn (like Esc); the session ends the turn but stays open.
+  await page.getByRole('button', { name: 'Interrupt' }).click();
+  await expect(page.getByText('DONE')).toBeVisible();
+  // Continue by typing — the composer is open for a follow-up (no separate Resume needed).
+  await expect(page.getByPlaceholder('Send a follow-up instruction…')).toBeEnabled();
 });
 
 // NOTE: the "Enable notifications" affordance can't be e2e'd — headless Chromium reports web push

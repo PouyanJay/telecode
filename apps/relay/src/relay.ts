@@ -8,7 +8,6 @@ import {
   makeEnvelope,
   parseEnvelope,
   sessionEndedPayloadSchema,
-  sessionStatusPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
 
@@ -123,6 +122,17 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     })();
   }
 
+  /**
+   * The terminal status of a `session.ended`: prefer the cleartext `status` envelope field (under E2E the
+   * payload is ciphertext the relay can't read), fall back to the payload for cleartext-mode peers, and
+   * default to `done`. Routing metadata only — the relay never reads the agent payload.
+   */
+  function resolveEndedStatus(envelope: Envelope): 'done' | 'error' {
+    if (envelope.status === 'done' || envelope.status === 'error') return envelope.status;
+    const fromPayload = sessionEndedPayloadSchema.safeParse(envelope.payload);
+    return fromPayload.success ? fromPayload.data.status : 'done';
+  }
+
   function broadcastToBrowsers(channel: string, frame: string): void {
     const set = browsers.get(channel);
     if (!set) return;
@@ -168,13 +178,19 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
               userId: envelope.user_id,
               deviceId: envelope.device_id,
               sessionId,
+              // Relay-generated control message: cleartext (the relay holds no session key), so the
+              // browser reads its outcome from the `status` field, not by decrypting the payload.
+              status: 'error',
               payload: { status: 'error', error: 'device offline' },
             }),
           ),
         );
         return;
       }
-      // Payload passes through opaque — the relay never reads it (E2E ciphertext in Phase 3).
+      // Payload passes through opaque — the relay never reads it (E2E ciphertext in Phase 3). The
+      // browser's `sender_public_key` must be carried through so the daemon can open the sealed launch
+      // and wrap the session content key back to it (the relay rewrites the envelope only to inject the
+      // minted session id, never to read or alter the E2E fields).
       daemon.send(
         JSON.stringify(
           makeEnvelope({
@@ -184,6 +200,9 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
             sessionId,
             payload: envelope.payload,
             nonce: envelope.nonce,
+            ...(envelope.sender_public_key !== undefined
+              ? { senderPublicKey: envelope.sender_public_key }
+              : {}),
           }),
         ),
       );
@@ -219,8 +238,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         });
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
       } else if (envelope.type === 'session.ended') {
-        const ended = sessionEndedPayloadSchema.safeParse(envelope.payload);
-        const status = ended.success ? ended.data.status : 'done';
+        const status = resolveEndedStatus(envelope);
         await sessionRegistry.markEnded({
           userId: envelope.user_id,
           sessionId: envelope.session_id,
@@ -237,27 +255,6 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session awaiting input');
         // Ping the user (web push) that a session needs them — fire-and-forget, routing metadata only.
         pushAwaitingInput(envelope.user_id, envelope.session_id);
-      } else if (envelope.type === 'session.status') {
-        // A daemon status report (Task 9 pause/resume) — persist it so a reload/dashboard reflects it.
-        // Type-only routing: the relay never reads the agent payload, only the status it transitions to.
-        const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
-        if (parsed.success) {
-          const status = parsed.data.status;
-          if (status === 'paused' || status === 'running' || status === 'awaiting_input') {
-            await sessionRegistry.markStatus({
-              userId: envelope.user_id,
-              sessionId: envelope.session_id,
-              status,
-            });
-          } else if (status === 'done' || status === 'error') {
-            await sessionRegistry.markEnded({
-              userId: envelope.user_id,
-              sessionId: envelope.session_id,
-              status,
-            });
-          }
-          log.info({ channel, sessionId: envelope.session_id, status }, 'relay: session status');
-        }
       }
     }
     broadcastToBrowsers(channel, text);

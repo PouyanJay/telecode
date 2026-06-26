@@ -4,7 +4,6 @@ import {
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
   sessionHistoryPayloadSchema,
-  sessionStatusPayloadSchema,
   type Envelope,
   type SessionStatusName,
 } from '@telecode/protocol';
@@ -81,6 +80,22 @@ function confirmInFlightDecisions(entries: readonly TranscriptEntry[]): readonly
   return changed ? next : entries;
 }
 
+/**
+ * When a session reaches a terminal state, any gate still awaiting a verdict can never be answered —
+ * the daemon's `canUseTool` is no longer waiting. Close it so the Approve/Reject buttons disappear and a
+ * late click can't strand on the daemon (which already settled the gate on interrupt/end). An unanswered
+ * gate means the tool never ran, so it reads as rejected — matching the verdict the daemon records.
+ */
+function closeOpenGates(entries: readonly TranscriptEntry[]): readonly TranscriptEntry[] {
+  let changed = false;
+  const next = entries.map((entry) => {
+    if (entry.kind !== 'permission' || entry.decision !== 'pending') return entry;
+    changed = true;
+    return { ...entry, decision: 'rejected' as const };
+  });
+  return changed ? next : entries;
+}
+
 /** Fold one inbound relay frame into the session state. Unknown/invalid frames are ignored. */
 export function applyEnvelope(state: SessionState, envelope: Envelope): SessionState {
   const entries = confirmInFlightDecisions(state.entries);
@@ -145,12 +160,11 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
 
     case 'session.ended': {
       const parsed = sessionEndedPayloadSchema.safeParse(envelope.payload);
-      return { ...base, status: parsed.success ? parsed.data.status : 'done' };
-    }
-
-    case 'session.status': {
-      const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
-      return parsed.success ? { ...base, status: parsed.data.status } : base;
+      return {
+        ...base,
+        status: parsed.success ? parsed.data.status : 'done',
+        entries: closeOpenGates(base.entries),
+      };
     }
 
     case 'session.history': {

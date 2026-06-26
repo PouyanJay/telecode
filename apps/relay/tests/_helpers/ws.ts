@@ -60,3 +60,34 @@ export async function connectBrowser(
 export function sendEcho(socket: WebSocket, userId: string, deviceId: string, text: string): void {
   socket.send(JSON.stringify(makeEnvelope({ type: 'echo', userId, deviceId, payload: { text } })));
 }
+
+/**
+ * Open a daemon-role connection to the relay and wait until it is registered (hello.ack). When the relay
+ * enforces device auth, pass the device `token` to authenticate the `hello`. Mirrors {@link connectBrowser}
+ * for tests that need both ends of a channel (e.g. an end-to-end encrypted round-trip).
+ */
+export async function connectDaemon(
+  relayUrl: string,
+  userId: string,
+  deviceId: string,
+  token?: string,
+): Promise<WebSocket> {
+  const socket = new WebSocket(relayUrl);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', () => resolve());
+    socket.once('error', reject);
+  });
+  const ack = waitForEnvelope(socket, (e) => e.type === 'hello.ack');
+  socket.send(
+    JSON.stringify(
+      makeEnvelope({
+        type: 'hello',
+        userId,
+        deviceId,
+        payload: { role: 'daemon', ...(token !== undefined ? { token } : {}) },
+      }),
+    ),
+  );
+  await ack;
+  return socket;
+}

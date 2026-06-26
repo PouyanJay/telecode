@@ -1,0 +1,74 @@
+# Telecode self-host bundle — the relay (control plane) + its Postgres + a one-shot migration step.
+#
+#   cp infra/.env.example infra/.env   # then fill in the secrets
+#   docker compose -f infra/docker-compose.yml up
+#
+# Brings up your own relay on http://localhost:8080. Point a daemon and a browser at it to run agents
+# entirely on your machines — the relay only ever forwards ciphertext (see docs/threat-model.md). The
+# SvelteKit web UI is deployed separately; set its PUBLIC_TELECODE_RELAY_URL to this relay.
+name: telecode
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: telecode
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
+      POSTGRES_DB: telecode
+    volumes:
+      - telecode-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U telecode -d telecode']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: apply all migrations, then exit. The relay waits for this to complete.
+  migrate:
+    image: telecode/relay:local
+    build:
+      context: ..
+      dockerfile: apps/relay/Dockerfile
+    command: ['pnpm', 'db:migrate']
+    environment:
+      DATABASE_URL: postgresql://telecode:${POSTGRES_PASSWORD}@postgres:5432/telecode
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  relay:
+    image: telecode/relay:local
+    build:
+      context: ..
+      dockerfile: apps/relay/Dockerfile
+    environment:
+      RELAY_PORT: '8080'
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://telecode:${POSTGRES_PASSWORD}@postgres:5432/telecode
+      # Required for auth + the device/session/channel endpoints (use long random strings).
+      CHANNEL_TOKEN_SECRET: ${CHANNEL_TOKEN_SECRET:?set CHANNEL_TOKEN_SECRET in infra/.env}
+      RELAY_SERVICE_SECRET: ${RELAY_SERVICE_SECRET:?set RELAY_SERVICE_SECRET in infra/.env}
+      # Optional features: each turns on only when its secret is present (the relay logs which are off).
+      #   TOKEN_ENCRYPTION_KEY → encrypted GitHub-token storage + repo listing
+      #   VAPID_*              → web push notifications
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@telecode.local}
+    ports:
+      - '${RELAY_PORT:-8080}:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8080/healthz || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  telecode-pgdata:

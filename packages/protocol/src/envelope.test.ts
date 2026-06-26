@@ -87,6 +87,66 @@ describe('makeEnvelope', () => {
   });
 });
 
+// A well-formed base64 32-byte key (43 base64 chars + one `=` pad) — the shape encodeKey() produces.
+const VALID_KEY = `${'A'.repeat(43)}=`;
+
+describe('envelope E2E routing-metadata fields (Phase 3)', () => {
+  it('accepts an optional cleartext status field (routing metadata for the relay)', () => {
+    const env = parseEnvelope({ ...validWire, type: 'session.ended', status: 'done' });
+    expect(env.status).toBe('done');
+  });
+
+  it('rejects an unknown status value', () => {
+    expect(safeParseEnvelope({ ...validWire, status: 'nonsense' }).success).toBe(false);
+  });
+
+  it('accepts an optional sender_public_key (base64 32-byte ephemeral key)', () => {
+    const env = parseEnvelope({ ...validWire, sender_public_key: VALID_KEY });
+    expect(env.sender_public_key).toBe(VALID_KEY);
+  });
+
+  it('rejects a sender_public_key that is not a base64 32-byte key', () => {
+    for (const bad of ['', 'cHVia2V5', `${'A'.repeat(44)}`, `${'!'.repeat(43)}=`]) {
+      expect(
+        safeParseEnvelope({ ...validWire, sender_public_key: bad }).success,
+        `${JSON.stringify(bad)} must be rejected`,
+      ).toBe(false);
+    }
+  });
+
+  it('treats status and sender_public_key as absent by default', () => {
+    const env = parseEnvelope(validWire);
+    expect(env.status).toBeUndefined();
+    expect(env.sender_public_key).toBeUndefined();
+  });
+
+  it('recognizes session.key as a valid message type', () => {
+    expect(safeParseEnvelope({ ...validWire, type: 'session.key' }).success).toBe(true);
+  });
+});
+
+describe('makeEnvelope routing-metadata fields', () => {
+  it('sets status and sender_public_key when provided', () => {
+    const env = makeEnvelope({
+      type: 'session.ended',
+      userId: 'u',
+      deviceId: 'd',
+      sessionId: 's',
+      status: 'error',
+      senderPublicKey: VALID_KEY,
+      payload: 'ciphertext',
+    });
+    expect(env.status).toBe('error');
+    expect(env.sender_public_key).toBe(VALID_KEY);
+  });
+
+  it('omits status and sender_public_key keys when not provided', () => {
+    const env = makeEnvelope({ type: 'echo', userId: 'u', deviceId: 'd', payload: {} });
+    expect('status' in env).toBe(false);
+    expect('sender_public_key' in env).toBe(false);
+  });
+});
+
 describe('echoPayloadSchema', () => {
   it('validates a text payload', () => {
     expect(echoPayloadSchema.parse({ text: 'ok' }).text).toBe('ok');

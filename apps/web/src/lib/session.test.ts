@@ -96,6 +96,23 @@ describe('session reducer', () => {
     expect(errored.status).toBe('error');
   });
 
+  it('closes a still-pending gate as rejected when the session ends (no dead, clickable gate)', () => {
+    let state = fold([
+      frame('session.started', {}),
+      frame('agent.permission_request', { requestId: 'req_1', toolName: 'Bash', input: {} }),
+    ]);
+    expect(pendingPermission(state)?.kind).toBe('permission');
+
+    // The session ends (e.g. interrupted) while the gate is still awaiting a verdict. The terminal
+    // session can no longer answer a decision, so the gate must close — otherwise the Approve/Reject
+    // buttons stay live and a click strands on the daemon (which already settled the gate).
+    state = applyEnvelope(state, frame('session.ended', { status: 'done' }));
+    expect(state.status).toBe('done');
+    // The tool never ran, matching the daemon's recorded `deny`, so it reads as rejected — not actionable.
+    expect(state.entries.find((e) => e.kind === 'permission')?.decision).toBe('rejected');
+    expect(pendingPermission(state)).toBeUndefined();
+  });
+
   it('ignores frames with invalid payloads', () => {
     const state = applyEnvelope(startingState(), frame('agent.message', { notText: 1 }));
     expect(state.entries).toHaveLength(0);
@@ -165,12 +182,10 @@ describe('session reducer', () => {
   });
 });
 
-// Variant coverage (Task 11): every wire session status must fold through the reducer's session.status
-// case and have a display — a parametrized guard so adding a status without handling both fails here.
+// Variant coverage (Task 11): every wire session status must have a display mapping — a parametrized
+// guard so adding a status without a display fails here.
 describe('session status coverage', () => {
-  it.each(SESSION_STATUSES)('folds session.status %s and has a display mapping', (status) => {
-    const state = applyEnvelope(startingState(), frame('session.status', { status }));
-    expect(state.status).toBe(status);
+  it.each(SESSION_STATUSES)('has a display mapping for %s', (status) => {
     expect(SESSION_DISPLAY[status]).toBeDefined();
   });
 });

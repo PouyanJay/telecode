@@ -9,6 +9,7 @@ import {
   parseEnvelope,
   permissionDecisionPayloadSchema,
   sessionControlPayloadSchema,
+  sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
@@ -28,6 +29,7 @@ import {
   type PermissionRequest,
 } from './agent-adapter';
 import { createClaudeAgentAdapter } from './claude-agent-adapter';
+import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
@@ -46,6 +48,12 @@ export interface DaemonOptions {
   readonly deviceId: string;
   /** Device token presented on `hello`; the relay verifies it when device auth is configured. */
   readonly deviceToken?: string;
+  /**
+   * This device's X25519 keypair (base64), persisted at pairing. When provided, the daemon runs sessions
+   * end-to-end encrypted (Phase 3): it decrypts the sealed launch, mints a per-session content key,
+   * delivers it to the browser, and encrypts the stream. Omitted runs sessions in cleartext (pre-E2E).
+   */
+  readonly keyPair?: { readonly publicKey: string; readonly privateKey: string };
   /** Agent runtime. Defaults to the real Claude Agent SDK adapter; tests inject a fake. */
   readonly agentAdapter?: AgentAdapter;
   /**
@@ -78,7 +86,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const worktreeManager = options.worktreeManager;
   const repoManager = options.repoManager;
   const defaultRepoPath = options.defaultRepoPath;
+  // E2E key management (Phase 3): holds the daemon private key + per-session content keys. Cleartext when
+  // no keypair is configured (existing tests / pre-E2E daemons).
+  const cipher = createSessionCipher(options.keyPair?.privateKey);
   let socket: WebSocket | null = null;
+
+  // Outbound frames are built asynchronously (encryption is async), so we serialize them through a chain
+  // to preserve stream order — a later `agent.message` must never overtake the `session.key` /
+  // `session.started` it depends on. Mirrors the relay's per-connection processing queue.
+  let sendChain: Promise<void> = Promise.resolve();
+  function enqueueSend(buildFrame: () => Promise<string>): void {
+    sendChain = sendChain
+      .then(async () => {
+        const frame = await buildFrame();
+        socket?.send(frame);
+      })
+      .catch((err: unknown) => log.error({ err }, 'daemon: failed to send a frame'));
+  }
 
   // Tool requests the agent is blocked on, keyed by the correlation id we send to the browser; each is
   // resolved when its matching `permission.decision` returns. Single-session in Phase 1, but keyed so it
@@ -97,12 +121,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // The in-flight turn's abort handle per session (Task 9): interrupt/end abort it. Set at turn start,
   // cleared at turn end.
   const sessionAborts = new Map<string, AbortController>();
-  // Per-session operator control (Task 9): `paused` refuses new turns; `ended` is terminal (refuse
-  // follow-ups); `prePauseStatus` is restored on resume.
-  const sessionControls = new Map<
-    string,
-    { paused: boolean; ended: boolean; prePauseStatus: SessionStatusName }
-  >();
+  // Sessions the operator has ended (Task 9): terminal — further follow-ups are refused.
+  const endedSessions = new Set<string>();
   // The live transcript + status the daemon holds for each session (architecture invariant #3/#7: the
   // session lives on the laptop). A reopened browser re-attaches with `session.subscribe` and we backfill
   // this as `session.history` — so the relay never needs the plaintext (E2E-consistent in Phase 3). Kept
@@ -136,19 +156,88 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (sessionId !== undefined) recordFor(sessionId).status = status;
   }
 
-  /** Send an envelope on the daemon's channel, carrying the session id when present. */
+  /**
+   * The authoritative history for a session — the daemon's own live record (status + transcript), or an
+   * offline fallback for a session it no longer holds. Backfilled on `session.subscribe` (reconnect) and
+   * sent to reconcile a `permission.decision` that raced a settle (see the decision handler).
+   */
+  function historyPayloadFor(sessionId: string | undefined): SessionHistoryPayload {
+    const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
+    return rec
+      ? { status: rec.status, entries: rec.transcript }
+      : { status: 'offline_paused', entries: [] };
+  }
+
+  /**
+   * The cleartext lifecycle status to stamp on a frame's envelope so the relay can update its registry
+   * without reading the (encrypted) payload — only for the lifecycle types the relay acts on. Other types
+   * carry their state in the payload (the relay derives those from the message `type`).
+   */
+  function cleartextStatusFor(type: MessageType, payload: unknown): SessionStatusName | undefined {
+    if (type === 'session.ended') {
+      const parsed = sessionEndedPayloadSchema.safeParse(payload);
+      return parsed.success ? parsed.data.status : 'done';
+    }
+    return undefined;
+  }
+
+  /**
+   * Send a session frame on the daemon's channel. For an E2E session the payload is sealed under the
+   * session's content key (the relay only ever forwards ciphertext); lifecycle frames also carry the
+   * cleartext `status` routing field. Cleartext sessions send the payload as-is (pre-E2E path).
+   */
   function sendForSession(source: Envelope, type: MessageType, payload: unknown): void {
-    socket?.send(
-      JSON.stringify(
+    const sessionId = source.session_id;
+    const status = cleartextStatusFor(type, payload);
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        sessionId !== undefined && cipher.isEncrypted(sessionId)
+          ? await cipher.encrypt(sessionId, payload)
+          : { payload, nonce: '' };
+      return JSON.stringify(
         makeEnvelope({
           type,
           userId: source.user_id,
           deviceId: source.device_id,
-          ...(source.session_id !== undefined ? { sessionId: source.session_id } : {}),
-          payload,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          ...(status !== undefined ? { status } : {}),
+          payload: fields.payload,
+          nonce: fields.nonce,
         }),
-      ),
-    );
+      );
+    });
+  }
+
+  /** Deliver a session's content key, box-wrapped to a browser's ephemeral pubkey (`session.key`). */
+  function deliverKey(source: Envelope, browserPublicKey: string): void {
+    const sessionId = source.session_id;
+    if (sessionId === undefined) return;
+    enqueueSend(async () => {
+      const fields = await cipher.keyDelivery(sessionId, browserPublicKey);
+      return JSON.stringify(
+        makeEnvelope({
+          type: 'session.key',
+          userId: source.user_id,
+          deviceId: source.device_id,
+          sessionId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
+  /**
+   * Read an inbound session payload as plaintext: decrypt it under the session content key for an E2E
+   * session (follow-up / decision / control are secretbox-sealed by the browser), or return it as-is in
+   * cleartext mode.
+   */
+  async function readSessionPayload(envelope: Envelope): Promise<unknown> {
+    const sessionId = envelope.session_id;
+    if (sessionId !== undefined && cipher.isEncrypted(sessionId)) {
+      return cipher.decrypt(envelope);
+    }
+    return envelope.payload;
   }
 
   /**
@@ -198,20 +287,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return { behavior: 'deny', message: payload.message ?? 'Denied by the operator' };
   }
 
-  /** The operator-control record for a session, created on first use. */
-  function controlFor(sessionId: string): {
-    paused: boolean;
-    ended: boolean;
-    prePauseStatus: SessionStatusName;
-  } {
-    let existing = sessionControls.get(sessionId);
-    if (!existing) {
-      existing = { paused: false, ended: false, prePauseStatus: 'running' };
-      sessionControls.set(sessionId, existing);
-    }
-    return existing;
-  }
-
   /**
    * Stop a session's in-flight turn (Task 9 interrupt/end): settle its pending gates with `deny` (so a
    * blocked `canUseTool` can't strand) — recording the verdict so a later backfill shows them decided —
@@ -237,45 +312,27 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return false;
   }
 
-  /** Apply an operator control (`end` / `interrupt` / `pause` / `resume`) to a session. */
+  /** Apply an operator control (`interrupt` / `end`) to a session. */
   function handleControl(envelope: Envelope, action: SessionControlAction): void {
     const sessionId = envelope.session_id;
     if (sessionId === undefined) return;
-    const control = controlFor(sessionId);
     switch (action) {
       case 'interrupt': {
-        // Abort the in-flight turn; the aborted run ends cleanly (`done`) and the session stays followable.
+        // Like Esc: abort the in-flight turn; the aborted run ends cleanly (`done`) and the session stays
+        // followable, so the human just sends another message to continue.
         const aborted = stopTurn(sessionId, 'interrupted by operator');
         log.info({ deviceId: options.deviceId, sessionId, aborted }, 'daemon: interrupt');
         return;
       }
       case 'end': {
         // Terminal: refuse future follow-ups, abort any in-flight turn. If none was running, end directly.
-        control.ended = true;
+        endedSessions.add(sessionId);
         const aborted = stopTurn(sessionId, 'session ended by operator');
         log.info({ deviceId: options.deviceId, sessionId, aborted }, 'daemon: end');
         if (!aborted) {
           setStatus(sessionId, 'done');
           sendForSession(envelope, 'session.ended', { status: 'done' });
         }
-        return;
-      }
-      case 'pause': {
-        // Refuse new turns + report `paused`; an in-flight turn keeps running (use interrupt to stop it).
-        if (control.paused) return;
-        control.prePauseStatus = sessionRecords.get(sessionId)?.status ?? 'running';
-        control.paused = true;
-        setStatus(sessionId, 'paused');
-        sendForSession(envelope, 'session.status', { status: 'paused' });
-        log.info({ deviceId: options.deviceId, sessionId }, 'daemon: paused');
-        return;
-      }
-      case 'resume': {
-        if (!control.paused) return;
-        control.paused = false;
-        setStatus(sessionId, control.prePauseStatus);
-        sendForSession(envelope, 'session.status', { status: control.prePauseStatus });
-        log.info({ deviceId: options.deviceId, sessionId }, 'daemon: resumed');
         return;
       }
       default: {
@@ -413,7 +470,25 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
   /** Launch a new session: announce it started, then run the first turn. */
   async function runSession(envelope: Envelope): Promise<void> {
-    const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
+    // E2E: the launch payload is box-sealed to this daemon. Decrypt it, mint the session's content key,
+    // and deliver it (session.key) to the launching browser before any encrypted stream frame.
+    let launchPayload: unknown = envelope.payload;
+    const browserPublicKey = envelope.sender_public_key;
+    if (cipher.enabled && browserPublicKey !== undefined && envelope.session_id !== undefined) {
+      try {
+        launchPayload = await cipher.decryptLaunch(envelope);
+      } catch (err) {
+        log.warn({ err, deviceId: options.deviceId }, 'daemon: could not decrypt session.launch');
+        sendForSession(envelope, 'session.ended', {
+          status: 'error',
+          error: 'could not decrypt launch',
+        });
+        return;
+      }
+      cipher.establish(envelope.session_id);
+      deliverKey(envelope, browserPublicKey);
+    }
+    const launch = sessionLaunchPayloadSchema.safeParse(launchPayload);
     if (!launch.success) {
       // The relay already minted a `starting` row; fail it cleanly so it can't stick at `starting`.
       log.warn(
@@ -447,26 +522,17 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
   /** Run a follow-up turn for an existing session by resuming its agent conversation. */
   async function runFollowUp(envelope: Envelope): Promise<void> {
-    const message = userMessagePayloadSchema.safeParse(envelope.payload);
+    const message = userMessagePayloadSchema.safeParse(await readSessionPayload(envelope));
     if (!message.success) {
       log.warn({ deviceId: options.deviceId }, 'daemon: dropped user.message with invalid payload');
       return;
     }
     const sessionId = envelope.session_id;
-    // Operator controls gate follow-ups: an ended session takes no more turns; a paused one is closed to
-    // new work until resumed (an in-flight turn is unaffected — A-6).
-    const control = sessionId !== undefined ? sessionControls.get(sessionId) : undefined;
-    if (control?.ended) {
+    // An ended session takes no more turns (interrupt, by contrast, leaves the session followable).
+    if (sessionId !== undefined && endedSessions.has(sessionId)) {
       log.warn(
         { deviceId: options.deviceId, sessionId },
         'daemon: follow-up refused — session ended',
-      );
-      return;
-    }
-    if (control?.paused) {
-      log.warn(
-        { deviceId: options.deviceId, sessionId },
-        'daemon: follow-up refused — session paused',
       );
       return;
     }
@@ -486,7 +552,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     await runTurn(envelope, message.data.text, resume, cwd);
   }
 
-  function handleMessage(raw: Buffer, onReady: () => void): void {
+  async function handleFrame(raw: Buffer, onReady: () => void): Promise<void> {
     let envelope: Envelope;
     try {
       envelope = parseEnvelope(JSON.parse(raw.toString()));
@@ -543,19 +609,28 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // that doesn't hold it (e.g. after a restart) can't backfill — report it not-live so the UI
         // falls back to the registry status instead of showing a phantom transcript.
         const sessionId = envelope.session_id;
+        // E2E reconnect: re-deliver the session key to the (possibly new) browser pubkey it announced, so
+        // it can decrypt the backfilled history that follows. Subscribe itself stays cleartext (`{}`).
+        if (
+          cipher.enabled &&
+          envelope.sender_public_key !== undefined &&
+          sessionId !== undefined &&
+          cipher.isEncrypted(sessionId)
+        ) {
+          deliverKey(envelope, envelope.sender_public_key);
+        }
         const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
-        const payload: SessionHistoryPayload = rec
-          ? { status: rec.status, entries: rec.transcript }
-          : { status: 'offline_paused', entries: [] };
         log.info(
           { deviceId: options.deviceId, sessionId, known: rec !== undefined },
           'daemon: session subscribe — backfilling history',
         );
-        sendForSession(envelope, 'session.history', payload);
+        sendForSession(envelope, 'session.history', historyPayloadFor(sessionId));
         return;
       }
       case 'permission.decision': {
-        const decision = permissionDecisionPayloadSchema.safeParse(envelope.payload);
+        const decision = permissionDecisionPayloadSchema.safeParse(
+          await readSessionPayload(envelope),
+        );
         if (!decision.success) {
           log.warn(
             { deviceId: options.deviceId },
@@ -565,10 +640,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
         }
         const pending = pendingPermissions.get(decision.data.requestId);
         if (!pending) {
-          log.warn(
+          // The gate was already settled + removed (interrupt/end) before this decision arrived — the
+          // interrupt-then-approve race. Dropping it silently strands the browser's "Approving…"
+          // spinner forever; instead reconcile it with the authoritative session state (status + the
+          // recorded verdict), exactly as a reopen's backfill would.
+          log.info(
             { deviceId: options.deviceId, requestId: decision.data.requestId },
-            'daemon: no pending permission for decision',
+            'daemon: decision for a settled gate — reconciling with session state',
           );
+          sendForSession(envelope, 'session.history', historyPayloadFor(envelope.session_id));
           return;
         }
         pendingPermissions.delete(decision.data.requestId);
@@ -597,7 +677,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         return;
       }
       case 'session.control': {
-        const control = sessionControlPayloadSchema.safeParse(envelope.payload);
+        const control = sessionControlPayloadSchema.safeParse(await readSessionPayload(envelope));
         if (!control.success) {
           log.warn(
             { deviceId: options.deviceId },
@@ -620,7 +700,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
       await new Promise<void>((resolve, reject) => {
         const onReady = (): void => resolve();
-        ws.on('message', (raw: Buffer) => handleMessage(raw, onReady));
+        // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
+        // handled before the next — a follow-up can't decrypt before the launch establishes the key.
+        let inbound: Promise<void> = Promise.resolve();
+        ws.on('message', (raw: Buffer) => {
+          inbound = inbound
+            .then(() => handleFrame(raw, onReady))
+            .catch((err: unknown) => log.error({ err }, 'daemon: frame handling failed'));
+        });
         ws.once('open', () => {
           ws.send(
             JSON.stringify(

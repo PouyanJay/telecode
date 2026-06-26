@@ -147,20 +147,11 @@ socket.addEventListener('message', (event: MessageEvent) => {
     const control = sessionControlPayloadSchema.safeParse(envelope.payload);
     if (!control.success) return;
     const rec = recordFor(sid);
-    const action = control.data.action;
-    if (action === 'interrupt' || action === 'end') {
-      // Settle any pending gate and end the current turn (mirrors the daemon's stop-turn).
-      const gate = rec.transcript.find((e) => e.kind === 'permission' && e.decision === 'pending');
-      if (gate?.kind === 'permission') gate.decision = 'deny';
-      rec.status = 'done';
-      send('session.ended', { status: 'done' }, sid);
-    } else if (action === 'pause') {
-      rec.status = 'paused';
-      send('session.status', { status: 'paused' }, sid);
-    } else if (action === 'resume') {
-      rec.status = 'running';
-      send('session.status', { status: 'running' }, sid);
-    }
+    // interrupt | end: settle any pending gate and end the current turn (mirrors the daemon's stop-turn).
+    const gate = rec.transcript.find((e) => e.kind === 'permission' && e.decision === 'pending');
+    if (gate?.kind === 'permission') gate.decision = 'deny';
+    rec.status = 'done';
+    send('session.ended', { status: 'done' }, sid);
     return;
   }
 
