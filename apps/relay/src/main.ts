@@ -56,8 +56,32 @@ if (authEnabled && !pushEnabled) {
   log.warn('relay: VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY not set — web push disabled');
 }
 
+// HTTP rate limiting (Phase 5): ON by default so a public relay sheds abuse; tune with RATELIMIT_MAX /
+// RATELIMIT_WINDOW (a humanized duration, e.g. '1 minute'), or set RATELIMIT_DISABLED=true to turn off.
+const rateLimitDisabled = ['1', 'true'].includes(process.env.RATELIMIT_DISABLED ?? '');
+const rateLimitMaxRaw = process.env.RATELIMIT_MAX;
+const rateLimitMax = rateLimitMaxRaw ? Number(rateLimitMaxRaw) : undefined;
+if (rateLimitMax !== undefined && (!Number.isInteger(rateLimitMax) || rateLimitMax <= 0)) {
+  log.warn(
+    { RATELIMIT_MAX: rateLimitMaxRaw },
+    'relay: RATELIMIT_MAX is not a positive integer — using default',
+  );
+}
+const rateLimit = rateLimitDisabled
+  ? undefined
+  : {
+      ...(rateLimitMax !== undefined && Number.isInteger(rateLimitMax) && rateLimitMax > 0
+        ? { max: rateLimitMax }
+        : {}),
+      ...(process.env.RATELIMIT_WINDOW ? { timeWindow: process.env.RATELIMIT_WINDOW } : {}),
+    };
+if (rateLimitDisabled) {
+  log.warn('relay: RATELIMIT_DISABLED set — HTTP rate limiting is OFF');
+}
+
 const app = await buildRelay({
   logger: log,
+  ...(rateLimit ? { rateLimit } : {}),
   ...(dbHandle ? { sessionRegistry: createSessionRegistry(dbHandle) } : {}),
   ...(authEnabled && dbHandle && channelTokenSecret && serviceSecret
     ? {

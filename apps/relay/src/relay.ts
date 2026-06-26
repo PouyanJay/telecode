@@ -20,6 +20,7 @@ import { registerPushRoutes } from './push/push-routes';
 import { type PushSender } from './push/push-sender';
 import { type PushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
+import { registerRateLimit, type RateLimitConfig } from './rate-limit';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceListRoute } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
@@ -83,6 +84,12 @@ export interface RelayOptions {
    * #5). Defaults: 64 frames/session, 256 sessions. Tests inject small bounds.
    */
   readonly cache?: { readonly maxFramesPerSession?: number; readonly maxSessions?: number };
+  /**
+   * HTTP rate limiting (Phase 5). When provided, the relay registers a global per-IP window budget so a
+   * hosted instance sheds abusive traffic before it reaches auth or the database. Absent (the default) the
+   * limiter is OFF — the echo path and the test suite are unaffected; `main.ts` turns it on for production.
+   */
+  readonly rateLimit?: RateLimitConfig;
 }
 
 /** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
@@ -352,6 +359,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   await app.register(websocket);
+
+  // HTTP rate limiting (Phase 5): registered before any route so the global per-IP budget covers them all.
+  // Off unless configured, so the echo path and existing tests are untouched (see RelayOptions.rateLimit).
+  if (options.rateLimit) {
+    await registerRateLimit(app, options.rateLimit);
+  }
 
   // Keepalive sweep (Phase 4 Task 4): ping every socket; terminate any that didn't pong since the last
   // round. Terminating a dead peer fires its `close` handler — so a dead daemon's browsers are told it
