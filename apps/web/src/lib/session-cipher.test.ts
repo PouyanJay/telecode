@@ -140,6 +140,26 @@ describe('browser session cipher', () => {
     expect(await cipher.publicKey()).toBeUndefined();
   });
 
+  it('ignores a session.key it cannot unwrap (a cache replay wrapped to another browser) — Phase 4 T8', async () => {
+    const daemon = await generateIdentityKeyPair(true);
+    const cipher = browserCipher(await exportIdentityPublicKey(daemon.publicKey));
+
+    // The relay may replay a cached session.key wrapped to a DIFFERENT browser; this cipher can't open it.
+    const otherBrowser = await generateIdentityKeyPair(true);
+    const contentKey = await generateContentKey(true);
+    const wrappedForOther = await daemonWrapKey(
+      daemon.privateKey,
+      await exportIdentityPublicKey(otherBrowser.publicKey),
+      contentKey,
+    );
+
+    // It must be ignored (no throw, no wrong key established) — the daemon delivers one wrapped to us.
+    await expect(
+      cipher.receiveKey(sessionEnvelope('session.key', wrappedForOther)),
+    ).resolves.toBeUndefined();
+    expect(cipher.isEncrypted('s')).toBe(false);
+  });
+
   it('reuses the persisted identity across reopens — a stable browser public key (Phase 4 T7)', async () => {
     // A shared keystore stands in for IndexedDB surviving a reload.
     const map = new Map<string, CryptoKeyPairHandle>();

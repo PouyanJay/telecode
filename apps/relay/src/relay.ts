@@ -75,7 +75,25 @@ export interface RelayOptions {
    * Defaults to 30s; `intervalMs <= 0` disables it. Tests inject a short interval.
    */
   readonly heartbeat?: { readonly intervalMs?: number };
+  /**
+   * Bounded per-session ciphertext cache (Phase 4 Task 8). The relay keeps the recent encrypted frames it
+   * forwards (and the latest `session.key`) so a reopening browser can be replayed them immediately on
+   * `session.subscribe` — instant recent history even while the daemon is mid-reconnect, decrypted with
+   * the browser's persisted key (Task 7). Ciphertext only — the relay never reads the payload (invariant
+   * #5). Defaults: 64 frames/session, 256 sessions. Tests inject small bounds.
+   */
+  readonly cache?: { readonly maxFramesPerSession?: number; readonly maxSessions?: number };
 }
+
+/** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
+const CACHEABLE_TYPES = new Set<string>([
+  'session.started',
+  'agent.message',
+  'agent.tool_use',
+  'agent.permission_request',
+  'session.ended',
+  'session.key',
+]);
 
 function channelKey(userId: string, deviceId: string): string {
   return `${userId}:${deviceId}`;
@@ -99,6 +117,43 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // last ping round. A socket that misses a round is half-open (sleep / silent drop) and gets terminated.
   const sockets = new Set<WebSocket>();
   const liveness = new WeakMap<WebSocket, boolean>();
+  // Bounded per-session ciphertext cache (Task 8): the latest `session.key` frame + a ring of recent
+  // stream frames, all stored as the opaque forwarded strings (the relay never decrypts them).
+  const cacheMaxFrames = options.cache?.maxFramesPerSession ?? 64;
+  const cacheMaxSessions = options.cache?.maxSessions ?? 256;
+  const ciphertextCache = new Map<string, { key?: string; stream: string[] }>();
+
+  /** Record a forwarded daemon→browser frame for later replay (ciphertext string, never read). */
+  function cacheFrame(sessionId: string, type: string, frame: string): void {
+    let entry = ciphertextCache.get(sessionId);
+    if (!entry) {
+      // Bound the number of cached sessions: evict the oldest (Map preserves insertion order).
+      if (ciphertextCache.size >= cacheMaxSessions) {
+        const oldest = ciphertextCache.keys().next().value;
+        if (oldest !== undefined) ciphertextCache.delete(oldest);
+      }
+      entry = { stream: [] };
+      ciphertextCache.set(sessionId, entry);
+    }
+    if (type === 'session.key') {
+      entry.key = frame; // keep only the latest key frame
+    } else {
+      entry.stream.push(frame);
+      if (entry.stream.length > cacheMaxFrames) entry.stream.shift();
+    }
+  }
+
+  /** Replay a session's cached frames to one browser (the `session.key` first, so the stream decrypts). */
+  function replayCache(sessionId: string, browser: WebSocket): void {
+    const entry = ciphertextCache.get(sessionId);
+    if (!entry) return;
+    try {
+      if (entry.key !== undefined) browser.send(entry.key);
+      for (const frame of entry.stream) browser.send(frame);
+    } catch (err) {
+      log.warn({ err, sessionId }, 'relay: failed to replay cached frames');
+    }
+  }
   const sessionRegistry = options.sessionRegistry;
   const authService = options.auth?.service;
   const deviceRegistry = options.deviceRegistry;
@@ -176,8 +231,15 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     envelope: Envelope,
     channel: string,
     text: string,
+    replyTo: WebSocket,
   ): Promise<void> {
     const daemon = daemons.get(channel);
+    // Reopen = reconnect: replay this session's cached ciphertext to the subscribing browser immediately,
+    // so recent history shows even while the daemon is offline/reconnecting (Task 8). The daemon's
+    // authoritative `session.history` backfill follows when it forwards the subscribe below.
+    if (envelope.type === 'session.subscribe' && envelope.session_id) {
+      replayCache(envelope.session_id, replyTo);
+    }
     if (envelope.type === 'session.launch' && sessionRegistry) {
       // The relay owns the session registry: mint the row (and its id) from envelope metadata, never
       // from the payload (which is opaque here and ciphertext in Phase 3).
@@ -281,6 +343,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         // Ping the user (web push) that a session needs them — fire-and-forget, routing metadata only.
         pushAwaitingInput(envelope.user_id, envelope.session_id);
       }
+    }
+    // Cache the recent ciphertext for an instant reopen (Task 8) — the forwarded string, never decrypted.
+    if (envelope.session_id && CACHEABLE_TYPES.has(envelope.type)) {
+      cacheFrame(envelope.session_id, envelope.type, text);
     }
     broadcastToBrowsers(channel, text);
   }
@@ -460,7 +526,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       if (envelope.type === 'hello') {
         await handleHello(envelope, channel);
       } else if (peer.role === 'browser') {
-        await routeFromBrowser(envelope, channel, text);
+        await routeFromBrowser(envelope, channel, text, socket);
       } else if (peer.role === 'daemon') {
         await routeFromDaemon(envelope, channel, text);
       }

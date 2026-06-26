@@ -104,11 +104,17 @@ export function createBrowserSessionCipher(
 
     async receiveKey(envelope): Promise<void> {
       if (!enabled || envelope.session_id === undefined) return;
-      const unwrapped = sessionKeyPayloadSchema.parse(
-        await openPayload(envelope, await sharedKey()),
-      );
-      // Import the content key as non-extractable so it, too, can't be read back out of the browser.
-      contentKeys.set(envelope.session_id, await importContentKey(unwrapped.key, false));
+      try {
+        const unwrapped = sessionKeyPayloadSchema.parse(
+          await openPayload(envelope, await sharedKey()),
+        );
+        // Import the content key as non-extractable so it, too, can't be read back out of the browser.
+        contentKeys.set(envelope.session_id, await importContentKey(unwrapped.key, false));
+      } catch {
+        // A `session.key` we can't open — e.g. the relay replayed one from its cache (Task 8) that was
+        // wrapped to a different browser. Ignore it; the daemon delivers one wrapped to us. (Stream-frame
+        // authentication in `tryDecrypt` stays strict.)
+      }
     },
 
     isEncrypted(sessionId): boolean {
