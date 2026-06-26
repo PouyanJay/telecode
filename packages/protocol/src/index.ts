@@ -51,6 +51,20 @@ export {
   decryptWithContentKey,
 } from './session-crypto';
 
+// Phase 4 WebCrypto E2E primitives (ECDH X25519 + HKDF + AES-GCM). Exported into the package API by the
+// cipher migration (T6), which retires the tweetnacl-box session path above; T5 lands them tested in place.
+export {
+  generateIdentityKeyPair,
+  exportIdentityPublicKey,
+  importIdentityPublicKey,
+  importIdentityPrivateKey,
+  deriveSharedKey,
+  importContentKey,
+  exportContentKey,
+  sealPayload,
+  openPayload,
+} from './webcrypto';
+
 export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';
 export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device-auth';
 
