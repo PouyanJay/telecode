@@ -6,6 +6,7 @@ import { pino } from 'pino';
 
 import { loadCredentials, saveCredentials } from './credentials';
 import { createDaemon } from './daemon';
+import { runDoctorCli } from './doctor-cli';
 import { pairDevice } from './pairing';
 import { resolveRelayUrl } from './relay-url';
 import { createGitRepoManager } from './sessions/repo-manager';
@@ -40,11 +41,20 @@ const log = pino({
     censor: '[redacted]',
   },
 });
+
+const cliArgs = process.argv.slice(2);
+// `telecode doctor`: a preflight that reports whether this machine can run an agent (Node version, API
+// key, pairing, relay reachability) and exits — it never starts the daemon.
+if (cliArgs.includes('doctor')) {
+  const exitCode = await runDoctorCli({ argv: cliArgs, env: process.env });
+  process.exit(exitCode);
+}
+
 // `--relay-url <wss://…/ws>` (or `TELECODE_RELAY_URL`) points the daemon at a self-hosted relay; the
 // default is the local relay. Validated as ws/wss so a typo fails fast.
 let relayWsUrl: string;
 try {
-  relayWsUrl = resolveRelayUrl(process.argv.slice(2), process.env);
+  relayWsUrl = resolveRelayUrl(cliArgs, process.env);
 } catch (err) {
   log.error({ err }, 'daemon: invalid relay URL');
   process.exit(1);
