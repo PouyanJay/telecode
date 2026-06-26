@@ -35,14 +35,33 @@ export interface CallToAction {
   readonly href: string;
 }
 
+export interface HowItWorksStep {
+  readonly n: number;
+  readonly title: string;
+  readonly body: string;
+  /** An optional terminal command shown in a mono chip (the data-as-signature house style). */
+  readonly command?: string;
+}
+
+export interface FooterLink {
+  readonly label: string;
+  readonly href: string;
+}
+
 export interface SiteContent {
   readonly productName: string;
   /** The hero headline — what telecode lets you do, in one line. */
   readonly tagline: string;
   readonly subhead: string;
+  /** The command shown in the hero terminal chip. */
+  readonly installCommand: string;
   readonly capabilities: readonly Capability[];
+  readonly howItWorks: readonly HowItWorksStep[];
   readonly primaryCta: CallToAction;
   readonly secondaryCta: CallToAction;
+  readonly footerLinks: readonly FooterLink[];
+  /** SPDX license id, shown in the footer. */
+  readonly license: string;
 }
 
 export const siteContent: SiteContent = {
@@ -50,6 +69,7 @@ export const siteContent: SiteContent = {
   tagline: 'Run Claude Code agents on your own machine — drive them from any browser.',
   subhead:
     'telecode is an open-source, self-hostable command center for Claude Code agents. Launch, watch, and steer agents that run on your hardware, from your phone or laptop — your code never leaves your machine.',
+  installCommand: 'npx telecode',
   capabilities: [
     {
       id: 'open-source',
@@ -72,6 +92,31 @@ export const siteContent: SiteContent = {
       body: 'Built directly on the Claude Agent SDK — real sessions, real tool approvals — not screen-scraping a terminal. Every consequential action waits for your decision.',
     },
   ],
+  howItWorks: [
+    {
+      n: 1,
+      title: 'Install on your machine',
+      body: 'Run one command where your agents should work. The daemon dials out to the relay — nothing ever reaches into your laptop.',
+      command: 'npx telecode',
+    },
+    {
+      n: 2,
+      title: 'Pair from the browser',
+      body: 'The daemon prints a short code. Sign in to the dashboard, enter the code, and this machine is bound to your account.',
+    },
+    {
+      n: 3,
+      title: 'Launch & steer',
+      body: 'Pick a device, point at a repo, and send a prompt. Watch output stream and approve each consequential tool call — from your phone or laptop.',
+    },
+  ],
   primaryCta: { label: 'Get started', href: links.docs },
   secondaryCta: { label: 'View on GitHub', href: links.repo },
+  footerLinks: [
+    { label: 'GitHub', href: links.repo },
+    { label: 'Documentation', href: links.docs },
+    { label: 'Self-hosting', href: links.selfHost },
+    { label: 'Privacy', href: 'https://github.com/PouyanJay/telecode/blob/main/docs/telemetry.md' },
+  ],
+  license: 'AGPL-3.0',
 };

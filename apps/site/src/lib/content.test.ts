@@ -37,4 +37,34 @@ describe('landing content', () => {
     }
     expect(siteContent.secondaryCta.href).toBe(links.repo);
   });
+
+  it('lays out the three-step how-it-works flow with sequential numbering', () => {
+    expect(siteContent.howItWorks.map((s) => s.n)).toEqual([1, 2, 3]);
+    for (const step of siteContent.howItWorks) {
+      expect(step.title.trim().length).toBeGreaterThan(0);
+      expect(step.body.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it('exposes a footer of absolute links and the AGPL license', () => {
+    expect(siteContent.footerLinks.length).toBeGreaterThan(0);
+    for (const link of siteContent.footerLinks) {
+      expect(link.label.trim().length).toBeGreaterThan(0);
+      expect(link.href).toMatch(/^https:\/\//);
+    }
+    expect(siteContent.license).toBe('AGPL-3.0');
+  });
+
+  it('shows an install command in the hero', () => {
+    expect(siteContent.installCommand.trim().length).toBeGreaterThan(0);
+  });
+
+  it('uses only telecode.io domains for first-party destinations', () => {
+    const firstParty = Object.values(links).filter((href) => href.includes('telecode'));
+    for (const href of firstParty) {
+      // The product app is on app.telecode.io; the legacy pouyan.ai domain must not reappear.
+      expect(href).not.toContain('telecode.pouyan.ai');
+    }
+    expect(links.app).toBe('https://app.telecode.io');
+  });
 });
