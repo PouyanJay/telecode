@@ -25,7 +25,8 @@ export interface ConnectOptions {
   readonly relayUrl: string;
   readonly userId: string;
   readonly deviceId: string;
-  readonly channelToken: string;
+  /** Mint a short-lived channel token; called on connect AND each reconnect so an expired one is renewed. */
+  readonly getChannelToken: () => Promise<string>;
   /** The watched device's X25519 public key (base64) for E2E; null/undefined keeps the channel cleartext. */
   readonly daemonPublicKey?: string | null;
 }
@@ -92,12 +93,20 @@ export function connect(
     relayUrl: options.relayUrl,
     userId: options.userId,
     deviceId: options.deviceId,
-    channelToken: options.channelToken,
+    getChannelToken: options.getChannelToken,
     daemonPublicKey: options.daemonPublicKey,
     onStatus: (status) => connState.set(status),
     onEvent: handleEvent,
     onReconnect: reattachSessions,
   });
+}
+
+/** Mint a fresh channel token from the web backend (the cookie → a short-lived signed token, BFF). */
+async function fetchChannelToken(): Promise<string> {
+  const res = await fetch('/api/channel-token');
+  if (!res.ok) throw new Error('Could not mint a channel token.');
+  const { channelToken } = (await res.json()) as { channelToken: string };
+  return channelToken;
 }
 
 /**
@@ -116,12 +125,11 @@ export function isConnected(): boolean {
   return connection !== null;
 }
 
-let connecting: Promise<void> | null = null;
-
 /**
- * Open the shared connection if it isn't already: mint a channel token (server-side, from the cookie)
- * and connect. Idempotent and browser-only — both the dashboard and the session view call it on mount;
- * a shared in-flight promise keeps a concurrent pair of callers from minting two tokens.
+ * Open the shared connection if it isn't already, minting channel tokens on demand — on the first connect
+ * and on every reconnect, so a token that lapsed during a sleep is renewed (Phase 4 Task 4). Idempotent
+ * and browser-only — both the dashboard and the session view call it on mount; `connect`'s own guard
+ * makes concurrent callers safe.
  */
 export function ensureConnection(options: {
   relayUrl: string;
@@ -129,23 +137,8 @@ export function ensureConnection(options: {
   deviceId: string;
   daemonPublicKey?: string | null;
 }): Promise<void> {
-  if (connection) return Promise.resolve();
-  connecting ??= (async () => {
-    try {
-      const res = await fetch('/api/channel-token');
-      if (!res.ok) {
-        connState.set('error');
-        return;
-      }
-      const { channelToken } = (await res.json()) as { channelToken: string };
-      connect({ ...options, channelToken });
-    } catch {
-      connState.set('error');
-    }
-  })().finally(() => {
-    connecting = null;
-  });
-  return connecting;
+  if (!connection) connect({ ...options, getChannelToken: fetchChannelToken });
+  return Promise.resolve();
 }
 
 /** Launch a session; resolves with the relay-minted id once the daemon reports it started. */

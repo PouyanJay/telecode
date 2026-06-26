@@ -73,7 +73,10 @@ afterEach(() => {
 describe('session-store launch correlation (Task 11)', () => {
   it('resolves launch() with the minted id when session.started echoes its clientRef', async () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
 
     const pending = launch({ prompt: 'do it' });
     const clientRef = fake.launched[0]?.clientRef;
@@ -85,7 +88,10 @@ describe('session-store launch correlation (Task 11)', () => {
 
   it('rejects launch() on timeout when no session.started arrives', async () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
 
     const pending = launch({ prompt: 'offline device' });
     const assertion = expect(pending).rejects.toThrow(/timed out/i);
@@ -95,7 +101,10 @@ describe('session-store launch correlation (Task 11)', () => {
 
   it('re-subscribes every known session after a reconnect so the daemon backfills (Phase 4 T1)', () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
 
     // Two sessions are live in this browser (seeded via inbound frames).
     fake.started('sess-1');
@@ -109,7 +118,10 @@ describe('session-store launch correlation (Task 11)', () => {
 
   it('pauses live sessions when the device goes offline, resumes them when it returns (Phase 4 T3)', () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
     fake.started('sess-1');
     fake.started('sess-2');
 
@@ -126,7 +138,10 @@ describe('session-store launch correlation (Task 11)', () => {
 
   it('a late frame for a timed-out launch never mis-resolves a later launch', async () => {
     const fake = makeFakeConnection();
-    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
 
     // Launch A times out (its clientRef is now stale).
     const launchA = launch({ prompt: 'A' });

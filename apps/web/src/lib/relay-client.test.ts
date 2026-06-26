@@ -69,7 +69,7 @@ function connectWithFakes(overrides: Partial<Parameters<typeof createRelayConnec
     relayUrl: 'ws://relay/ws',
     userId: USER,
     deviceId: DEVICE,
-    channelToken: 't',
+    getChannelToken: () => Promise.resolve('t'),
     onStatus: (s) => statuses.push(s),
     onEvent: () => undefined,
     onReconnect: () => {
@@ -97,8 +97,9 @@ describe('relay-client auto-reconnect (Phase 4 Task 1)', () => {
   it('redials and re-authenticates after an unexpected drop, then fires onReconnect', async () => {
     const { sockets, statuses, reconnects, conn } = connectWithFakes();
 
-    // First connect + handshake.
+    // First connect + handshake (the hello is sent after the async token mint).
     sockets[0]!.fireOpen();
+    await flush();
     expect(sockets[0]!.sentHello()).toBe(true);
     sockets[0]!.fireMessage(helloAck());
     await flush();
@@ -112,10 +113,34 @@ describe('relay-client auto-reconnect (Phase 4 Task 1)', () => {
 
     // Re-handshake on the new socket → connected again + onReconnect (caller reattaches sessions).
     sockets[1]!.fireOpen();
+    await flush();
     expect(sockets[1]!.sentHello()).toBe(true);
     sockets[1]!.fireMessage(helloAck());
     await flush();
     expect(reconnects.count).toBe(1);
+
+    conn.close();
+  });
+
+  it('mints a fresh channel token on each (re)connect (Phase 4 Task 4)', async () => {
+    let minted = 0;
+    const { sockets, conn } = connectWithFakes({
+      getChannelToken: () => Promise.resolve(`token-${(minted += 1)}`),
+    });
+
+    // First connect carries the first token.
+    sockets[0]!.fireOpen();
+    await flush();
+    expect(sockets[0]!.sent.some((f) => f.includes('token-1'))).toBe(true);
+    sockets[0]!.fireMessage(helloAck());
+    await flush();
+
+    // After a drop, the reconnect re-mints rather than replaying the (possibly expired) first token.
+    sockets[0]!.fireClose();
+    await vi.advanceTimersByTimeAsync(11_000);
+    sockets[1]!.fireOpen();
+    await flush();
+    expect(sockets[1]!.sent.some((f) => f.includes('token-2'))).toBe(true);
 
     conn.close();
   });

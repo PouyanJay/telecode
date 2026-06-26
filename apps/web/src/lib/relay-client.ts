@@ -29,7 +29,12 @@ export interface RelayConnectionOptions {
   readonly relayUrl: string;
   readonly userId: string;
   readonly deviceId: string;
-  readonly channelToken: string;
+  /**
+   * Mint a short-lived channel token to authenticate the `hello`. Called on the first connect AND on every
+   * reconnect, so a token that expired during a long sleep is re-minted rather than replayed (Phase 4
+   * Task 4) — otherwise the relay would reject the reconnect (4001) and the client would loop forever.
+   */
+  readonly getChannelToken: () => Promise<string>;
   /** The watched device's X25519 public key (base64) for E2E; null/undefined keeps the channel cleartext. */
   readonly daemonPublicKey?: string | null;
   readonly onStatus: (status: ConnectionStatus) => void;
@@ -64,6 +69,7 @@ export interface RelayConnection {
 
 export function createRelayConnection(options: RelayConnectionOptions): RelayConnection {
   const createSocket = options.createSocket ?? ((url: string) => new WebSocket(url));
+  const getChannelToken = options.getChannelToken;
   const cipher = createBrowserSessionCipher(options.daemonPublicKey);
   let socket: WebSocket | null = null;
   // Reconnect state: an unexpected drop auto-redials (reopen is a reconnect — architecture invariant #7);
@@ -125,7 +131,18 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
 
     ws.addEventListener('open', () => {
       // The handshake is cleartext: the relay must read the role + channel token to authenticate the peer.
-      ws.send(buildFrame('hello', { payload: { role: 'browser', token: options.channelToken } }));
+      // Mint the token now (per connect), so a reconnect after a long sleep gets a fresh, unexpired one.
+      void (async () => {
+        try {
+          const token = await getChannelToken();
+          ws.send(buildFrame('hello', { payload: { role: 'browser', token } }));
+        } catch {
+          // Couldn't mint a token (e.g. the cookie lapsed): surface it and close so the reconnect loop
+          // retries — a transient token-endpoint failure shouldn't permanently wedge the channel.
+          options.onStatus('error');
+          ws.close();
+        }
+      })();
     });
 
     // Inbound frames are handled in order through a chain (decryption is async): the `session.key` that
