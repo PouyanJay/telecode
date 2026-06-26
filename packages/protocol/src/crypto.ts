@@ -68,44 +68,15 @@ export function decodeKey(value: string): Uint8Array {
 /** No-op for tweetnacl (no async init); kept for API symmetry with WASM backends. */
 export async function ready(): Promise<void> {}
 
-/** Generate an X25519 keypair (one per device on first run; per browser session). */
+/**
+ * Generate an X25519 keypair (the daemon's device identity, persisted at pairing). The raw key bytes are
+ * a valid X25519 keypair that WebCrypto imports for the E2E handshake (see `webcrypto.ts`) — keeping
+ * keygen here means existing stored daemon keys load unchanged. The browser instead generates a
+ * non-extractable WebCrypto keypair directly.
+ */
 export async function generateKeyPair(): Promise<KeyPair> {
   const kp = nacl.box.keyPair();
   return { publicKey: kp.publicKey, privateKey: kp.secretKey };
-}
-
-/** Encrypt `plaintext` from the sender to the recipient (authenticated). */
-export async function seal(
-  plaintext: string,
-  recipientPublicKey: Uint8Array,
-  senderPrivateKey: Uint8Array,
-): Promise<SealedMessage> {
-  const nonce = nacl.randomBytes(nacl.box.nonceLength);
-  const ciphertext = nacl.box(
-    utf8Encoder.encode(plaintext),
-    nonce,
-    recipientPublicKey,
-    senderPrivateKey,
-  );
-  return { nonce: toBase64(nonce), ciphertext: toBase64(ciphertext) };
-}
-
-/**
- * Decrypt a {@link SealedMessage}. Rejects if the keys don't match or the ciphertext was
- * tampered with (NaCl authenticates before decrypting and returns null on failure).
- */
-export async function open(
-  sealed: SealedMessage,
-  senderPublicKey: Uint8Array,
-  recipientPrivateKey: Uint8Array,
-): Promise<string> {
-  const nonce = fromBase64(sealed.nonce);
-  const ciphertext = fromBase64(sealed.ciphertext);
-  const plaintext = nacl.box.open(ciphertext, nonce, senderPublicKey, recipientPrivateKey);
-  if (plaintext === null) {
-    throw new Error('decryption failed: wrong key pair or tampered ciphertext');
-  }
-  return utf8Decoder.decode(plaintext);
 }
 
 /** Generate a 32-byte symmetric key for {@link sealSecret} (e.g. the relay's at-rest token key). */

@@ -23,8 +23,6 @@ export type { MessageType, Envelope, EchoPayload, PeerRole, HelloPayload } from 
 export {
   ready,
   generateKeyPair,
-  seal,
-  open,
   encodeKey,
   decodeKey,
   generateSecretKey,
@@ -35,35 +33,24 @@ export type { KeyPair, SealedMessage } from './crypto';
 
 export { ProtocolError } from './errors';
 
-export {
-  sealEnvelopePayload,
-  openEnvelopePayload,
-  requireCiphertext,
-  parsePlaintext,
-} from './envelope-crypto';
+export { requireCiphertext, parsePlaintext } from './envelope-crypto';
 export type { EncryptedEnvelopeFields } from './envelope-crypto';
 
-export {
-  generateContentKey,
-  wrapContentKey,
-  unwrapContentKey,
-  encryptWithContentKey,
-  decryptWithContentKey,
-} from './session-crypto';
-
-// Phase 4 WebCrypto E2E primitives (ECDH X25519 + HKDF + AES-GCM). Exported into the package API by the
-// cipher migration (T6), which retires the tweetnacl-box session path above; T5 lands them tested in place.
+// Phase 4 E2E session crypto: WebCrypto ECDH(X25519) → HKDF-SHA256 → AES-256-GCM. Replaces the former
+// tweetnacl box/secretbox session path so the browser can hold a non-extractable identity key.
 export {
   generateIdentityKeyPair,
   exportIdentityPublicKey,
   importIdentityPublicKey,
   importIdentityPrivateKey,
   deriveSharedKey,
+  generateContentKey,
   importContentKey,
   exportContentKey,
   sealPayload,
   openPayload,
 } from './webcrypto';
+export type { CryptoKeyHandle, CryptoKeyPairHandle } from './webcrypto';
 
 export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';
 export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device-auth';

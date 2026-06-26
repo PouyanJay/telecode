@@ -11,6 +11,11 @@ import { ProtocolError } from './errors';
 type CryptoKey = webcrypto.CryptoKey;
 type CryptoKeyPair = webcrypto.CryptoKeyPair;
 
+/** A WebCrypto key handle (an X25519 identity key, or an AES-GCM content/shared key). */
+export type CryptoKeyHandle = CryptoKey;
+/** A WebCrypto X25519 identity keypair (public + private handle). */
+export type CryptoKeyPairHandle = CryptoKeyPair;
+
 /**
  * WebCrypto E2E primitives (Phase 4): **ECDH(X25519) → HKDF-SHA256 → AES-256-GCM**. These replace
  * tweetnacl `box`/`secretbox` for the E2E *session* path (launch seal, content-key wrap, stream payloads)

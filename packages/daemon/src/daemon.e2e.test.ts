@@ -1,13 +1,17 @@
 import { randomUUID } from 'node:crypto';
 
 import {
-  decryptWithContentKey,
+  deriveSharedKey,
   encodeKey,
-  encryptWithContentKey,
   generateKeyPair,
+  importContentKey,
+  importIdentityPrivateKey,
+  importIdentityPublicKey,
   makeEnvelope,
-  sealEnvelopePayload,
-  unwrapContentKey,
+  openPayload,
+  sealPayload,
+  sessionKeyPayloadSchema,
+  type EncryptedEnvelopeFields,
   type Envelope,
   type KeyPair,
   type MessageType,
@@ -18,6 +22,49 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createFakeAgentAdapter, type AgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
+
+/**
+ * Browser-side E2E simulation over WebCrypto (Phase 4) — mirrors what the real browser cipher does, with
+ * the same shapes the old tweetnacl helpers had so the scenarios below read unchanged. The daemon's
+ * keypair is generated with tweetnacl (raw X25519) and imported into WebCrypto here, exactly as the
+ * daemon does — proving the AES-GCM handshake interoperates with the daemon's stored keys.
+ */
+type SealedFields = { readonly payload?: unknown; readonly nonce: string };
+
+async function sealEnvelopePayload(
+  payload: unknown,
+  recipientPublicKey: Uint8Array,
+  senderPrivateKey: Uint8Array,
+): Promise<EncryptedEnvelopeFields> {
+  const shared = await deriveSharedKey(
+    await importIdentityPrivateKey(encodeKey(senderPrivateKey)),
+    await importIdentityPublicKey(encodeKey(recipientPublicKey)),
+  );
+  return sealPayload(payload, shared);
+}
+
+async function unwrapContentKey(
+  envelope: SealedFields,
+  senderPublicKey: Uint8Array,
+  recipientPrivateKey: Uint8Array,
+): Promise<string> {
+  const shared = await deriveSharedKey(
+    await importIdentityPrivateKey(encodeKey(recipientPrivateKey)),
+    await importIdentityPublicKey(encodeKey(senderPublicKey)),
+  );
+  return sessionKeyPayloadSchema.parse(await openPayload(envelope, shared)).key;
+}
+
+async function encryptWithContentKey(
+  payload: unknown,
+  contentKey: string,
+): Promise<EncryptedEnvelopeFields> {
+  return sealPayload(payload, await importContentKey(contentKey, false));
+}
+
+async function decryptWithContentKey(envelope: SealedFields, contentKey: string): Promise<unknown> {
+  return openPayload(envelope, await importContentKey(contentKey, false));
+}
 
 /**
  * Phase 3 daemon-side E2E. A keypair-bearing daemon must: decrypt a `session.launch` sealed (box) to its
