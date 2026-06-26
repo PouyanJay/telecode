@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an idea or improvement for telecode
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Describing the **problem** you're hitting (not only your proposed
+        solution) helps us find the best fit.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The use case or pain point behind the request.
+      placeholder: When steering an agent from my phone, I can't …
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like telecode to do. Sketches and rough ideas are welcome.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Other approaches or workarounds you've tried or thought about.
+    validations:
+      required: false
+  - type: checkboxes
+    id: fit
+    attributes:
+      label: Fit with telecode's principles
+      description: telecode is open, self-hostable, end-to-end encrypted, and Agent-SDK-native.
+      options:
+        - label: This keeps execution on the user's machine and the relay free of plaintext.
+          required: false
