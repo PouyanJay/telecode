@@ -14,16 +14,19 @@ import { connect, disconnect, launch } from './session-store';
 const userId = 'user-1';
 const deviceId = 'device-1';
 
-/** A fake relay connection that records launch payloads and lets the test emit inbound frames. */
+/** A fake relay connection that records launch/subscribe calls and lets the test emit inbound frames. */
 function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
+  const subscribed: string[] = [];
   let emit: (envelope: ReturnType<typeof makeEnvelope>) => void = () => undefined;
+  let fireReconnect: () => void = () => undefined;
   const create = (options: RelayConnectionOptions): RelayConnection => {
     emit = options.onEvent;
+    fireReconnect = () => options.onReconnect?.();
     options.onStatus('connected');
     return {
       launch: (payload) => launched.push(payload),
-      subscribe: () => undefined,
+      subscribe: (id) => subscribed.push(id),
       sendUserMessage: () => undefined,
       decide: () => undefined,
       control: () => undefined,
@@ -33,6 +36,11 @@ function makeFakeConnection() {
   return {
     create,
     launched,
+    subscribed,
+    /** Simulate the connection re-authenticating after a dropped socket (browser auto-reconnect). */
+    reconnect() {
+      fireReconnect();
+    },
     /** Simulate the daemon's `session.started` echoing a clientRef for a minted session id. */
     started(sessionId: string, clientRef?: string) {
       emit(
@@ -78,6 +86,20 @@ describe('session-store launch correlation (Task 11)', () => {
     const assertion = expect(pending).rejects.toThrow(/timed out/i);
     await vi.advanceTimersByTimeAsync(15_000);
     await assertion;
+  });
+
+  it('re-subscribes every known session after a reconnect so the daemon backfills (Phase 4 T1)', () => {
+    const fake = makeFakeConnection();
+    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+
+    // Two sessions are live in this browser (seeded via inbound frames).
+    fake.started('sess-1');
+    fake.started('sess-2');
+
+    // The socket drops and the client transparently re-authenticates → the store reattaches every known
+    // session (reopen = reconnect, invariant #7) so the daemon backfills their current transcripts.
+    fake.reconnect();
+    expect(fake.subscribed).toEqual(['sess-1', 'sess-2']);
   });
 
   it('a late frame for a timed-out launch never mis-resolves a later launch', async () => {

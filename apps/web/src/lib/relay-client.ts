@@ -35,6 +35,17 @@ export interface RelayConnectionOptions {
   readonly onStatus: (status: ConnectionStatus) => void;
   /** Every inbound session frame (everything except the `hello.ack` handshake and `session.key`). */
   readonly onEvent: (envelope: Envelope) => void;
+  /**
+   * Called once a *reconnect* (not the first connect) re-authenticates — i.e. a fresh `hello.ack` after a
+   * dropped socket. The caller reattaches its sessions here (resubscribe → daemon backfill), since the
+   * relay/daemon treat a reconnect as a reopen (architecture invariant #7).
+   */
+  readonly onReconnect?: () => void;
+  /**
+   * Seam for building the underlying socket. Production uses a real browser `WebSocket`; tests inject a
+   * controllable fake (the web Vitest runs in node, where there is no DOM `WebSocket`).
+   */
+  readonly createSocket?: (url: string) => WebSocket;
 }
 
 export interface RelayConnection {
@@ -52,9 +63,18 @@ export interface RelayConnection {
 }
 
 export function createRelayConnection(options: RelayConnectionOptions): RelayConnection {
-  let socket: WebSocket | null = new WebSocket(options.relayUrl);
-  options.onStatus('connecting');
+  const createSocket = options.createSocket ?? ((url: string) => new WebSocket(url));
   const cipher = createBrowserSessionCipher(options.daemonPublicKey);
+  let socket: WebSocket | null = null;
+  // Reconnect state: an unexpected drop auto-redials (reopen is a reconnect — architecture invariant #7);
+  // an intentional close() does not. `hasConnected` distinguishes the first handshake from a reconnect so
+  // the caller only reattaches sessions on the latter.
+  let intentionallyClosed = false;
+  let hasConnected = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  const BASE_RECONNECT_MS = 500;
+  const MAX_RECONNECT_MS = 10_000;
 
   function buildFrame(
     type: MessageType,
@@ -97,21 +117,47 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     return buildFrame(type, { sessionId, payload });
   }
 
-  socket.addEventListener('open', () => {
-    // The handshake is cleartext: the relay must read the role + channel token to authenticate the peer.
-    socket?.send(
-      buildFrame('hello', { payload: { role: 'browser', token: options.channelToken } }),
-    );
-  });
+  /** Dial the relay and wire one socket's lifecycle. Called on first connect and on every reconnect. */
+  function openSocket(): void {
+    const ws = createSocket(options.relayUrl);
+    socket = ws;
+    options.onStatus('connecting');
 
-  // Inbound frames are handled in order through a chain (decryption is async): the `session.key` that
-  // unlocks a session must be applied before the encrypted frames that follow it.
-  let inbound: Promise<void> = Promise.resolve();
-  socket.addEventListener('message', (event: MessageEvent<string>) => {
-    // A failed frame (e.g. a decryption error from a key mismatch) surfaces as a connection error rather
-    // than silently dropping — consistent with the send chain's handler.
-    inbound = inbound.then(() => handleFrame(event.data)).catch(() => options.onStatus('error'));
-  });
+    ws.addEventListener('open', () => {
+      // The handshake is cleartext: the relay must read the role + channel token to authenticate the peer.
+      ws.send(buildFrame('hello', { payload: { role: 'browser', token: options.channelToken } }));
+    });
+
+    // Inbound frames are handled in order through a chain (decryption is async): the `session.key` that
+    // unlocks a session must be applied before the encrypted frames that follow it. Each socket gets its
+    // own chain; the cipher + outbound chain persist across reconnects so keys and order survive a redial.
+    let inbound: Promise<void> = Promise.resolve();
+    ws.addEventListener('message', (event: MessageEvent<string>) => {
+      // A failed frame (e.g. a decryption error from a key mismatch) surfaces as a connection error rather
+      // than silently dropping — consistent with the send chain's handler.
+      inbound = inbound.then(() => handleFrame(event.data)).catch(() => options.onStatus('error'));
+    });
+
+    ws.addEventListener('error', () => options.onStatus('error'));
+    ws.addEventListener('close', () => {
+      // An intentional close() is terminal; an unexpected drop schedules a transparent redial.
+      if (intentionallyClosed) return;
+      scheduleReconnect();
+    });
+  }
+
+  /** Schedule a redial with exponential backoff + jitter (capped), unless the link was torn down. */
+  function scheduleReconnect(): void {
+    if (intentionallyClosed || reconnectTimer !== null) return;
+    const ceiling = Math.min(MAX_RECONNECT_MS, BASE_RECONNECT_MS * 2 ** reconnectAttempts);
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2); // full-jitter half-range
+    reconnectAttempts += 1;
+    options.onStatus('connecting');
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      openSocket();
+    }, delay);
+  }
 
   async function handleFrame(data: string): Promise<void> {
     let envelope: Envelope;
@@ -121,7 +167,13 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       return; // drop anything that isn't a valid envelope
     }
     if (envelope.type === 'hello.ack') {
+      reconnectAttempts = 0;
+      const reconnected = hasConnected;
+      hasConnected = true;
       options.onStatus('connected');
+      // On a *reconnect* (not the first handshake) the caller reattaches its sessions (resubscribe →
+      // backfill), since the daemon treats this as a reopen.
+      if (reconnected) options.onReconnect?.();
       return;
     }
     if (envelope.type === 'session.key') {
@@ -133,8 +185,7 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     options.onEvent(result.decrypted ? { ...envelope, payload: result.payload } : envelope);
   }
 
-  socket.addEventListener('error', () => options.onStatus('error'));
-  socket.addEventListener('close', () => options.onStatus('error'));
+  openSocket();
 
   return {
     launch(payload: SessionLaunchPayload): void {
@@ -172,6 +223,11 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       enqueueSend(() => sessionFrame('session.control', sessionId, { action }));
     },
     close(): void {
+      intentionallyClosed = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       socket?.close();
       socket = null;
     },

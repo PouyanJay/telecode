@@ -5,7 +5,7 @@ import {
   type SessionControlAction,
   type SessionLaunchPayload,
 } from '@telecode/protocol';
-import { writable, type Readable } from 'svelte/store';
+import { get, writable, type Readable } from 'svelte/store';
 
 import { createRelayConnection, type ConnectionStatus, type RelayConnection } from './relay-client';
 import { appendUserMessage, markDeciding } from './session';
@@ -85,7 +85,19 @@ export function connect(
     daemonPublicKey: options.daemonPublicKey,
     onStatus: (status) => connState.set(status),
     onEvent: handleEvent,
+    onReconnect: reattachSessions,
   });
+}
+
+/**
+ * After the connection transparently reconnects, re-subscribe every session this browser knows about so
+ * the daemon backfills its current transcript (reopen = reconnect — architecture invariant #7). Terminal
+ * sessions backfill harmlessly; active ones resume streaming, with no page reload.
+ */
+function reattachSessions(): void {
+  const conn = connection;
+  if (!conn) return;
+  for (const id of get(sessionMap).keys()) conn.subscribe(id);
 }
 
 /** Whether the shared connection has been opened (so a route doesn't re-fetch a channel token). */
@@ -199,4 +211,7 @@ export function disconnect(): void {
   connection?.close();
   connection = null;
   connState.set('idle');
+  // Full teardown (sign-out): drop watched-session state. A later reconnect re-fetches the list from the
+  // registry and backfills transcripts, so nothing stale should linger across a disconnect.
+  sessionMap.set(new Map());
 }
