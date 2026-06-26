@@ -76,6 +76,8 @@ function channelKey(userId: string, deviceId: string): string {
 interface PeerState {
   role: 'daemon' | 'browser' | 'unknown';
   channel: string | null;
+  userId: string | null;
+  deviceId: string | null;
 }
 
 export async function buildRelay(options: RelayOptions = {}): Promise<FastifyInstance> {
@@ -131,6 +133,17 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     if (envelope.status === 'done' || envelope.status === 'error') return envelope.status;
     const fromPayload = sessionEndedPayloadSchema.safeParse(envelope.payload);
     return fromPayload.success ? fromPayload.data.status : 'done';
+  }
+
+  /**
+   * A `device.presence` frame (relay → browsers): the daemon behind the channel is now online/offline.
+   * Cleartext routing metadata the relay generates itself — no session payload, E2E-safe (the browser
+   * pauses its live sessions when offline and resubscribes to resume them when online).
+   */
+  function presenceFrame(userId: string, deviceId: string, online: boolean): string {
+    return JSON.stringify(
+      makeEnvelope({ type: 'device.presence', userId, deviceId, payload: { online } }),
+    );
   }
 
   function broadcastToBrowsers(channel: string, frame: string): void {
@@ -304,7 +317,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   app.get('/ws', { websocket: true }, (socket: WebSocket) => {
-    const peer: PeerState = { role: 'unknown', channel: null };
+    const peer: PeerState = { role: 'unknown', channel: null, userId: null, deviceId: null };
 
     // Frame handling is async (session.* control messages await DB writes), so we chain frames into a
     // per-connection queue: each frame is fully handled before the next, preserving stream order (a
@@ -358,6 +371,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
       peer.role = role;
       peer.channel = channel;
+      peer.userId = envelope.user_id;
+      peer.deviceId = envelope.device_id;
       if (role === 'daemon') {
         daemons.set(channel, socket);
       } else {
@@ -376,6 +391,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           }),
         ),
       );
+      // Presence (Phase 4 Task 3): a (re)registering daemon tells watching browsers to resume; a browser
+      // that connected while its device is offline is told so, so its live session list reflects reality.
+      if (role === 'daemon') {
+        broadcastToBrowsers(channel, presenceFrame(envelope.user_id, envelope.device_id, true));
+      } else if (!daemons.has(channel)) {
+        socket.send(presenceFrame(envelope.user_id, envelope.device_id, false));
+      }
     }
 
     async function handleFrame(raw: Buffer): Promise<void> {
@@ -406,6 +428,11 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       if (peer.role === 'daemon') {
         if (daemons.get(peer.channel) === socket) {
           daemons.delete(peer.channel);
+          // The device just went offline — tell watching browsers so they pause its live sessions until
+          // the daemon reconnects (Phase 4 Task 3).
+          if (peer.userId !== null && peer.deviceId !== null) {
+            broadcastToBrowsers(peer.channel, presenceFrame(peer.userId, peer.deviceId, false));
+          }
         }
       } else if (peer.role === 'browser') {
         browsers.get(peer.channel)?.delete(socket);

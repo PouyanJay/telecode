@@ -26,6 +26,27 @@ export function foldSessionFrame(map: SessionMap, envelope: Envelope): SessionMa
 }
 
 /**
+ * The device behind this channel went offline (Phase 4 Task 3): flip every still-live session to
+ * `offline_paused` so the UI honestly shows it can't run until the daemon reconnects. Terminal sessions
+ * (done/error) and already-paused ones are left untouched. Returns the SAME map when nothing changed.
+ */
+export function markChannelOffline(map: SessionMap): SessionMap {
+  let changed = false;
+  const next = new Map(map);
+  for (const [id, state] of map) {
+    if (
+      state.status === 'running' ||
+      state.status === 'starting' ||
+      state.status === 'awaiting_input'
+    ) {
+      next.set(id, { ...state, status: 'offline_paused' });
+      changed = true;
+    }
+  }
+  return changed ? next : map;
+}
+
+/**
  * Dashboard sort priority: a blocked session ("awaiting input") is the loudest signal and sorts to the
  * top; live work next; everything terminal/idle last. Ties break on recency at the call site.
  */

@@ -1,4 +1,5 @@
 import {
+  devicePresencePayloadSchema,
   sessionStartedPayloadSchema,
   type Envelope,
   type PermissionDecisionPayload,
@@ -9,7 +10,7 @@ import { get, writable, type Readable } from 'svelte/store';
 
 import { createRelayConnection, type ConnectionStatus, type RelayConnection } from './relay-client';
 import { appendUserMessage, markDeciding } from './session';
-import { foldSessionFrame, type SessionMap } from './sessions';
+import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
 /**
  * The browser's single live link to the device's channel, shared across routes (dashboard + session
@@ -54,6 +55,16 @@ export const sessions: Readable<SessionMap> = { subscribe: sessionMap.subscribe 
 export const connectionState: Readable<ConnectionState> = { subscribe: connState.subscribe };
 
 function handleEvent(envelope: Envelope): void {
+  // Device presence (Phase 4 Task 3) is channel-wide, not per-session: the daemon behind this channel
+  // (dis)connected. Offline → pause every live session; online → resubscribe so the daemon backfills
+  // and they resume. Handled here (not in foldSessionFrame, which routes by session_id).
+  if (envelope.type === 'device.presence') {
+    const presence = devicePresencePayloadSchema.safeParse(envelope.payload);
+    if (!presence.success) return;
+    if (presence.data.online) reattachSessions();
+    else sessionMap.update((map) => markChannelOffline(map));
+    return;
+  }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
   // A started session resolves the launch carrying its correlation id (offline launches never start —
   // they reject on the launch timeout instead, since the relay can't read the opaque clientRef).

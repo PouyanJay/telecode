@@ -88,6 +88,14 @@ export const SESSION_STATUSES = [
 export const sessionStatusSchema = z.enum(SESSION_STATUSES);
 export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
 
+/**
+ * Payload for `device.presence` (relay → web): whether the daemon behind the channel is currently
+ * connected. The relay broadcasts it when a daemon registers/disconnects so a watching browser flips its
+ * live sessions to `offline_paused` (offline) or resubscribes to resume them (online) — no reload.
+ */
+export const devicePresencePayloadSchema = z.object({ online: z.boolean() });
+export type DevicePresencePayload = z.infer<typeof devicePresencePayloadSchema>;
+
 /** Payload for `agent.message` (daemon → web): a chunk of streamed agent text. */
 export const agentMessagePayloadSchema = z.object({ text: z.string() });
 export type AgentMessagePayload = z.infer<typeof agentMessagePayloadSchema>;

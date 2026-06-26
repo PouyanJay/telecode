@@ -40,6 +40,10 @@ export const MESSAGE_TYPES = [
   'session.history',
   // E2E key delivery (daemon -> web): the per-session content key, box-sealed to the browser's pubkey
   'session.key',
+  // device presence (relay -> web): the daemon behind the channel (dis)connected, so the browser can
+  // flip its live sessions to `offline_paused` and resume them on reconnect. Cleartext routing metadata
+  // the relay generates itself — it carries no session payload.
+  'device.presence',
 ] as const;
 
 export const messageTypeSchema = z.enum(MESSAGE_TYPES);

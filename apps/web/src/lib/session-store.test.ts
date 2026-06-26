@@ -1,8 +1,9 @@
 import { makeEnvelope, type SessionLaunchPayload } from '@telecode/protocol';
+import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RelayConnection, type RelayConnectionOptions } from './relay-client';
-import { connect, disconnect, launch } from './session-store';
+import { connect, disconnect, launch, sessions } from './session-store';
 
 /**
  * Phase 2 Task 11 — the launch-correlation + timeout edges deferred from Task 5 (AD-P2-9). The relay
@@ -40,6 +41,10 @@ function makeFakeConnection() {
     /** Simulate the connection re-authenticating after a dropped socket (browser auto-reconnect). */
     reconnect() {
       fireReconnect();
+    },
+    /** Simulate the relay's device.presence frame (daemon behind the channel connected/disconnected). */
+    presence(online: boolean) {
+      emit(makeEnvelope({ type: 'device.presence', userId, deviceId, payload: { online } }));
     },
     /** Simulate the daemon's `session.started` echoing a clientRef for a minted session id. */
     started(sessionId: string, clientRef?: string) {
@@ -99,6 +104,23 @@ describe('session-store launch correlation (Task 11)', () => {
     // The socket drops and the client transparently re-authenticates → the store reattaches every known
     // session (reopen = reconnect, invariant #7) so the daemon backfills their current transcripts.
     fake.reconnect();
+    expect(fake.subscribed).toEqual(['sess-1', 'sess-2']);
+  });
+
+  it('pauses live sessions when the device goes offline, resumes them when it returns (Phase 4 T3)', () => {
+    const fake = makeFakeConnection();
+    connect({ relayUrl: 'ws://x', userId, deviceId, channelToken: 't' }, fake.create);
+    fake.started('sess-1');
+    fake.started('sess-2');
+
+    // The daemon behind the channel drops: the relay signals offline → live sessions pause.
+    fake.presence(false);
+    const paused = get(sessions);
+    expect(paused.get('sess-1')?.status).toBe('offline_paused');
+    expect(paused.get('sess-2')?.status).toBe('offline_paused');
+
+    // The daemon reconnects: the relay signals online → the store resubscribes to resume (backfill).
+    fake.presence(true);
     expect(fake.subscribed).toEqual(['sess-1', 'sess-2']);
   });
 
