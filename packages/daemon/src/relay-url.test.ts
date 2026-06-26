@@ -3,14 +3,16 @@ import { describe, expect, it } from 'vitest';
 import { resolveRelayUrl } from './relay-url';
 
 /**
- * Phase 3 Task 10 — the daemon's relay URL resolution. Precedence: the `--relay-url` CLI flag overrides
- * the `TELECODE_RELAY_URL` env, which overrides the local default — so a self-hoster can point the daemon
- * at their own relay. The resolved value is validated as a ws/wss URL so a typo fails fast with a clear
- * message instead of a cryptic socket error.
+ * The daemon's relay URL resolution. Precedence: the `--relay-url` CLI flag overrides the
+ * `TELECODE_RELAY_URL` env, which overrides the default. The default targets the hosted relay so a user who
+ * runs `npx telecode` connects to the managed instance with no flags; a self-hoster points at their own
+ * relay via `--relay-url` / `TELECODE_RELAY_URL` (local dev sets the env in `scripts/run.sh`). The resolved
+ * value is validated as a ws/wss URL so a typo fails fast with a clear message instead of a cryptic socket
+ * error.
  */
 describe('resolveRelayUrl', () => {
-  it('defaults to the local relay when no flag or env is set', () => {
-    expect(resolveRelayUrl([], {})).toBe('ws://127.0.0.1:8080/ws');
+  it('defaults to the hosted relay when no flag or env is set', () => {
+    expect(resolveRelayUrl([], {})).toBe('wss://relay.telecode.io/ws');
   });
 
   it('uses TELECODE_RELAY_URL when set', () => {

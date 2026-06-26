@@ -23,6 +23,21 @@ workflows/deploy.yml` builds images, runs migrations, and rolls out on every pus
 - **The web app autoscales** (1–3 replicas) — it's stateless SSR.
 - The web image is **environment-agnostic**: all config is injected at runtime, no secrets baked in.
 
+## Fast path (one script)
+
+If you just want it deployed, do the two prerequisites below (GitHub OAuth App + Supabase URL), then run the
+bundled script in **Azure Cloud Shell** — it does steps 1–3 (provision → allowlist → build → migrate →
+roll out) in one go and prints the health URLs:
+
+```sh
+git clone https://github.com/PouyanJay/telecode.git
+cd telecode && git checkout deploy/azure-production
+bash infra/azure/deploy.sh        # prompts for: Supabase URL, GitHub Client ID, GitHub Client Secret
+```
+
+Then do the manual remainder: custom domains + TLS (§4) and, optionally, the CI/CD wiring (§5). The
+sections below are the same steps spelled out, for when you want to run or understand them individually.
+
 ## Prerequisites
 
 - `az` CLI logged in (`az login`) with rights to create resources in your subscription.
