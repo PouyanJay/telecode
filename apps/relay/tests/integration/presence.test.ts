@@ -71,6 +71,32 @@ describe('relay: device presence (Phase 4 Task 3)', () => {
     ws.close();
   });
 
+  it('drops a daemon that stops answering heartbeats and tells browsers it went offline (Phase 4 T4)', async () => {
+    // A relay with a fast heartbeat so the sweep runs within the test.
+    const beatApp = await buildRelay({
+      logger: pino({ level: 'silent' }),
+      heartbeat: { intervalMs: 40 },
+    });
+    await beatApp.listen({ port: 0, host: '127.0.0.1' });
+    const beatUrl = `ws://127.0.0.1:${(beatApp.server.address() as AddressInfo).port}/ws`;
+    const deviceId = 'device-heartbeat';
+
+    const browser = await connectBrowser(beatUrl, userId, deviceId);
+    const online = waitForEnvelope(browser, onlineFrame);
+    const daemon = await connectDaemon(beatUrl, userId, deviceId);
+    await online;
+
+    // The daemon goes silent (laptop sleep / half-open link): pause its socket so it can't pong. The
+    // connection never fires `close` on its own — only the relay's heartbeat detects it.
+    (daemon as unknown as { _socket?: { pause(): void } })._socket?.pause();
+
+    // Within a couple of sweeps the relay terminates the dead daemon and tells the browser it's offline.
+    await waitForEnvelope(browser, offlineFrame, 2000);
+
+    browser.close();
+    await beatApp.close();
+  });
+
   it('does not send a cold browser an offline frame when its daemon is already online', async () => {
     const deviceId = 'device-already-online';
     await connectDaemon(relayUrl, userId, deviceId); // daemon online first

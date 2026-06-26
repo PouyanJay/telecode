@@ -67,6 +67,14 @@ export interface RelayOptions {
    * seam (real `web-push` impl in production; a fake in tests).
    */
   readonly push?: { readonly store: PushSubscriptionStore; readonly sender: PushSender };
+  /**
+   * WebSocket keepalive (Phase 4 Task 4). The relay pings every connected peer each `intervalMs` and
+   * terminates any that didn't pong since the last round — this is how a half-open connection (laptop
+   * sleep, silent network death) is detected, since such a socket never fires `close` on its own.
+   * Terminating a dead daemon runs the normal disconnect path (browsers are told it went offline).
+   * Defaults to 30s; `intervalMs <= 0` disables it. Tests inject a short interval.
+   */
+  readonly heartbeat?: { readonly intervalMs?: number };
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -87,6 +95,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // One daemon per channel; any number of browsers watching a channel.
   const daemons = new Map<string, WebSocket>();
   const browsers = new Map<string, Set<WebSocket>>();
+  // Heartbeat bookkeeping (Phase 4 Task 4): every connected socket and whether it has ponged since the
+  // last ping round. A socket that misses a round is half-open (sleep / silent drop) and gets terminated.
+  const sockets = new Set<WebSocket>();
+  const liveness = new WeakMap<WebSocket, boolean>();
   const sessionRegistry = options.sessionRegistry;
   const authService = options.auth?.service;
   const deviceRegistry = options.deviceRegistry;
@@ -275,6 +287,32 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   await app.register(websocket);
 
+  // Keepalive sweep (Phase 4 Task 4): ping every socket; terminate any that didn't pong since the last
+  // round. Terminating a dead peer fires its `close` handler — so a dead daemon's browsers are told it
+  // went offline, exactly as a clean disconnect would. `unref` so the timer never holds the process open.
+  const heartbeatMs = options.heartbeat?.intervalMs ?? 30_000;
+  const heartbeat =
+    heartbeatMs > 0
+      ? setInterval(() => {
+          for (const ws of sockets) {
+            if (liveness.get(ws) === false) {
+              ws.terminate();
+              continue;
+            }
+            liveness.set(ws, false);
+            try {
+              ws.ping();
+            } catch {
+              ws.terminate(); // a failed ping means the socket is already gone
+            }
+          }
+        }, heartbeatMs)
+      : null;
+  heartbeat?.unref();
+  app.addHook('onClose', async () => {
+    if (heartbeat) clearInterval(heartbeat);
+  });
+
   app.get('/healthz', async () => ({ status: 'ok' }));
 
   // Device Authorization Grant endpoints — persisted, server-derived approval. Registered only when a
@@ -318,6 +356,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   app.get('/ws', { websocket: true }, (socket: WebSocket) => {
     const peer: PeerState = { role: 'unknown', channel: null, userId: null, deviceId: null };
+
+    // Heartbeat liveness: track this socket and mark it alive on every pong (the ws client auto-replies
+    // to the relay's ping). A round with no pong means a dead/half-open peer (Phase 4 Task 4).
+    sockets.add(socket);
+    liveness.set(socket, true);
+    socket.on('pong', () => liveness.set(socket, true));
+    socket.on('close', () => sockets.delete(socket));
 
     // Frame handling is async (session.* control messages await DB writes), so we chain frames into a
     // per-connection queue: each frame is fully handled before the next, preserving stream order (a
