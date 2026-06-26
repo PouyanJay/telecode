@@ -5,8 +5,11 @@
   import { goto } from '$app/navigation';
   import { Button, StatusDot } from '@telecode/ui';
 
+  import Onboarding from '$lib/components/Onboarding.svelte';
   import TopBar from '$lib/components/TopBar.svelte';
   import { launchRepo } from '$lib/launch-repo';
+  import { buildOnboardingSteps } from '$lib/onboarding';
+  import { pairingInstructions } from '$lib/pairing-instructions';
   import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
   import type { SessionState, SessionStatus } from '$lib/session';
   import { SESSION_DISPLAY } from '$lib/session-display';
@@ -66,6 +69,16 @@
     return `${Math.round(hrs / 24)} d ago`;
   }
 
+  // First-run path (T14): pair → launch. Shown when no device is paired yet; statuses derive from
+  // observable state so the stepper never lies about where the user is.
+  const onboardingSteps = $derived(
+    buildOnboardingSteps({
+      paired: device !== null,
+      hasSessions: rows.length > 0,
+      instructions: pairingInstructions,
+    }),
+  );
+
   let prompt = $state('');
   let title = $state('');
   let selectedRepoId = $state('');
@@ -122,11 +135,8 @@
 
 <main id="main" class="shell">
   {#if !device}
-    <div class="empty">
-      <p class="eyebrow">NO DEVICE PAIRED</p>
-      <h1>Pair a device to begin</h1>
-      <p class="sub">Run a daemon on your machine, then activate it here to launch and steer agents.</p>
-      <p class="cta"><a href="/activate">Activate a device →</a></p>
+    <div class="onboard-scroll">
+      <Onboarding steps={onboardingSteps} />
     </div>
   {:else}
     <aside class="rail" aria-label="Devices">
@@ -244,13 +254,11 @@
     }
   }
 
-  /* No-device empty state */
-  .empty {
+  /* No-device first-run onboarding (T14) — scrolls on short viewports, never clips. */
+  .onboard-scroll {
     grid-column: 1 / -1;
-    margin: auto;
-    max-width: 30rem;
-    padding: var(--space-16) var(--space-4);
-    text-align: center;
+    overflow-y: auto;
+    min-height: 0;
   }
   .eyebrow {
     margin: 0 0 var(--space-2);
@@ -259,24 +267,11 @@
     letter-spacing: 0.14em;
     color: var(--text-muted);
   }
-  h1 {
-    margin: 0 0 var(--space-2);
-    font-size: var(--text-xl);
-    line-height: var(--lh-xl);
-    font-weight: 600;
-  }
   .sub {
     margin: 0;
     color: var(--text-secondary);
     font-size: var(--text-base);
     line-height: var(--lh-base);
-  }
-  .cta {
-    margin: var(--space-4) 0 0;
-  }
-  .cta a {
-    color: var(--accent);
-    font-weight: 500;
   }
 
   /* Device rail */
