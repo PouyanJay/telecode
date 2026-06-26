@@ -90,6 +90,13 @@ export interface RelayOptions {
    * limiter is OFF — the echo path and the test suite are unaffected; `main.ts` turns it on for production.
    */
   readonly rateLimit?: RateLimitConfig;
+  /**
+   * Trust `X-Forwarded-For` so `request.ip` is the real client when the relay runs behind a reverse proxy
+   * / load balancer (the hosted topology). Required for per-IP rate limiting to be correct there — without
+   * it every request appears to come from the proxy and the per-IP budget collapses into one global bucket.
+   * Default false (direct connection / local dev). `main.ts` wires it from `TRUST_PROXY`.
+   */
+  readonly trustProxy?: boolean;
 }
 
 /** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
@@ -115,7 +122,7 @@ interface PeerState {
 
 export async function buildRelay(options: RelayOptions = {}): Promise<FastifyInstance> {
   const log = options.logger ?? pino({ name: 'relay' });
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, trustProxy: options.trustProxy ?? false });
 
   // One daemon per channel; any number of browsers watching a channel.
   const daemons = new Map<string, WebSocket>();

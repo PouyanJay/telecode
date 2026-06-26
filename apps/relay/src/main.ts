@@ -67,6 +67,14 @@ if (rateLimitMax !== undefined && (!Number.isInteger(rateLimitMax) || rateLimitM
     'relay: RATELIMIT_MAX is not a positive integer — using default',
   );
 }
+// Behind a reverse proxy / load balancer (the hosted topology), TRUST_PROXY=true makes request.ip the
+// real client so per-IP limiting is correct. RATELIMIT_ALLOWLIST exempts trusted IPs (the web tier's
+// egress, whose traffic aggregates every user). REDIS_URL shares the budget across relay instances.
+const trustProxy = ['1', 'true'].includes(process.env.TRUST_PROXY ?? '');
+const rateLimitAllowList = (process.env.RATELIMIT_ALLOWLIST ?? '')
+  .split(',')
+  .map((ip) => ip.trim())
+  .filter((ip) => ip.length > 0);
 const rateLimit = rateLimitDisabled
   ? undefined
   : {
@@ -74,13 +82,21 @@ const rateLimit = rateLimitDisabled
         ? { max: rateLimitMax }
         : {}),
       ...(process.env.RATELIMIT_WINDOW ? { timeWindow: process.env.RATELIMIT_WINDOW } : {}),
+      ...(process.env.REDIS_URL ? { redisUrl: process.env.REDIS_URL } : {}),
+      ...(rateLimitAllowList.length > 0 ? { allowList: rateLimitAllowList } : {}),
     };
 if (rateLimitDisabled) {
   log.warn('relay: RATELIMIT_DISABLED set — HTTP rate limiting is OFF');
 }
+if (rateLimit && !trustProxy) {
+  log.warn(
+    'relay: rate limiting is per-IP but TRUST_PROXY is off — behind a proxy set TRUST_PROXY=true so request.ip is the real client',
+  );
+}
 
 const app = await buildRelay({
   logger: log,
+  ...(trustProxy ? { trustProxy } : {}),
   ...(rateLimit ? { rateLimit } : {}),
   ...(dbHandle ? { sessionRegistry: createSessionRegistry(dbHandle) } : {}),
   ...(authEnabled && dbHandle && channelTokenSecret && serviceSecret

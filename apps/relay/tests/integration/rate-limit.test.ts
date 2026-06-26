@@ -50,4 +50,43 @@ describe('relay rate limiting (walking skeleton)', () => {
       expect(res.statusCode).toBe(200);
     }
   });
+
+  it('keys the budget by the forwarded client IP when trustProxy is on', async () => {
+    // Behind a reverse proxy every request arrives from the proxy's socket; without trustProxy the per-IP
+    // budget would collapse into one global budget for all clients. trustProxy makes `request.ip` the real
+    // client (from X-Forwarded-For), so distinct clients get independent budgets.
+    app = await buildRelay({
+      logger: pino({ level: 'silent' }),
+      trustProxy: true,
+      rateLimit: { max: 1, timeWindow: 60_000 },
+    });
+
+    const xff = (ip: string): { 'x-forwarded-for': string } => ({ 'x-forwarded-for': ip });
+    const a1 = await app.inject({ method: 'GET', url: '/healthz', headers: xff('203.0.113.1') });
+    const a2 = await app.inject({ method: 'GET', url: '/healthz', headers: xff('203.0.113.1') });
+    const b1 = await app.inject({ method: 'GET', url: '/healthz', headers: xff('203.0.113.2') });
+
+    expect(a1.statusCode).toBe(200);
+    expect(a2.statusCode).toBe(429); // same client, over budget
+    expect(b1.statusCode).toBe(200); // different client, own budget
+  });
+
+  it('never limits an allowlisted client IP (the trusted web tier)', async () => {
+    // The web tier calls server-to-server endpoints for every user, so its egress IP aggregates all
+    // traffic and must be exempt or it would throttle the whole user base.
+    app = await buildRelay({
+      logger: pino({ level: 'silent' }),
+      trustProxy: true,
+      rateLimit: { max: 1, timeWindow: 60_000, allowList: ['203.0.113.9'] },
+    });
+
+    for (let i = 0; i < 4; i += 1) {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/healthz',
+        headers: { 'x-forwarded-for': '203.0.113.9' },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+  });
 });

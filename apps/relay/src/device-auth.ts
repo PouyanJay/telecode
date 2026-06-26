@@ -9,6 +9,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { constantTimeEquals } from './auth/secret-compare';
+import { PAIRING_CODE_RATE_LIMIT, PAIRING_POLL_RATE_LIMIT } from './rate-limit';
 import { type DeviceRegistry } from './registry/device-registry';
 
 /**
@@ -168,24 +169,32 @@ export function registerDeviceAuthRoutes(
   service: DeviceAuthService,
   serviceSecret: string,
 ): void {
-  app.post('/device/code', async (request, reply) => {
-    const parsed = deviceCodeRequestSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_request' });
-    }
-    return service.requestCode({
-      ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
-      ...(parsed.data.public_key !== undefined ? { publicKey: parsed.data.public_key } : {}),
-    });
-  });
+  app.post(
+    '/device/code',
+    { config: { rateLimit: PAIRING_CODE_RATE_LIMIT } },
+    async (request, reply) => {
+      const parsed = deviceCodeRequestSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_request' });
+      }
+      return service.requestCode({
+        ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+        ...(parsed.data.public_key !== undefined ? { publicKey: parsed.data.public_key } : {}),
+      });
+    },
+  );
 
-  app.post('/device/token', async (request, reply) => {
-    const parsed = tokenRequestSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_request' });
-    }
-    return service.poll(parsed.data.device_code);
-  });
+  app.post(
+    '/device/token',
+    { config: { rateLimit: PAIRING_POLL_RATE_LIMIT } },
+    async (request, reply) => {
+      const parsed = tokenRequestSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_request' });
+      }
+      return service.poll(parsed.data.device_code);
+    },
+  );
 
   app.post('/device/approve', async (request, reply) => {
     const secret = request.headers['x-telecode-service-secret'];
