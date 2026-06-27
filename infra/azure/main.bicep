@@ -1,8 +1,9 @@
 // Telecode production infrastructure on Azure Container Apps.
 //
 // Provisions, in one resource group: an Azure Container Registry, a Container Apps Environment (with Log
-// Analytics), Azure Cache for Redis, a user-assigned managed identity (with AcrPull), and the two apps —
-// the relay (relay.telecode.io, single replica) and the web app (app.telecode.io, autoscaling).
+// Analytics), a user-assigned managed identity (with AcrPull), and the two apps — the relay
+// (relay.telecode.io, single replica) and the web app (app.telecode.io, autoscaling). No Redis: the relay's
+// in-memory rate-limit store is equivalent to a shared one at a single replica (see the note below).
 //
 // Postgres is NOT provisioned here — telecode uses managed Supabase; pass its connection string as the
 // `databaseUrl` secure parameter.
@@ -67,7 +68,6 @@ param githubClientSecret string = ''
 
 var tags = { project: 'telecode', managedBy: 'bicep' }
 var acrName = toLower(take('${namePrefix}acr${uniqueString(resourceGroup().id)}', 50))
-var redisName = '${namePrefix}-redis-${uniqueString(resourceGroup().id)}'
 
 // --- Observability + Container Apps Environment ----------------------------------------------------------
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -121,19 +121,9 @@ resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// --- Redis (rate-limit store for the relay) --------------------------------------------------------------
-resource redis 'Microsoft.Cache/redis@2024-03-01' = {
-  name: redisName
-  location: location
-  tags: tags
-  properties: {
-    sku: { name: 'Basic', family: 'C', capacity: 0 }
-    enableNonSslPort: false
-    minimumTlsVersion: '1.2'
-  }
-}
-
-var redisUrl = 'rediss://:${redis.listKeys().primaryKey}@${redis.properties.hostName}:${redis.properties.sslPort}'
+// No Redis: the relay is a single replica, so its in-memory rate-limit store is equivalent to a shared one
+// (Redis only matters across multiple relay instances — which also need a routing backplane, future work).
+// The classic Azure Cache for Redis is being retired; re-add via Azure Managed Redis if the relay ever scales.
 
 var registries = [
   {
@@ -168,7 +158,6 @@ resource relay 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'relay-service-secret', value: relayServiceSecret }
         { name: 'token-encryption-key', value: tokenEncryptionKey }
         { name: 'vapid-private-key', value: vapidPrivateKey }
-        { name: 'redis-url', value: redisUrl }
       ]
     }
     template: {
@@ -194,7 +183,6 @@ resource relay 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'RELAY_SERVICE_SECRET', secretRef: 'relay-service-secret' }
             { name: 'TOKEN_ENCRYPTION_KEY', secretRef: 'token-encryption-key' }
             { name: 'VAPID_PRIVATE_KEY', secretRef: 'vapid-private-key' }
-            { name: 'REDIS_URL', secretRef: 'redis-url' }
           ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/healthz', port: 8080 }, initialDelaySeconds: 5, periodSeconds: 15 }

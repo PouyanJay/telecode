@@ -44,7 +44,7 @@ VAPID_PRIVATE_KEY="$(echo "$VAPID_JSON" | jq -r .privateKey)"
 
 # --- 1. Resource group + infrastructure -----------------------------------------------------------------
 az group create -n "$RG" -l "$LOC" -o none
-echo "▸ Provisioning ACR, environment, Redis, and the web + relay apps (a few minutes)…"
+echo "▸ Provisioning ACR, environment, and the web + relay apps (a few minutes)…"
 az deployment group create -g "$RG" -n telecode -f infra/azure/main.bicep \
   -p @infra/azure/main.parameters.json \
   -p vapidPublicKey="$VAPID_PUBLIC_KEY" githubClientId="$GITHUB_CLIENT_ID" \

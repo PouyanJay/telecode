@@ -12,8 +12,9 @@ This is the production runbook for hosting telecode's control plane on **Azure C
 > `npx telecode`; Azure only hosts the relay + web. Execution stays local — that's the product promise.
 
 The IaC (`infra/azure/main.bicep`) provisions: an Azure Container Registry, a Container Apps Environment
-(+ Log Analytics), Azure Cache for Redis, a managed identity (with AcrPull), and the two apps. `.github/
-workflows/deploy.yml` builds images, runs migrations, and rolls out on every push to `main`.
+(+ Log Analytics), a managed identity (with AcrPull), and the two apps. `.github/workflows/deploy.yml`
+builds images, runs migrations, and rolls out on every push to `main`. (No Redis — the single-replica relay
+uses its in-memory rate-limit store; a shared store only matters across multiple instances.)
 
 ## Architecture note (read once)
 
