@@ -118,8 +118,9 @@ dist
 # Sveltekit cache directory
 .svelte-kit/
 
-# SvelteKit adapter-static output (apps/site marketing build)
+# SvelteKit adapter output (apps/site static marketing build; apps/web adapter-node server build)
 apps/site/build/
+apps/web/build/
 
 # vitepress build output
 **/.vitepress/dist

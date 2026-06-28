@@ -2,12 +2,14 @@
  * Resolve the relay WebSocket URL the daemon dials out to. Precedence (highest first):
  *   1. the `--relay-url <url>` / `--relay-url=<url>` CLI flag,
  *   2. the `TELECODE_RELAY_URL` environment variable,
- *   3. the local default (`ws://127.0.0.1:8080/ws`).
+ *   3. the default — the hosted relay (`wss://relay.telecode.io/ws`).
  *
- * The result is validated as a `ws://`/`wss://` URL so a self-hoster's typo fails immediately with a clear
- * message instead of a cryptic socket error (and so the HTTP base derived from it stays well-formed).
+ * The default targets the managed instance so `npx telecode` connects with no configuration. Self-hosters
+ * point at their own relay via the flag or env (local dev sets `TELECODE_RELAY_URL` in `scripts/run.sh`).
+ * The result is validated as a `ws://`/`wss://` URL so a typo fails immediately with a clear message
+ * instead of a cryptic socket error (and so the HTTP base derived from it stays well-formed).
  */
-const DEFAULT_RELAY_URL = 'ws://127.0.0.1:8080/ws';
+const DEFAULT_RELAY_URL = 'wss://relay.telecode.io/ws';
 const FLAG = '--relay-url';
 
 /** Read `--relay-url` from argv: `provided` distinguishes "absent" from "present with no value". */

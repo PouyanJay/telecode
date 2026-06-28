@@ -1,0 +1,77 @@
+name: Deploy (Azure)
+
+# Builds the web + relay images in ACR, runs DB migrations against Supabase, then rolls out both Azure
+# Container Apps. Auth is GitHub OIDC → Azure (no stored password). See docs/deploy-azure.md for the
+# one-time setup (Entra app + federated credential + role assignment + the repo secrets/vars below).
+#
+# Manual-only for now (run it from the Actions tab). Once the Azure OIDC secrets exist (docs/deploy-azure.md
+# §5), add a `push:` trigger here to auto-deploy on merge to main:
+#   on:
+#     push: { branches: [main] }
+#     workflow_dispatch:
+
+on:
+  workflow_dispatch:
+
+# Avoid overlapping deploys racing the same apps.
+concurrency:
+  group: deploy-azure
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # OIDC token for azure/login
+  contents: read
+
+env:
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  RELAY_APP: ${{ vars.RELAY_APP_NAME }}
+  WEB_APP: ${{ vars.WEB_APP_NAME }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Server-side builds in ACR (no local docker needed); both Dockerfiles build from the repo root.
+      - name: Build relay image
+        run: az acr build -r "$ACR_NAME" -t "telecode-relay:$IMAGE_TAG" -t "telecode-relay:latest" -f apps/relay/Dockerfile .
+
+      - name: Build web image
+        run: az acr build -r "$ACR_NAME" -t "telecode-web:$IMAGE_TAG" -t "telecode-web:latest" -f apps/web/Dockerfile .
+
+      # Gate: migrations must succeed before either app rolls out. Idempotent (drizzle-tracked).
+      - name: Run database migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm --filter @telecode/relay db:migrate
+
+      - name: Roll out relay
+        run: |
+          ACR_SERVER="$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)"
+          az containerapp update -n "$RELAY_APP" -g "$RESOURCE_GROUP" \
+            --image "$ACR_SERVER/telecode-relay:$IMAGE_TAG"
+
+      - name: Roll out web
+        run: |
+          ACR_SERVER="$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)"
+          az containerapp update -n "$WEB_APP" -g "$RESOURCE_GROUP" \
+            --image "$ACR_SERVER/telecode-web:$IMAGE_TAG"
