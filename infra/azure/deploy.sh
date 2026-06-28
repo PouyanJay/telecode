@@ -66,10 +66,11 @@ az acr build -r "$ACR" -t "telecode-relay:$TAG" -f apps/relay/Dockerfile . -o no
 az acr build -r "$ACR" -t "telecode-web:$TAG"   -f apps/web/Dockerfile . -o none
 
 # --- 4. Migrate the database (before serving) -----------------------------------------------------------
+# Use `npx pnpm` rather than `corepack enable`: restricted shells (e.g. Azure Cloud Shell) can't symlink
+# pnpm into a system bin dir, so `corepack enable` fails with EACCES.
 echo "▸ Running database migrations against Supabase…"
-corepack enable
-pnpm install --frozen-lockfile --filter "@telecode/relay..."
-DATABASE_URL="$DATABASE_URL" pnpm --filter @telecode/relay db:migrate
+npx --yes pnpm@9 install --frozen-lockfile --filter "@telecode/relay..."
+DATABASE_URL="$DATABASE_URL" npx --yes pnpm@9 --filter @telecode/relay db:migrate
 
 # --- 5. Roll out the real images ------------------------------------------------------------------------
 az containerapp update -n telecode-relay -g "$RG" --image "$ACR_SERVER/telecode-relay:$TAG" -o none
