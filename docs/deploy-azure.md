@@ -43,7 +43,11 @@ sections below are the same steps spelled out, for when you want to run or under
 
 - `az` CLI logged in (`az login`) with rights to create resources in your subscription.
 - The Azure Bicep extension (`az bicep install`).
-- Your Supabase **production** `DATABASE_URL`.
+- Your Supabase **production** `DATABASE_URL` — use the **Session pooler** URI (IPv4; Azure can't reach the
+  IPv6-only direct endpoint) and end it with **`?sslmode=no-verify`**. (Newer `pg` treats `sslmode=require`
+  as strict `verify-full`, and Supabase's pooler cert isn't in Node's default CA bundle → connections fail
+  with `self-signed certificate in certificate chain`. `no-verify` keeps TLS encryption but skips chain
+  validation. Hardening: pin Supabase's CA cert and use `verify-full` instead.)
 - A **GitHub OAuth App** — github.com → Settings → Developer settings → OAuth Apps → New:
   - Homepage `https://app.telecode.io`, Authorization callback `https://app.telecode.io/auth/github/callback`.
   - Note the **Client ID** and generate a **Client secret**.
@@ -103,7 +107,8 @@ az containerapp update -n telecode-web   -g "$RG" --image "$SERVER/telecode-web:
 ## 3. Run database migrations (against Supabase)
 
 ```sh
-DATABASE_URL="$DATABASE_URL" pnpm --filter @telecode/relay db:migrate
+# In Azure Cloud Shell use `npx pnpm@9` (it can't `corepack enable` — no write to /usr/bin):
+DATABASE_URL="$DATABASE_URL" npx --yes pnpm@9 --filter @telecode/relay db:migrate
 ```
 
 Idempotent (drizzle-tracked) — safe to re-run. After this, hit the default FQDNs to confirm health:
