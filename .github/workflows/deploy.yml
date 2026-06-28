@@ -4,11 +4,13 @@ name: Deploy (Azure)
 # Container Apps. Auth is GitHub OIDC → Azure (no stored password). See docs/deploy-azure.md for the
 # one-time setup (Entra app + federated credential + role assignment + the repo secrets/vars below).
 #
-# To make deploys manual-only, delete the `push:` trigger and keep `workflow_dispatch`.
+# Manual-only for now (run it from the Actions tab). Once the Azure OIDC secrets exist (docs/deploy-azure.md
+# §5), add a `push:` trigger here to auto-deploy on merge to main:
+#   on:
+#     push: { branches: [main] }
+#     workflow_dispatch:
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 # Avoid overlapping deploys racing the same apps.
