@@ -28,7 +28,8 @@ under **Unreleased**; versioned sections will be added as releases are cut.
 - **Rich transcript rendering** — a git diff viewer, offline syntax highlighting, and collapsible tool
   logs.
 - **`telecode doctor`** diagnostics and a one-line installer for the daemon.
-- **Marketing site** (`apps/site`) — a prerendered landing page describing telecode.
+- **Marketing site** — a prerendered landing page describing telecode (`telecode.io`), maintained in a
+  separate repository.
 - **Hosted-relay hardening** — per-IP HTTP rate limiting (Redis-backed, in-memory fallback), tighter
   limits on the public pairing endpoints, a request body-size cap, a per-IP WebSocket connection cap, and
   device-pairing brute-force lockout. Safe to leave a relay running publicly.

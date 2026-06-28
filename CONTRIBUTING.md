@@ -24,7 +24,6 @@ telecode is a TypeScript monorepo (pnpm workspaces + Turborepo):
 | Path                | What it is                                                                 |
 | ------------------- | -------------------------------------------------------------------------- |
 | `apps/web`          | The SvelteKit PWA — the product UI (the mobile story; no native app)       |
-| `apps/site`         | The prerendered marketing/landing site                                     |
 | `apps/relay`        | The Node + Fastify + `ws` relay — the outbound-only control plane / broker |
 | `packages/daemon`   | The Node + Claude Agent SDK daemon that runs on your machine               |
 | `packages/protocol` | Shared zod schemas + crypto helpers — the wire contract                    |

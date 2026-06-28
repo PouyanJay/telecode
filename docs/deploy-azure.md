@@ -5,8 +5,8 @@ This is the production runbook for hosting telecode's control plane on **Azure C
 - **Web app** (`apps/web`, the SvelteKit PWA) → `https://app.telecode.io`
 - **Relay** (`apps/relay`, the Fastify + ws broker) → `wss://relay.telecode.io`
 
-**Postgres** is your **managed Supabase** (not provisioned here). The **marketing site** (`apps/site`,
-`telecode.io`) is deployed separately (e.g. Vercel) and is out of scope for this guide.
+**Postgres** is your **managed Supabase** (not provisioned here). The **marketing site** (`telecode.io`)
+lives in its own repository and is deployed separately (e.g. Vercel) — out of scope for this guide.
 
 > **Remember:** agents do not run in the cloud. The daemon runs on each user's own machine via
 > `npx @telecode/cli`; Azure only hosts the relay + web. Execution stays local — that's the product promise.
