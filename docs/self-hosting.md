@@ -66,7 +66,7 @@ The relay is the only publicly reachable piece, so it ships safe to leave runnin
 ## 3. Point your daemon + browser at it
 
 - **Daemon (the laptop running agents):** point it at your relay with the `--relay-url` flag, e.g.
-  `npx telecode --relay-url wss://relay.example.com/ws` (or set `TELECODE_RELAY_URL`; the flag wins). The
+  `npx @telecode/cli --relay-url wss://relay.example.com/ws` (or set `TELECODE_RELAY_URL`; the flag wins). The
   URL must be `ws://` or `wss://`. On first run it prints a pairing code; enter it in the web app to bind
   the device.
 - **Web app (the PWA):** set `PUBLIC_TELECODE_RELAY_URL` to the same relay, and — if you enabled push —

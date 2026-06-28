@@ -9,7 +9,7 @@ This is the production runbook for hosting telecode's control plane on **Azure C
 `telecode.io`) is deployed separately (e.g. Vercel) and is out of scope for this guide.
 
 > **Remember:** agents do not run in the cloud. The daemon runs on each user's own machine via
-> `npx telecode`; Azure only hosts the relay + web. Execution stays local — that's the product promise.
+> `npx @telecode/cli`; Azure only hosts the relay + web. Execution stays local — that's the product promise.
 
 The IaC (`infra/azure/main.bicep`) provisions: an Azure Container Registry, a Container Apps Environment
 (+ Log Analytics), a managed identity (with AcrPull), and the two apps. `.github/workflows/deploy.yml`
@@ -171,7 +171,7 @@ trigger in `deploy.yml` to make deploys manual-only.)
 
 1. Browse `https://app.telecode.io` → the sign-in shows **"Continue with GitHub"** → GitHub OAuth →
    authenticated dashboard.
-2. On a laptop: `npx telecode --relay-url wss://relay.telecode.io/ws` → it prints a pairing code → enter it
+2. On a laptop: `npx @telecode/cli --relay-url wss://relay.telecode.io/ws` → it prints a pairing code → enter it
    in the web app → the device shows online.
 3. Launch a session, watch output stream, and approve a tool call — this proves the full wss routing path
    (browser ↔ relay ↔ daemon) end-to-end.

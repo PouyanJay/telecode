@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 /**
  * Packaging guards for the `telecode` CLI wiring (Phase 4 T13). These lock the install path that makes
- * `npx telecode` / a one-line installer work: a `bin` that exposes the `telecode` command, a runnable
+ * `npx @telecode/cli` / a one-line installer work: a `bin` that exposes the `telecode` command, a runnable
  * launcher shim, `tsx` as a runtime dependency (the daemon ships as TypeScript, no build step — mirroring
  * the relay), and an end-user installer script. We do not publish here (A5); these just keep the wiring
  * honest so a regression can't silently break the published command.

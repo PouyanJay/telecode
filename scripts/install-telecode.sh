@@ -8,13 +8,13 @@
 # runs Claude Code agents locally and dials OUT to the relay — nothing ever reaches into your machine.
 # Self-contained on purpose (no repo checkout needed): safe to pipe straight from curl.
 #
-# NOTE: telecode is not yet published to npm — see docs/publishing.md for the maintainer publish runbook.
-# Once published, this script works as-is.
+# The published package is `@telecode/cli`; its bin is the `telecode` command. See docs/publishing.md
+# for the maintainer publish runbook.
 
 set -euo pipefail
 
 MIN_NODE_MAJOR=22
-PACKAGE="telecode"
+PACKAGE="@telecode/cli"
 
 # Colors only when stdout is a TTY (a piped install stays plain).
 if [ -t 1 ]; then

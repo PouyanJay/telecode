@@ -9,7 +9,7 @@ import { buildOnboardingSteps } from './onboarding';
  * directly.
  */
 const instructions = { command: 'make run', codeLocation: '.run-state/daemon.log' } as const;
-const prodInstructions = { command: 'npx telecode', codeLocation: null } as const;
+const prodInstructions = { command: 'npx @telecode/cli', codeLocation: null } as const;
 
 describe('buildOnboardingSteps', () => {
   it('starts on the pair step before a device is paired', () => {
@@ -43,7 +43,7 @@ describe('buildOnboardingSteps', () => {
       hasSessions: false,
       instructions: prodInstructions,
     })[0];
-    expect(prod?.command).toBe('npx telecode');
+    expect(prod?.command).toBe('npx @telecode/cli');
     expect(prod?.codeLocation).toBeNull();
   });
 

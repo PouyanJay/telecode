@@ -69,7 +69,7 @@ export const siteContent: SiteContent = {
   tagline: 'Run Claude Code agents on your own machine — drive them from any browser.',
   subhead:
     'telecode is an open-source, self-hostable command center for Claude Code agents. Launch, watch, and steer agents that run on your hardware, from your phone or laptop — your code never leaves your machine.',
-  installCommand: 'npx telecode',
+  installCommand: 'npx @telecode/cli',
   capabilities: [
     {
       id: 'open-source',
@@ -97,7 +97,7 @@ export const siteContent: SiteContent = {
       stepNumber: 1,
       title: 'Install on your machine',
       body: 'Run one command where your agents should work. The daemon dials out to the relay — nothing ever reaches into your laptop.',
-      command: 'npx telecode',
+      command: 'npx @telecode/cli',
     },
     {
       stepNumber: 2,

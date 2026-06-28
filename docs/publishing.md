@@ -1,9 +1,17 @@
 # Publishing the `telecode` CLI
 
-This is the maintainer runbook for shipping the daemon to npm so that `npx telecode` and the one-line
-installer work on any machine. **telecode is not published yet** — the wiring is in place
-(`packages/daemon` exposes a `telecode` bin, ships its TypeScript source, and carries `tsx` as a runtime
-dependency), but the actual publish is deferred until the npm name and account are settled.
+This is the maintainer runbook for shipping the daemon to npm so that `npx @telecode/cli` and the
+one-line installer work on any machine.
+
+**Status: published.** The CLI is live on npm as **`@telecode/cli`** and the wire contract as
+**`@telecode/protocol`**. The installed binary is still the `telecode` command (the `bin` name is
+independent of the package name), so `npm i -g @telecode/cli` gives you a `telecode` command, and the
+`curl | sh` installer hides the scope entirely.
+
+> **Why `@telecode/cli` and not bare `telecode`?** The unscoped `telecode` name on npm is owned by an
+> unrelated, abandoned 2017 project, so we can't publish under it. We own the **`@telecode` org**, so
+> scoped names are ours and can't be squatted. If the bare name is ever transferred to us, we can
+> republish there and keep `@telecode/cli` as an alias.
 
 ## What's already wired
 
@@ -16,44 +24,72 @@ dependency), but the actual publish is deferred until the npm name and account a
 - **Publish metadata is complete** on both `packages/daemon` and `packages/protocol`: `license`
   (`AGPL-3.0-only`), `repository` (with `directory`), `homepage`, `bugs`, `author`, `keywords`, `engines`
   (`node >=22`), and `publishConfig.access: public`.
-- **Dry-run verified.** With `private` temporarily disabled, `pnpm --filter @telecode/protocol publish
---dry-run` and `pnpm --filter @telecode/daemon publish --dry-run` both succeed and produce clean tarballs
-  (pnpm rewrites the `workspace:*` protocol dependency to a real version range automatically). The packages
-  keep `private: true` in the repo as the accidental-publish guard until release.
 - **Installer** — `scripts/install-telecode.sh` is the `curl | sh` entry point (checks Node ≥ 22, then
-  `npm install -g telecode`). It is self-contained so it can be piped straight from curl.
+  `npm install -g @telecode/cli`). It is self-contained so it can be piped straight from curl.
 
-## The publish step (when ready)
+## The repo keeps the publish manifest reverted
 
-1. **Pick the npm name + account.** The command is `telecode`, so the published package should be named
-   `telecode` (not the internal `@telecode/daemon`). Reserve the name under the project's npm org.
-2. **Resolve the workspace dependency.** The daemon imports `@telecode/protocol` (a `workspace:*`
-   dependency). A standalone publish needs that resolved one of two ways:
-   - **Publish `@telecode/protocol` publicly** (recommended): set it `private: false`, give it a real
-     version, `npm publish --access public`, then have the daemon depend on the published version range.
-   - **Bundle it** into the daemon publish (e.g. via `bundledDependencies` or a bundler) if keeping
-     protocol unpublished is preferred.
-3. **Flip the daemon package for publish:** set `"name": "telecode"`, `"private": false`, and a real
-   `"version"`. (The rest of the manifest — `bin`, `files`, `tsx` runtime dep, and all the publish metadata
-   above — is already in place.) Note the daemon is referenced internally as `@telecode/daemon` by the
-   relay and web `devDependencies`; renaming it to `telecode` for publish means doing so as a release-time
-   step (or updating those references), so this flip is deliberately not committed to `main`.
-4. **Publish:** `pnpm --filter telecode publish --access public` (after `pnpm install` and a green
-   `pnpm typecheck && pnpm lint && pnpm test`). Use `pnpm publish`, not bare `npm publish`, so the
-   `workspace:*` protocol dependency is rewritten to the published version.
-5. **Host the installer:** serve `scripts/install-telecode.sh` at `https://telecode.io/install.sh`
+Both packages stay `private: true` with `version: 0.0.0` on `main`, and the daemon keeps its internal
+name `@telecode/daemon` (the relay and web reference it under that name). The publish-time manifest
+changes are **deliberately not committed** — they're applied locally, used to publish, then reverted.
+This keeps `main` clean and acts as an accidental-publish guard.
+
+## Auth: a bypass-2FA token
+
+npm requires 2FA to publish to the public registry. Account 2FA via a **security key** can't produce
+the rotating OTP the CLI needs, so publishing uses a **granular access token** instead:
+
+1. npmjs.com → **Access Tokens** → **Generate New Token** → Granular (or Classic → Automation).
+2. **Read and write** permission, scoped to the **`@telecode`** org/packages, and **Bypass two-factor
+   authentication (2FA)** checked.
+3. Store it in `~/.npmrc` (never in the repo or `.env` — npm only reads `.npmrc`):
+   ```sh
+   npm config set //registry.npmjs.org/:_authToken=npm_YOUR_TOKEN_HERE
+   ```
+
+## The publish step
+
+Run from a green tree (`pnpm typecheck && pnpm lint && pnpm test`). Publish **protocol first** — the
+daemon depends on it, and `pnpm publish` rewrites the `workspace:*` dependency to the published version.
+
+1. **Bump + unguard `@telecode/protocol`:** set `private: false` and a real `version` (e.g. `0.1.0`).
+   ```sh
+   pnpm --filter @telecode/protocol publish --access public --no-git-checks
+   ```
+   (`--no-git-checks` because the temporary manifest edits leave the tree dirty.)
+2. **Flip the daemon for publish:** in `packages/daemon/package.json` set `"name": "@telecode/cli"`,
+   `"private": false`, and the same `"version"`. Leave the `@telecode/protocol` dependency as
+   `workspace:*` — pnpm rewrites it to the published version on pack.
+   ```sh
+   cd packages/daemon && pnpm publish --access public --no-git-checks
+   ```
+   Sanity-check the rewrite before/after with `pnpm pack` and inspect the packed `package.json`
+   `dependencies` — `@telecode/protocol` must be a real version, never `workspace:*`.
+3. **Revert the manifest edits** so `main` stays clean:
+   ```sh
+   git checkout packages/protocol/package.json packages/daemon/package.json
+   ```
+4. **Host the installer:** serve `scripts/install-telecode.sh` at `https://telecode.io/install.sh`
    so `curl -fsSL https://telecode.io/install.sh | bash` works.
-6. **Verify on a clean machine:** `npx telecode doctor` (preflight) and `npx telecode` (pairing) with no
-   repo checkout.
+5. **Verify on a clean machine / empty dir** (npm's edge may cache a stale 404 on a brand-new package
+   for a few minutes — query the version-specific manifest, e.g. `npm view @telecode/cli@0.1.0`, to
+   confirm the publish landed):
+   ```sh
+   npm install -g @telecode/cli
+   telecode doctor   # preflight: Node, API key, pairing, relay reachability
+   ```
 
-## Install (post-publish)
+## Install (for users)
 
 ```sh
-# one-liner
+# one-liner (once telecode.io/install.sh is hosted)
 curl -fsSL https://telecode.io/install.sh | bash
 
 # or directly
-npm install -g telecode
+npm install -g @telecode/cli
 telecode doctor   # preflight: Node, API key, pairing, relay reachability
 telecode          # pair this machine, then control it from any browser
+
+# or run without installing
+npx @telecode/cli
 ```

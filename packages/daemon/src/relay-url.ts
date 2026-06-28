@@ -4,7 +4,7 @@
  *   2. the `TELECODE_RELAY_URL` environment variable,
  *   3. the default — the hosted relay (`wss://relay.telecode.io/ws`).
  *
- * The default targets the managed instance so `npx telecode` connects with no configuration. Self-hosters
+ * The default targets the managed instance so `npx @telecode/cli` connects with no configuration. Self-hosters
  * point at their own relay via the flag or env (local dev sets `TELECODE_RELAY_URL` in `scripts/run.sh`).
  * The result is validated as a `ws://`/`wss://` URL so a typo fails immediately with a clear message
  * instead of a cryptic socket error (and so the HTTP base derived from it stays well-formed).

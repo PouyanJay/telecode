@@ -13,7 +13,7 @@ import { createGitRepoManager } from './sessions/repo-manager';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
 
 /**
- * Daemon entry point (`npx telecode`). On first run it pairs this device (prints a code to enter in the
+ * Daemon entry point (`npx @telecode/cli`). On first run it pairs this device (prints a code to enter in the
  * web app), generates an X25519 keypair, and saves credentials to `~/.telecode/credentials.json`. On
  * later runs it loads the saved token and reconnects — no re-pairing.
  */
