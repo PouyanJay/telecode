@@ -22,10 +22,10 @@ test('a signed-in user activates a device with its pairing code', async ({ page,
   await expect(page).toHaveURL(/\/activate$/);
 
   // The pairing instruction is environment-aware: a dev build (this suite runs against `vite dev`)
-  // points at `make run` and the daemon log, never the not-yet-published `npx telecode`.
+  // points at `make run` and the daemon log, never the published `npx @telecode/cli`.
   await expect(page.getByRole('main')).toContainText('make run');
   await expect(page.getByRole('main')).toContainText('.run-state/daemon.log');
-  await expect(page.getByRole('main')).not.toContainText('npx telecode');
+  await expect(page.getByRole('main')).not.toContainText('npx @telecode/cli');
 
   await page.getByLabel('Pairing code').fill(user_code);
   await page.getByRole('button', { name: 'Activate device' }).click();

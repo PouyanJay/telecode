@@ -2,7 +2,7 @@
  * The first-run onboarding model (Phase 4 T14): the ordered path a signed-in user walks to their first
  * remote launch — pair a machine, then launch a session. Pure over observable state so the `Onboarding`
  * stepper stays a thin renderer; exactly one step is `current` at a time, and the pair step carries the
- * environment-aware command (dev `make run` vs prod `npx telecode`) so the screen never lies about how to
+ * environment-aware command (dev `make run` vs prod `npx @telecode/cli`) so the screen never lies about how to
  * start the daemon.
  */
 

@@ -5,7 +5,7 @@ import { resolveRelayUrl } from './relay-url';
 /**
  * The daemon's relay URL resolution. Precedence: the `--relay-url` CLI flag overrides the
  * `TELECODE_RELAY_URL` env, which overrides the default. The default targets the hosted relay so a user who
- * runs `npx telecode` connects to the managed instance with no flags; a self-hoster points at their own
+ * runs `npx @telecode/cli` connects to the managed instance with no flags; a self-hoster points at their own
  * relay via `--relay-url` / `TELECODE_RELAY_URL` (local dev sets the env in `scripts/run.sh`). The resolved
  * value is validated as a ws/wss URL so a typo fails fast with a clear message instead of a cryptic socket
  * error.
