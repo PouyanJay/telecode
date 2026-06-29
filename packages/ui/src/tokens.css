@@ -32,6 +32,7 @@
   --accent-hover: #f0b257;
   --accent-press: #d4922f;
   --accent-soft: #16140d;
+  --accent-line: rgba(232, 163, 61, 0.4);
   --accent-ring: #e8a33d;
 
   /* Status — muted, reserved meanings (dot + UPPERCASE MONO label, never a saturated pill) */
@@ -138,6 +139,7 @@
   --accent-hover: #a86f0a;
   --accent-press: #8a5b08;
   --accent-soft: #fbf2dd;
+  --accent-line: rgba(200, 134, 15, 0.4);
   --text-on-accent: #ffffff;
   --success: #3f9d76;
   --warning: #bb8a36;

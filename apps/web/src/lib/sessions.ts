@@ -1,11 +1,11 @@
-import { type Envelope, type SessionStatusName } from '@telecode/protocol';
+import { type Envelope } from '@telecode/protocol';
 
 import { applyEnvelope, initialSessionState, type SessionState } from './session';
 
 /**
  * The browser watches a device's whole channel, so it receives every session's frames; this is the live
  * per-session state, demultiplexed by `session_id`. Pure logic (no Svelte/DOM) so it unit-tests directly;
- * the reactive store in `session-store.ts` wraps it.
+ * the reactive store in `session-store.ts` wraps it. Dashboard bucketing/tallies live in `session-groups.ts`.
  */
 export type SessionMap = ReadonlyMap<string, SessionState>;
 
@@ -44,20 +44,4 @@ export function markChannelOffline(map: SessionMap): SessionMap {
     }
   }
   return changed ? next : map;
-}
-
-/**
- * Dashboard sort priority: a blocked session ("awaiting input") is the loudest signal and sorts to the
- * top; live work next; everything terminal/idle last. Ties break on recency at the call site.
- */
-export function statusPriority(status: SessionStatusName | 'idle'): number {
-  switch (status) {
-    case 'awaiting_input':
-      return 0;
-    case 'running':
-    case 'starting':
-      return 1;
-    default:
-      return 2; // done · error · offline_paused · idle
-  }
 }

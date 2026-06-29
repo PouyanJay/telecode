@@ -17,7 +17,7 @@
   <title>Activate a device · telecode</title>
 </svelte:head>
 
-<main id="main" class="wrap">
+<div class="wrap">
   <section class="panel" aria-labelledby="activate-title">
     <p class="eyebrow">PAIR A DEVICE</p>
     <h1 id="activate-title">Activate a device</h1>
@@ -71,11 +71,12 @@
       <p class="back"><a href="/">Back to sessions</a></p>
     {/if}
   </section>
-</main>
+</div>
 
 <style>
   .wrap {
-    min-height: 100dvh;
+    height: 100%;
+    overflow-y: auto;
     display: grid;
     place-items: center;
     padding: var(--space-6);
