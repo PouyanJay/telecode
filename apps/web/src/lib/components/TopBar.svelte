@@ -1,6 +1,6 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
-  import { Button, StatusDot } from '@telecode/ui';
+  import { BrandLogo, Button, StatusDot } from '@telecode/ui';
 
   import type { Tone } from '$lib/session-display';
   import type { ConnectionState } from '$lib/session-store';
@@ -32,8 +32,7 @@
 
 <header class="topbar hairline-b">
   <a class="brand" href="/">
-    <span class="mark" aria-hidden="true"></span>
-    <span class="name">telecode</span>
+    <BrandLogo size={18} />
   </a>
 
   <div class="right">
@@ -60,28 +59,14 @@
     background: var(--surface);
   }
   .brand {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: var(--space-2);
-    font-weight: 600;
-    color: var(--text);
     text-decoration: none;
     border-radius: var(--radius-sm);
   }
   .brand:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--focus-ring);
-  }
-  .mark {
-    width: 11px;
-    height: 11px;
-    flex: none;
-    border-radius: var(--radius-sm);
-    background: var(--accent);
-  }
-  .name {
-    font-family: var(--font-mono);
-    letter-spacing: 0.02em;
   }
   .right {
     display: flex;
