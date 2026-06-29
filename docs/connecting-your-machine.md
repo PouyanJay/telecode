@@ -15,7 +15,7 @@ device) — and telecode binds them together in a way the client can't fake.
 flowchart LR
     U["👤 You<br/>signed in (GitHub OAuth)"]
     DEV["💻 Your machine<br/>the daemon, a paired device"]
-    U -- "pairing binds them<br/>server-side" --- DEV
+    U -->|"pairing binds them<br/>server-side"| DEV
 
     classDef id fill:#3b2f10,stroke:#e8a33d,stroke-width:2px,color:#fff;
     class U,DEV id
@@ -39,8 +39,8 @@ flowchart TB
     end
     B["🌐 Browser / PWA"] -->|"dials OUT · WSS"| R
     D["💻 Daemon (your laptop)"] -->|"dials OUT · WSS"| R
-    R -. "routes encrypted frames" .-> B
-    R -. "between the two" .-> D
+    R -.->|"routes encrypted frames"| B
+    R -.->|"between the two"| D
 
     classDef ends fill:#3b2f10,stroke:#e8a33d,stroke-width:2px,color:#fff;
     class B,D ends
@@ -68,20 +68,20 @@ You prove who you are by signing in with **GitHub OAuth**. Telecode uses the **b
 sequenceDiagram
     autonumber
     participant B as Browser
-    participant W as Web app (SvelteKit, server)
+    participant W as Web app
     participant GH as GitHub
     participant R as Relay
 
-    B->>W: "Continue with GitHub"
-    W->>GH: OAuth authorize (state + scopes)
-    GH-->>W: code → exchange for identity
-    W-->>B: set httpOnly session cookie (no token in JS)
-
-    Note over B,W: Later, to open the live channel…
+    B->>W: Continue with GitHub
+    W->>GH: OAuth authorize with state and scopes
+    GH-->>W: code, exchanged for identity
+    W-->>B: set httpOnly session cookie, no token in JS
+    Note over B,W: Later, to open the live channel
     B->>W: request a channel token
-    W-->>B: short-lived SIGNED channel token (user id baked in by the server)
-    B->>R: connect WSS + channel token
-    Note over R: verifies the signature → trusts the user id<br/>(never a client-claimed id)
+    W-->>B: short-lived SIGNED channel token, user id set by the server
+    B->>R: connect WSS with channel token
+    Note over R: verifies the signature and trusts that user id
+    Note over R: never a client-claimed id
 ```
 
 The takeaway: **your identity is decided server-side and signed.** The browser can't claim to be someone
@@ -100,28 +100,26 @@ Here's the whole dance. Watch where the **user id** comes from — that's the cr
 ```mermaid
 sequenceDiagram
     autonumber
-    participant D as Daemon (your laptop)
+    participant D as Daemon
     participant R as Relay
-    participant B as You (signed-in browser)
-    participant W as Web app (server)
+    participant B as You signed in
+    participant W as Web app
 
-    D->>R: POST /device/code  { name, public_key }
-    R-->>D: { user_code: "ABCD-EFGH", device_code, expires_in, interval }
-    Note over D: prints "Go to the app and enter ABCD-EFGH"
-
+    D->>R: POST /device/code with name and public_key
+    R-->>D: returns user_code ABCD-EFGH and a device_code
+    Note over D: prints Go to the app and enter ABCD-EFGH
     loop every few seconds
-        D->>R: POST /device/token { device_code }
-        R-->>D: authorization_pending…
+        D->>R: POST /device/token with device_code
+        R-->>D: authorization_pending
     end
-
-    Note over B: You sign in (Identity #1), open /activate, type ABCD-EFGH
-    B->>W: submit user_code (you are already authenticated)
-    W->>R: POST /device/approve { user_code, user_id }  🔒 server-to-server
-    Note over W,R: user_id is the AUTHENTICATED user's id,<br/>derived server-side — the client never supplies it.<br/>Endpoint is guarded by a service secret.
-    R-->>W: ok (device created under that user)
-
-    D->>R: POST /device/token { device_code }
-    R-->>D: approved { device_token, user_id, device_id }
+    Note over B: You sign in, open /activate, type ABCD-EFGH
+    B->>W: submit user_code, you are already authenticated
+    W->>R: POST /device/approve, server to server
+    Note over W,R: user_id is the authenticated user id set server-side
+    Note over W,R: the client never supplies it, guarded by a service secret
+    R-->>W: ok, device created under that user
+    D->>R: POST /device/token with device_code
+    R-->>D: approved, returns device_token, user_id, device_id
     Note over D: saves to ~/.telecode/credentials.json
 ```
 
