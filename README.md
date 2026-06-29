@@ -11,6 +11,13 @@ no native app — lets you launch them, watch them work, and approve each conseq
 phone or another laptop. Session content is **end-to-end encrypted**, so the server in the middle only
 ever forwards ciphertext.
 
+<br/>
+
+<img src="docs/assets/telecode-demo.gif" alt="A Claude Code agent running on a laptop, driven from the telecode app on a phone — connected end-to-end encrypted" width="860" />
+
+<br/>
+<br/>
+
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-e8a33d?style=flat-square)](LICENSE)
 [![npm: @telecode/cli](https://img.shields.io/npm/v/@telecode/cli?style=flat-square&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@telecode/cli)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](packages/protocol)
