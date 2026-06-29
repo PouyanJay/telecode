@@ -4,8 +4,8 @@
  * and persistence unit-test without a DOM; the shell binds these to the real `localStorage`.
  */
 export const MIN_SIDEBAR_WIDTH = 200;
-export const MAX_SIDEBAR_WIDTH = 420;
-export const DEFAULT_SIDEBAR_WIDTH = 240;
+export const MAX_SIDEBAR_WIDTH = 480;
+export const DEFAULT_SIDEBAR_WIDTH = 360;
 
 const STORAGE_KEY = 'telecode:sidebar-width';
 
