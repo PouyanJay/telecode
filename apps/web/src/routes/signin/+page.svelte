@@ -1,6 +1,6 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
-  import { Button } from '@telecode/ui';
+  import { BrandLogo, Button } from '@telecode/ui';
 
   import type { ActionData, PageData } from './$types';
 
@@ -15,8 +15,7 @@
 <main id="main" class="wrap">
   <section class="panel" aria-labelledby="signin-title">
     <div class="brand">
-      <span class="mark" aria-hidden="true"></span>
-      <span class="name">telecode</span>
+      <BrandLogo size={22} />
     </div>
     <p class="eyebrow">COMMAND CENTER</p>
     <h1 id="signin-title">Sign in</h1>
@@ -83,21 +82,7 @@
     box-shadow: var(--shadow-md);
   }
   .brand {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-weight: 600;
     margin-bottom: var(--space-8);
-  }
-  .mark {
-    width: 12px;
-    height: 12px;
-    border-radius: var(--radius-sm);
-    background: var(--accent);
-  }
-  .name {
-    font-family: var(--font-mono);
-    letter-spacing: 0.02em;
   }
   .eyebrow {
     margin: 0 0 var(--space-2);
