@@ -4,6 +4,10 @@ Telecode runs coding agents on **your** machine and lets you drive them from a b
 a meeting point: both your laptop (the daemon) and your browser dial _out_ to it, and it forwards messages
 between them. This document states plainly what each part can and cannot see, and how you can verify it.
 
+> **Companion pages, in plain language with diagrams:** [End-to-end encryption](end-to-end-encryption.md)
+> (how the relay only ever sees ciphertext) and [Connecting your machine](connecting-your-machine.md)
+> (how a paired machine is bound to exactly your account). This page is the adversary's-eye view of both.
+
 ## Two boundaries
 
 **1. The approval gate is the execution boundary.** The daemon runs code on your machine. Every
