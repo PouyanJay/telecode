@@ -70,9 +70,9 @@ flowchart TB
         BK["Browser identity key<br/>X25519 private — non-extractable<br/>stored in IndexedDB"]
     end
 
-    DK -. "public half registered at pairing" .-> REG[("Relay: devices.public_key")]
-    BK -. "public half sent on launch" .-> DK
-    DK == "wraps the content key<br/>for this browser" ==> BK
+    DK -.->|"public half registered at pairing"| REG[("Relay devices.public_key")]
+    BK -.->|"public half sent on launch"| DK
+    DK ==>|"wraps the content key<br/>for this browser"| BK
 
     classDef k fill:#3b2f10,stroke:#e8a33d,stroke-width:2px,color:#fff;
     class DK,BK,CK k
@@ -105,23 +105,22 @@ content key. The relay carries the messages but learns nothing it could decrypt 
 sequenceDiagram
     autonumber
     participant B as Browser
-    participant R as Relay (ciphertext only)
-    participant D as Daemon (your laptop)
+    participant R as Relay
+    participant D as Daemon
 
-    Note over B,D: Both already know each other's PUBLIC key<br/>(device key from pairing; browser key sent on launch)
-
-    B->>R: launch session (carries browser public key)
-    R->>D: launch session (forwarded)
-
-    Note over D: ECDH(daemon_private, browser_public) → shared secret<br/>HKDF-SHA256 → 256-bit "wrapping" key
-    Note over D: mint per-session content key (AES-256-GCM)<br/>encrypt ("wrap") it with the wrapping key
-
-    D->>R: session.key = wrapped content key
-    R->>B: session.key (forwarded, still wrapped)
-
-    Note over B: ECDH(browser_private, daemon_public) → same shared secret<br/>HKDF → same wrapping key → unwrap the content key
-
-    Note over B,D: ✅ Both hold the same content key.<br/>The relay only saw two public keys and a wrapped blob.
+    Note over B,D: Both sides already hold the other public key
+    B->>R: launch session, carries browser public key
+    R->>D: launch session, forwarded
+    Note over D: ECDH daemon_private plus browser_public gives a shared secret
+    Note over D: HKDF-SHA256 turns it into a 256-bit wrapping key
+    Note over D: mint a per-session content key, AES-256-GCM
+    Note over D: wrap the content key with the wrapping key
+    D->>R: session.key is the wrapped content key
+    R->>B: session.key forwarded, still wrapped
+    Note over B: ECDH browser_private plus daemon_public gives the same secret
+    Note over B: HKDF gives the same wrapping key, then unwrap the content key
+    Note over B,D: Both now hold the same content key
+    Note over B,D: The relay saw only public keys and a wrapped blob
 ```
 
 The magic of ECDH is in steps 3 and 7: each side combines **its own private key** with **the other
@@ -147,12 +146,15 @@ sequenceDiagram
     participant R as Relay
     participant B as Browser
 
-    Note over D: agent produces output (plaintext)
-    Note over D: AES-256-GCM encrypt with the content key<br/>→ { payload: ciphertext, nonce: 12-byte IV }
-    D->>R: { type, ids, status, payload, nonce }
-    Note over R: routes by (user, device, session).<br/>CANNOT read payload — no content key.
-    R->>B: { type, ids, status, payload, nonce }
-    Note over B: AES-256-GCM decrypt with the content key<br/>→ plaintext, rendered in the UI
+    Note over D: agent produces output as plaintext
+    Note over D: AES-256-GCM encrypt with the content key
+    Note over D: result is a payload ciphertext plus a 12-byte nonce IV
+    D->>R: type, ids, status, payload, nonce
+    Note over R: routes by user, device, session
+    Note over R: cannot read payload, it has no content key
+    R->>B: type, ids, status, payload, nonce
+    Note over B: AES-256-GCM decrypt with the content key
+    Note over B: plaintext rendered in the UI
 ```
 
 A few details worth knowing:
