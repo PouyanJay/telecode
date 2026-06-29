@@ -7,6 +7,7 @@
   import LaunchDrawer from '$lib/components/LaunchDrawer.svelte';
   import MobileNav from '$lib/components/MobileNav.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
+  import SidebarResizer from '$lib/components/SidebarResizer.svelte';
   import SystemBar from '$lib/components/SystemBar.svelte';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { sessionCounts } from '$lib/session-groups';
@@ -15,6 +16,13 @@
     ensureConnection,
     sessions as liveSessions,
   } from '$lib/session-store';
+  import {
+    DEFAULT_SIDEBAR_WIDTH,
+    MAX_SIDEBAR_WIDTH,
+    MIN_SIDEBAR_WIDTH,
+    readSidebarWidth,
+    writeSidebarWidth,
+  } from '$lib/sidebar-width';
   import type { LayoutData } from './$types';
 
   /**
@@ -29,6 +37,12 @@
   const device = $derived(data.devices[0] ?? null);
   // Live working/blocked tallies for the system bar, straight from the demuxed session map.
   const counts = $derived(sessionCounts([...$liveSessions.values()]));
+
+  // Operator-adjustable sidebar width: seed from storage on the client, persist on every change.
+  let sidebarWidth = $state(browser ? readSidebarWidth(localStorage) : DEFAULT_SIDEBAR_WIDTH);
+  $effect(() => {
+    if (browser) writeSidebarWidth(localStorage, sidebarWidth);
+  });
 
   // Open (and keep) the shared connection whenever a device is available; idempotent, so re-running on a
   // later pairing is safe. Client-only ($effect never runs on the server).
@@ -57,7 +71,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="app">
+<div class="app" style="--sidebar-width: {sidebarWidth}px">
   <SystemBar connection={$connectionState} {counts} />
   <Sidebar
     user={data.user}
@@ -65,6 +79,12 @@
     connection={$connectionState}
     {counts}
     onlaunch={openLaunchDrawer}
+  />
+  <SidebarResizer
+    bind:width={sidebarWidth}
+    min={MIN_SIDEBAR_WIDTH}
+    max={MAX_SIDEBAR_WIDTH}
+    onreset={() => (sidebarWidth = DEFAULT_SIDEBAR_WIDTH)}
   />
   <main id="main" class="content">
     {@render children()}
@@ -83,7 +103,7 @@
   .app {
     height: 100dvh;
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-columns: var(--sidebar-width, 240px) minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
   .content {
