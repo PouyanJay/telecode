@@ -141,8 +141,11 @@
   .launch {
     padding: 0 var(--space-3) var(--space-4);
   }
-  /* The launch button stretches to the rail width; its kbd hint sits at the trailing edge. */
+  /* The launch button stretches to the rail width; its kbd hint sits at the trailing edge. A
+     block-level flex (not the primitive's default inline-flex) makes the full-width fill explicit and
+     robust as the resizable sidebar changes width. */
   .launch :global(.btn) {
+    display: flex;
     width: 100%;
     justify-content: flex-start;
     gap: var(--space-2);
