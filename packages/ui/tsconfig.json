@@ -3,7 +3,10 @@
   "compilerOptions": {
     "noEmit": true,
     "module": "esnext",
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    // The design system is browser-targeted (Svelte components + DOM `use:` actions), so it needs the
+    // DOM lib on top of the base ES libs.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
   "include": ["src"]
 }

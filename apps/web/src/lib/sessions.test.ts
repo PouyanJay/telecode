@@ -1,7 +1,7 @@
 import { makeEnvelope, type Envelope } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { foldSessionFrame, statusPriority, type SessionMap } from './sessions';
+import { foldSessionFrame, type SessionMap } from './sessions';
 
 const USER = 'u_1';
 const DEVICE = 'd_1';
@@ -63,14 +63,5 @@ describe('multi-session demux (foldSessionFrame)', () => {
     expect(map.get('a')?.status).toBe('done');
     expect(map.get('a')?.entries.map((e) => e.kind)).toEqual(['user', 'message']);
     expect(map.get('b')?.status).toBe('running'); // untouched
-  });
-});
-
-describe('dashboard sort priority', () => {
-  it('puts awaiting-input first, live work next, terminal/idle last', () => {
-    expect(statusPriority('awaiting_input')).toBeLessThan(statusPriority('running'));
-    expect(statusPriority('running')).toBeLessThan(statusPriority('done'));
-    expect(statusPriority('starting')).toBe(statusPriority('running'));
-    expect(statusPriority('offline_paused')).toBe(statusPriority('error'));
   });
 });

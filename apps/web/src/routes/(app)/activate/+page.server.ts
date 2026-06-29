@@ -3,7 +3,7 @@ import { fail, redirect } from '@sveltejs/kit';
 import { pairingInstructions } from '$lib/pairing-instructions';
 import { approveDevice } from '$lib/server/relay-api';
 
-import type { Actions, PageServerLoad } from './$types';
+import type { Actions } from './$types';
 
 // A code that doesn't approve is invalid or expired; tell the user how to mint a fresh one in this
 // environment. In dev `make run` reuses a healthy daemon (no new code), so point at a restart + the log.
@@ -11,13 +11,7 @@ const codeExpiredError = pairingInstructions.codeLocation
   ? `That code is invalid or expired. Restart the daemon and use the new code in \`${pairingInstructions.codeLocation}\`.`
   : `That code is invalid or expired. Run \`${pairingInstructions.command}\` again for a new one.`;
 
-export const load: PageServerLoad = ({ locals }) => {
-  if (!locals.user) {
-    redirect(303, '/signin');
-  }
-  return {};
-};
-
+// Auth + device/repo loading are handled by the `(app)` layout; this route only owns the approve action.
 export const actions: Actions = {
   default: async ({ request, locals }) => {
     if (!locals.user) {
