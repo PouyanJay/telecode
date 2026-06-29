@@ -18,7 +18,7 @@ test('dev sign-in reaches an authenticated, relay-connected landing', async ({ p
   await expect(page.getByText('Developer')).toBeVisible();
 
   // The browser minted a channel token and authenticated its relay WS connection.
-  await expect(page.getByText('CONNECTED')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
 });
 
 test('sign out returns to the sign-in screen', async ({ page }) => {

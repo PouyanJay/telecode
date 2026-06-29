@@ -128,13 +128,20 @@ type Page = import('@playwright/test').Page;
 async function signIn(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('button', { name: 'Continue as developer' }).click();
-  await expect(page.getByText('CONNECTED')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
 }
 
-/** Launch a session from the dashboard; resolves once the per-id session view is shown. */
+/** Open the launch drawer (the sidebar action, or the empty-state CTA on a fresh dashboard). */
+async function openLaunchDrawer(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Launch session' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Launch session' })).toBeVisible();
+}
+
+/** Launch a session from the drawer; resolves once the per-id session view is shown. */
 async function launchFromDashboard(page: Page, prompt: string): Promise<void> {
-  await page.getByLabel('Task').fill(prompt);
-  await page.getByRole('button', { name: 'Launch' }).click();
+  await openLaunchDrawer(page);
+  await page.getByLabel('First instruction').fill(prompt);
+  await page.getByRole('button', { name: /Launch on/ }).click();
   await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
 }
 
@@ -153,7 +160,7 @@ test('launch from the dashboard, stream on the session view, approve the gated t
   // The gate resolves, the tool runs, and the session finishes.
   await expect(page.getByText('APPROVED')).toBeVisible();
   await expect(page.getByText('Finished')).toBeVisible();
-  await expect(page.getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
 });
 
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {
@@ -162,7 +169,7 @@ test('the launched session appears in the dashboard list with live status', asyn
   // It backfilled on the session view, so its prompt becomes the list title; the gate is still pending.
   await expect(page.getByText('Planning the change')).toBeVisible();
 
-  await page.getByRole('link', { name: '← Sessions' }).click();
+  await page.getByRole('link', { name: 'Back to sessions' }).click();
   await expect(page).toHaveURL(/\/$/);
 
   // This specific session is listed, showing its live awaiting-input status (sorted to the top).
@@ -184,7 +191,7 @@ test('reopen = reconnect: the transcript restores after a reload (daemon backfil
   await page.reload();
   await expect(page.getByText('Planning the change')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText('Finished')).toBeVisible();
-  await expect(page.getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
   // The previously-approved gate replays as decided, not as a fresh actionable prompt.
   await expect(page.getByText('APPROVED')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0);
@@ -213,7 +220,7 @@ test('rejects the gated tool and the session finishes without running it', async
 
   await expect(page.getByText('REJECTED')).toBeVisible();
   await expect(page.getByText('Finished')).toBeVisible();
-  await expect(page.getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
   // The Write tool never ran — no executed tool-call entry appears in the transcript.
   await expect(page.getByText('TOOL', { exact: true })).toHaveCount(0);
 });
@@ -224,7 +231,7 @@ test('interrupt stops a running turn and the session ends (done)', async ({ page
   // The turn is in flight (gated, awaiting input), so the Interrupt control is offered.
   await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
   await page.getByRole('button', { name: 'Interrupt' }).click();
-  await expect(page.getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
 });
 
 test('interrupt stops the turn and the session stays followable', async ({ page }) => {
@@ -234,7 +241,7 @@ test('interrupt stops the turn and the session stays followable', async ({ page 
 
   // Interrupt aborts the in-flight turn (like Esc); the session ends the turn but stays open.
   await page.getByRole('button', { name: 'Interrupt' }).click();
-  await expect(page.getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
   // Continue by typing — the composer is open for a follow-up (no separate Resume needed).
   await expect(page.getByPlaceholder('Send a follow-up instruction…')).toBeEnabled();
 });
@@ -243,14 +250,17 @@ test('interrupt stops the turn and the session stays followable', async ({ page 
 // `unsupported` (no PushManager/Notification), and real push delivery needs a push service. The pure
 // VAPID-key conversion is unit-tested (push-key.test.ts); the SW + subscribe flow are verified manually.
 
-test('the launch form prompts to connect GitHub when no repo is available (dev user)', async ({
+test('the launch drawer prompts to connect GitHub when no repo is available (dev user)', async ({
   page,
 }) => {
   await signIn(page);
-  // The dev user has no stored GitHub token, so the picker degrades to a connect prompt — and a launch
-  // with no repo still works (it runs in the daemon's default workspace).
-  await expect(page.getByText(/Connect GitHub to run a session/)).toBeVisible();
+  // The dev user has no stored GitHub token, so the drawer's picker degrades to a connect prompt — and a
+  // launch with no repo still works (it runs in the daemon's default workspace).
+  await openLaunchDrawer(page);
+  await expect(page.getByText(/Connect GitHub/)).toBeVisible();
   await expect(page.getByLabel('Repository')).toHaveCount(0);
-  await launchFromDashboard(page, 'Work without a repo');
+  await page.getByLabel('First instruction').fill('Work without a repo');
+  await page.getByRole('button', { name: /Launch on/ }).click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
   await expect(page.getByText('Planning the change')).toBeVisible();
 });
