@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { StatusDot } from '@telecode/ui';
+  import { Pill, StatusDot } from '@telecode/ui';
 
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionRow } from '$lib/session-groups';
@@ -15,13 +15,21 @@
 
   const display = $derived(SESSION_DISPLAY[row.status]);
   const awaiting = $derived(row.status === 'awaiting_input');
+  // Sessions telecode adopted from the user's own Claude Code runs (terminal / IDE) are marked, so the
+  // operator can tell them from sessions launched here — they're monitored + gated, not telecode-driven.
+  const adopted = $derived(row.origin === 'external');
 </script>
 
 <a class="row hairline-b" class:await={awaiting} href="/sessions/{row.id}">
   <span class="status">
     <StatusDot tone={display.tone} label={display.label} pulse={display.pulse} />
   </span>
-  <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
+  <span class="titlecell">
+    {#if adopted}
+      <Pill label="on device" />
+    {/if}
+    <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
+  </span>
   {#if row.deviceName}
     <span class="device mono">{row.deviceName}</span>
   {/if}
@@ -61,6 +69,12 @@
     border-color: var(--accent);
   }
   .status {
+    min-width: 0;
+  }
+  .titlecell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
     min-width: 0;
   }
   .title {
@@ -117,8 +131,10 @@
     .time {
       grid-area: time;
     }
-    .title {
+    .titlecell {
       grid-area: title;
+    }
+    .title {
       white-space: normal;
     }
     .chev {

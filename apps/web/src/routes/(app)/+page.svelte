@@ -36,6 +36,7 @@
         title: s.title,
         status: s.status,
         deviceName: deviceName(s.deviceId),
+        origin: s.origin,
         createdAt: s.createdAt,
       });
     }
@@ -48,6 +49,8 @@
         title,
         status,
         deviceName: existing?.deviceName ?? device?.name ?? null,
+        // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
+        origin: existing?.origin ?? 'launched',
         createdAt: existing?.createdAt ?? new Date(),
       });
     }

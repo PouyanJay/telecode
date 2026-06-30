@@ -1,3 +1,5 @@
+import type { SessionOrigin } from '@telecode/protocol';
+
 import type { SessionStatus } from './session';
 
 /**
@@ -12,6 +14,8 @@ export interface SessionRow {
   readonly title: string | null;
   readonly status: SessionStatus;
   readonly deviceName: string | null;
+  /** `external` rows are adopted from the user's own Claude Code runs; the dashboard marks them. */
+  readonly origin: SessionOrigin;
   readonly createdAt: Date;
 }
 

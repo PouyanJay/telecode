@@ -4,7 +4,14 @@ import type { SessionStatus } from './session';
 import { groupSessions, sessionCounts, type SessionRow } from './session-groups';
 
 function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
-  return { id, title: id, status, deviceName: 'studio-mbp', createdAt: new Date(createdAt) };
+  return {
+    id,
+    title: id,
+    status,
+    deviceName: 'studio-mbp',
+    origin: 'launched',
+    createdAt: new Date(createdAt),
+  };
 }
 
 describe('groupSessions', () => {
