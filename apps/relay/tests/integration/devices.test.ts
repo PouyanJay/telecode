@@ -9,9 +9,9 @@ import { pino } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 /**
- * Task 7 — device targeting. The web tier must learn which paired device a browser should watch so it
- * can connect on the daemon's `(user_id, device_id)` channel. `GET /me/devices` resolves the user from
- * the bearer session token and returns only that user's active devices (RLS-scoped). Real relay + PG.
+ * Device registry HTTP layer — `GET /me/devices` (list, to pick the channel a browser watches, incl. the
+ * `os` descriptor) and `DELETE /me/devices/:id` (revoke). Session-token authed; the user is derived from
+ * the token and results are RLS-scoped to the owner. Real relay + Postgres.
  */
 const DATABASE_URL = process.env.DATABASE_URL;
 const SERVICE_SECRET = 'svc-secret-test';
@@ -121,6 +121,107 @@ describe('relay device listing: GET /me/devices', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json<{ devices: unknown[] }>().devices).toHaveLength(0);
+  });
+
+  it('returns each device’s os descriptor, null when unset', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const withOsId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'mbp',
+      deviceTokenHash: 'hash-os',
+      os: 'macOS 15.4',
+    });
+    const withoutOsId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'legacy',
+      deviceTokenHash: 'hash-no-os',
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/me/devices',
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    const byId = new Map(
+      res.json<{ devices: { id: string; os: string | null }[] }>().devices.map((d) => [d.id, d.os]),
+    );
+    expect(byId.get(withOsId)).toBe('macOS 15.4');
+    expect(byId.get(withoutOsId)).toBeNull();
+  });
+
+  it('revokes the user’s own device (it then drops out of the list)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'to-revoke',
+      deviceTokenHash: 'hash-rev',
+    });
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(del.statusCode).toBe(204);
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/me/devices',
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(list.json<{ devices: unknown[] }>().devices).toHaveLength(0);
+  });
+
+  it('cannot revoke another user’s device (RLS-scoped → 404)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const bob = await auth.createSession({ provider: 'dev', providerUserId: 'bob' });
+    const bobDeviceId = await registry.createDevice({
+      userId: bob.userId,
+      name: 'bob-laptop',
+      deviceTokenHash: 'hash-bob',
+    });
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/me/devices/${bobDeviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(del.statusCode).toBe(404);
+    // Bob's device is untouched.
+    const bobList = await app.inject({
+      method: 'GET',
+      url: '/me/devices',
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    expect(bobList.json<{ devices: unknown[] }>().devices).toHaveLength(1);
+  });
+
+  it('returns 404 when deleting a device that does not exist', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/me/devices/00000000-0000-0000-0000-000000000000',
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('returns 400 when the device id is not a uuid', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/me/devices/not-a-uuid',
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a revoke with no session token', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/me/devices/00000000-0000-0000-0000-000000000000',
+    });
+    expect(res.statusCode).toBe(401);
   });
 
   it('rejects a request with no / invalid session token', async () => {

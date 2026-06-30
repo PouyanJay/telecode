@@ -23,7 +23,7 @@ import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } fr
 import { registerRateLimit, type RateLimitConfig } from './rate-limit';
 import { createTelemetry, type Telemetry } from './telemetry';
 import { type DeviceRegistry } from './registry/device-registry';
-import { registerDeviceListRoute } from './registry/device-routes';
+import { registerDeviceRoutes } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
 import { registerSessionListRoute } from './registry/session-routes';
 
@@ -452,9 +452,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       serviceSecret: options.auth.serviceSecret,
       ...(oauthTokenStore ? { tokenStore: oauthTokenStore } : {}),
     });
-    // The web lists the user's devices to pick the channel its browser should watch.
+    // The web lists the user's devices (to pick the channel its browser watches) and revokes them
+    // (session-token authed; RLS-scoped to the owner).
     if (deviceRegistry) {
-      registerDeviceListRoute(app, options.auth.service, deviceRegistry);
+      registerDeviceRoutes(app, options.auth.service, deviceRegistry);
     }
     // The dashboard + reconnect list the user's sessions (status, device, title).
     if (sessionRegistry) {

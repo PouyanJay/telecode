@@ -44,6 +44,8 @@ export const devices = pgTable(
     name: text('name').notNull(),
     /** X25519 public key (base64), registered at pairing. Stored now; used for E2E in Phase 3. */
     publicKey: text('public_key'),
+    /** Short OS descriptor (e.g. "macOS 15.4"), reported by the daemon at pairing; null if unknown. */
+    os: text('os'),
     /** Hash of the long-lived device token. The raw token is never persisted. */
     deviceTokenHash: text('device_token_hash').notNull(),
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),

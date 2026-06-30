@@ -7,6 +7,7 @@ import { pino } from 'pino';
 import { loadCredentials, saveCredentials } from './credentials';
 import { createDaemon } from './daemon';
 import { runDoctorCli } from './doctor-cli';
+import { detectOs } from './os-info';
 import { pairDevice } from './pairing';
 import { resolveRelayUrl } from './relay-url';
 import { createGitRepoManager } from './sessions/repo-manager';
@@ -68,7 +69,13 @@ if (!credentials) {
   log.info('daemon: no credentials found — pairing this device');
   const keyPair = await generateKeyPair();
   const publicKey = encodeKey(keyPair.publicKey);
-  const paired = await pairDevice({ relayHttpUrl, name: hostname(), publicKey, logger: log });
+  const paired = await pairDevice({
+    relayHttpUrl,
+    name: hostname(),
+    os: detectOs(),
+    publicKey,
+    logger: log,
+  });
   credentials = { ...paired, publicKey, privateKey: encodeKey(keyPair.privateKey) };
   await saveCredentials(credentials);
   log.info({ deviceId: credentials.deviceId }, 'daemon: paired; credentials saved');
