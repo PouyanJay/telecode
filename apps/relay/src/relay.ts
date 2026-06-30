@@ -22,6 +22,8 @@ import { type PushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { registerRateLimit, type RateLimitConfig } from './rate-limit';
 import { createTelemetry, type Telemetry } from './telemetry';
+import { registerInfraRoutes } from './infra/infra-routes';
+import { type InfraScaler } from './infra/infra-scaler';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceRoutes } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
@@ -117,6 +119,13 @@ export interface RelayOptions {
    * identifiers or session content).
    */
   readonly telemetry?: Telemetry;
+  /**
+   * Operator-only infrastructure controls (the scale-to-zero toggles). When provided (with `auth`), the
+   * relay exposes `/me/infra-settings` — gated to the `operatorEmails` allowlist — which reads/writes each
+   * app's cloud minReplicas via the `InfraScaler`. Absent (the default) → the endpoints 404 and the web UI
+   * hides the panel. `main.ts` wires it from the Azure env + `TELECODE_OPERATOR_EMAILS`.
+   */
+  readonly infra?: { readonly scaler: InfraScaler; readonly operatorEmails: readonly string[] };
 }
 
 /**
@@ -468,6 +477,16 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // (session-token authed; RLS-scoped to the owner).
     if (deviceRegistry) {
       registerDeviceRoutes(app, options.auth.service, deviceRegistry);
+    }
+    // Operator-only infra controls (scale-to-zero toggles). Registered only when configured (Azure env);
+    // every request is gated to the operator allowlist inside the routes.
+    if (options.infra) {
+      registerInfraRoutes(
+        app,
+        options.auth.service,
+        options.infra.scaler,
+        options.infra.operatorEmails,
+      );
     }
     // The dashboard + reconnect list the user's sessions (status, device, title).
     if (sessionRegistry) {

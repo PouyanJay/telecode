@@ -8,6 +8,7 @@ import { createWebPushSender } from './push/push-sender';
 import { createPushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceRegistry } from './registry/device-registry';
 import { createSessionRegistry } from './registry/session-registry';
+import { createAzureInfraScaler } from './infra/azure-infra-scaler';
 import { buildRelay } from './relay';
 import { createTelemetry } from './telemetry';
 
@@ -132,6 +133,34 @@ const telemetryEnabled = [...ENV_TRUE, 'on'].includes(process.env.TELECODE_TELEM
 const telemetry = createTelemetry({ enabled: telemetryEnabled, logger: log });
 log.info({ telemetry_enabled: telemetryEnabled }, 'relay: telemetry configured');
 
+// Operator-only infra controls (scale-to-zero toggles). Enabled only when an operator allowlist AND the
+// full Azure config are present; otherwise the endpoints aren't registered and the web hides the panel.
+const operatorEmails = (process.env.TELECODE_OPERATOR_EMAILS ?? '')
+  .split(',')
+  .map((email) => email.trim())
+  .filter((email) => email.length > 0);
+const azureSubscriptionId = process.env.AZURE_SUBSCRIPTION_ID;
+const azureResourceGroup = process.env.AZURE_RESOURCE_GROUP;
+const azureWebAppName = process.env.AZURE_WEB_APP_NAME;
+const azureRelayAppName = process.env.AZURE_RELAY_APP_NAME;
+const infraScaler =
+  operatorEmails.length > 0 &&
+  azureSubscriptionId &&
+  azureResourceGroup &&
+  azureWebAppName &&
+  azureRelayAppName
+    ? createAzureInfraScaler({
+        subscriptionId: azureSubscriptionId,
+        resourceGroup: azureResourceGroup,
+        webAppName: azureWebAppName,
+        relayAppName: azureRelayAppName,
+        ...(process.env.AZURE_CLIENT_ID
+          ? { managedIdentityClientId: process.env.AZURE_CLIENT_ID }
+          : {}),
+      })
+    : undefined;
+log.info({ infra_controls_enabled: Boolean(infraScaler) }, 'relay: infra controls configured');
+
 const app = await buildRelay({
   logger: log,
   ...(trustProxy ? { trustProxy } : {}),
@@ -147,6 +176,7 @@ const app = await buildRelay({
           serviceSecret,
         },
         deviceRegistry: createDeviceRegistry(dbHandle),
+        ...(infraScaler ? { infra: { scaler: infraScaler, operatorEmails } } : {}),
         ...(tokenEncryptionKey
           ? {
               oauthTokenStore: createOAuthTokenStore({

@@ -296,3 +296,64 @@ export async function destroyRelaySession(sessionToken: string): Promise<void> {
     headers: { authorization: `Bearer ${sessionToken}` },
   });
 }
+
+/**
+ * Operator scale-to-zero state: whether each shared app is pinned always-on (vs. allowed to idle to 0). This
+ * is the web tier's camelCase view of the relay's `InfraSettings` (the canonical type in
+ * `apps/relay/src/infra/infra-scaler.ts`); the relay sends snake_case, mapped at this boundary.
+ */
+export interface InfraSettings {
+  webAlwaysOn: boolean;
+  relayAlwaysOn: boolean;
+}
+
+/** Map the relay's snake_case wire body to {@link InfraSettings}, defensively — returns null if malformed. */
+function parseInfraSettings(body: unknown): InfraSettings | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const { web_always_on: web, relay_always_on: relay } = body as Record<string, unknown>;
+  if (typeof web !== 'boolean' || typeof relay !== 'boolean') return null;
+  return { webAlwaysOn: web, relayAlwaysOn: relay };
+}
+
+/**
+ * Read the operator infra (scale-to-zero) state (session-token authed). Returns null when the caller isn't an
+ * operator or the controls aren't configured (403/404) — the UI then simply hides the panel. These settings
+ * govern the SHARED deployment, so the relay gates them to the operator allowlist.
+ */
+export async function getInfraSettings(sessionToken: string): Promise<InfraSettings | null> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/infra-settings`, {
+      headers: { authorization: `Bearer ${sessionToken}` },
+    });
+    if (!res.ok) {
+      return null;
+    }
+    return parseInfraSettings(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pin an app always-on or let it scale to zero (operator, session-token authed). Returns the freshly-read
+ * state on success, or null on any failure (not operator, cloud unreachable) so the action can surface it.
+ */
+export async function setInfraSettings(
+  sessionToken: string,
+  target: 'web' | 'relay',
+  alwaysOn: boolean,
+): Promise<InfraSettings | null> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/infra-settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${sessionToken}` },
+      body: JSON.stringify({ target, always_on: alwaysOn }),
+    });
+    if (!res.ok) {
+      return null;
+    }
+    return parseInfraSettings(await res.json());
+  } catch {
+    return null;
+  }
+}

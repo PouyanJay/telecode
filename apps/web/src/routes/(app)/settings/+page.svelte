@@ -1,10 +1,11 @@
 <script lang="ts">
+  import type { SubmitFunction } from '@sveltejs/kit';
   import { onMount } from 'svelte';
 
   import { enhance } from '$app/forms';
   import { browser } from '$app/environment';
   import { env } from '$env/dynamic/public';
-  import { Button, Panel } from '@telecode/ui';
+  import { Button, Panel, Switch } from '@telecode/ui';
   import type { PermissionModeName } from '@telecode/protocol';
 
   import PageHeader from '$lib/components/PageHeader.svelte';
@@ -12,17 +13,41 @@
   import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
   import { DEFAULT_PERMISSION_MODE, readPermissionMode, writePermissionMode } from '$lib/settings';
 
+  import type { ActionData, PageData } from './$types';
+
   /**
    * Settings: the relay this dashboard talks to, the default launch permission mode (persisted, seeds the
-   * launch drawer), web-push notifications, and account sign-out. Only real, wired controls are shown — the
-   * relay endpoint is read-only (it's an env/self-host concern), and the mode is the conservative default.
+   * launch drawer), web-push notifications, account sign-out, and — for the operator only — the shared
+   * deployment's scale-to-zero toggles. Only real, wired controls are shown.
    */
+  let { data, form }: { data: PageData; form: ActionData } = $props();
+
   const RELAY_URL = env.PUBLIC_TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
   const VAPID_KEY = env.PUBLIC_VAPID_KEY ?? '';
 
   let mode = $state<PermissionModeName>(DEFAULT_PERMISSION_MODE);
   let pushState = $state<PushState>('unsupported');
   let enabling = $state(false);
+
+  // Operator infra (scale-to-zero) state. Prefer the latest action result, else the load. Null ⇒ the caller
+  // isn't an operator (or the controls aren't configured) and the panel is hidden entirely.
+  const infra = $derived(form && 'infra' in form && form.infra ? form.infra : data.infra);
+  const webOn = $derived(infra?.webAlwaysOn ?? true);
+  const relayOn = $derived(infra?.relayAlwaysOn ?? true);
+  const scaleError = $derived(form && 'error' in form ? form.error : null);
+  let pending = $state<null | 'web' | 'relay'>(null);
+
+  // Mark the toggled service in-flight while the relay applies the cloud change (a few seconds), then clear
+  // once the action result + reload land so the switch reflects what the cloud actually applied.
+  function submitScale(target: 'web' | 'relay'): SubmitFunction {
+    return () => {
+      pending = target;
+      return async ({ update }) => {
+        await update();
+        pending = null;
+      };
+    };
+  }
 
   onMount(() => {
     mode = readPermissionMode(localStorage);
@@ -80,6 +105,61 @@
         </div>
       </div>
     </Panel>
+
+    {#if infra}
+      <Panel title="Infrastructure" meta="operator · affects everyone">
+        <div class="body">
+          <p class="hint">
+            Keep a service always running, or let it scale to zero when idle to save cost. Turning one off
+            adds a few-seconds cold start on the next request. These settings apply to the shared deployment
+            for <strong>all</strong> users.
+          </p>
+
+          {#if scaleError}
+            <p class="error mono" role="alert">{scaleError}</p>
+          {/if}
+
+          <div class="toggle">
+            <div class="toggle-text">
+              <span class="toggle-label">Web app always-on</span>
+              <p class="hint">Off → the dashboard scales to zero when idle (cold start on first load).</p>
+            </div>
+            <form method="POST" action="?/setScale" use:enhance={submitScale('web')}>
+              <input type="hidden" name="target" value="web" />
+              <input type="hidden" name="alwaysOn" value={(!webOn).toString()} />
+              <Switch
+                type="submit"
+                checked={webOn}
+                loading={pending === 'web'}
+                disabled={pending !== null}
+                label="Keep web app always-on"
+              />
+            </form>
+          </div>
+
+          <div class="toggle">
+            <div class="toggle-text">
+              <span class="toggle-label">Relay always-on</span>
+              <p class="hint">
+                Off → the relay scales to zero when no device or browser is connected (cold start on
+                reconnect).
+              </p>
+            </div>
+            <form method="POST" action="?/setScale" use:enhance={submitScale('relay')}>
+              <input type="hidden" name="target" value="relay" />
+              <input type="hidden" name="alwaysOn" value={(!relayOn).toString()} />
+              <Switch
+                type="submit"
+                checked={relayOn}
+                loading={pending === 'relay'}
+                disabled={pending !== null}
+                label="Keep relay always-on"
+              />
+            </form>
+          </div>
+        </div>
+      </Panel>
+    {/if}
 
     <Panel title="Account">
       <div class="body">
@@ -154,6 +234,32 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--success);
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
+  .toggle-text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .toggle-label {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text);
+  }
+  .toggle form {
+    margin: 0;
+    flex: none;
+  }
+  .error {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--danger);
   }
 
   @media (max-width: 640px) {
