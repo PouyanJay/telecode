@@ -141,6 +141,7 @@ const CACHEABLE_TYPES = new Set<string>([
   'agent.message',
   'agent.tool_use',
   'agent.permission_request',
+  'agent.question',
   'session.ended',
   'session.key',
 ]);
@@ -354,11 +355,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       );
       return;
     }
-    // A human action resumes the session — a permission verdict, or a `user.message` follow-up that
-    // starts a new turn. Flip the row back to `running` before forwarding (so the persisted status never
-    // lags the daemon). Type-only — the relay stays payload-blind, correct under E2E ciphertext (Phase 3).
+    // A human action resumes the session — a permission verdict, a `question.answer` (an adopted session's
+    // multiple-choice pick), or a `user.message` follow-up that starts a new turn. Flip the row back to
+    // `running` before forwarding (so the persisted status never lags the daemon). Type-only — the relay
+    // stays payload-blind, correct under E2E ciphertext (Phase 3).
     if (
-      (envelope.type === 'permission.decision' || envelope.type === 'user.message') &&
+      (envelope.type === 'permission.decision' ||
+        envelope.type === 'question.answer' ||
+        envelope.type === 'user.message') &&
       sessionRegistry &&
       envelope.session_id
     ) {
@@ -463,9 +467,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           sessionId: envelope.session_id,
         });
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
-      } else if (envelope.type === 'agent.permission_request') {
-        // The run is blocked on a human decision: persist `awaiting_input` BEFORE broadcasting the
-        // request, so any browser that reacts to it already observes the paused status.
+      } else if (
+        envelope.type === 'agent.permission_request' ||
+        envelope.type === 'agent.question'
+      ) {
+        // The run is blocked on a human decision or a question (an adopted session's AskUserQuestion):
+        // persist `awaiting_input` BEFORE broadcasting it, so any browser that reacts already observes the
+        // paused status. Both pause the session the same way — type-only, payload-blind under E2E.
         await sessionRegistry.markAwaitingInput({
           userId: envelope.user_id,
           sessionId: envelope.session_id,
