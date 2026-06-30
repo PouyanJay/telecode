@@ -6,11 +6,20 @@ import {
   appendUserMessage,
   applyEnvelope,
   initialSessionState,
+  markAnswering,
   markDeciding,
   pendingPermission,
+  pendingQuestion,
   startingState,
   type SessionState,
 } from './session';
+
+const DB_QUESTION = {
+  question: 'Which database should we use?',
+  header: 'Database',
+  multiSelect: false,
+  options: [{ label: 'Postgres' }, { label: 'SQLite' }],
+};
 
 const USER = 'u_1';
 const DEVICE = 'd_1';
@@ -221,6 +230,83 @@ describe('session reducer', () => {
     expect(first?.kind === 'user' && first.text).toBe('build it');
     expect(third?.kind === 'user' && third.text).toBe('now add tests');
     expect(new Set(state.entries.map((e) => e.id)).size).toBe(3); // stable, unique keys
+  });
+});
+
+describe('session reducer: adopted-session questions (Journey 2)', () => {
+  it('surfaces an agent.question as awaiting_input with a pending question', () => {
+    const state = fold([
+      frame('session.started', {}),
+      frame('agent.question', { requestId: 'q1', questions: [DB_QUESTION] }),
+    ]);
+    expect(state.status).toBe('awaiting_input');
+    const pending = pendingQuestion(state);
+    expect(pending?.kind).toBe('question');
+    if (pending?.kind === 'question') {
+      expect(pending.requestId).toBe('q1');
+      expect(pending.questions[0]?.header).toBe('Database');
+    }
+  });
+
+  it('marks an answer in-flight (answering) and confirms it on the next frame', () => {
+    let state = fold([
+      frame('session.started', {}),
+      frame('agent.question', { requestId: 'q1', questions: [DB_QUESTION] }),
+    ]);
+    state = markAnswering(state, 'q1', [{ selectedLabels: ['Postgres'] }]);
+    // In-flight: shown as answering, status back to running, no longer the pending question.
+    expect(state.status).toBe('running');
+    const answering = state.entries.find((e) => e.kind === 'question');
+    expect(answering?.kind === 'question' && answering.answer).toBe('answering');
+    expect(pendingQuestion(state)).toBeUndefined();
+
+    // The daemon's next frame (the session resuming) confirms the answer was delivered.
+    state = applyEnvelope(state, frame('agent.message', { text: 'Using Postgres.' }));
+    const answered = state.entries.find((e) => e.kind === 'question');
+    expect(answered?.kind === 'question' && answered.answer).toBe('answered');
+  });
+
+  it('closes a still-pending question when the session ends (no dead, clickable picker)', () => {
+    let state = fold([
+      frame('session.started', {}),
+      frame('agent.question', { requestId: 'q1', questions: [DB_QUESTION] }),
+    ]);
+    expect(pendingQuestion(state)?.kind).toBe('question');
+
+    state = applyEnvelope(state, frame('session.ended', { status: 'done' }));
+    const closed = state.entries.find((e) => e.kind === 'question');
+    expect(closed?.kind === 'question' && closed.answer).toBe('closed');
+    expect(pendingQuestion(state)).toBeUndefined();
+  });
+
+  it('ignores an agent.question with an invalid payload', () => {
+    const state = applyEnvelope(startingState(), frame('agent.question', { requestId: 'q1' }));
+    expect(state.entries).toHaveLength(0);
+  });
+
+  it('backfills question entries from session.history (pending + answered)', () => {
+    const state = applyEnvelope(
+      initialSessionState,
+      frame('session.history', {
+        status: 'awaiting_input',
+        entries: [
+          {
+            kind: 'question',
+            requestId: 'q1',
+            questions: [DB_QUESTION],
+            answers: [{ selectedLabels: ['Postgres'] }],
+          },
+          { kind: 'question', requestId: 'q2', questions: [DB_QUESTION] },
+        ],
+      }),
+    );
+    expect(state.entries.map((e) => e.kind)).toEqual(['question', 'question']);
+    const [answered, pending] = state.entries;
+    expect(answered?.kind === 'question' && answered.answer).toBe('answered');
+    expect(pending?.kind === 'question' && pending.answer).toBe('pending');
+    // The resolved one is no longer actionable; the still-open one is the pending question.
+    const stillPending = pendingQuestion(state);
+    expect(stillPending?.kind === 'question' && stillPending.requestId).toBe('q2');
   });
 });
 

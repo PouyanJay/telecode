@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { SessionControlAction } from '@telecode/protocol';
+  import type { QuestionAnswerItem, SessionControlAction } from '@telecode/protocol';
 
   import Composer from '$lib/components/Composer.svelte';
   import SessionHeader from '$lib/components/SessionHeader.svelte';
@@ -8,6 +8,7 @@
   import { initialSessionState, pendingPermission, type SessionState } from '$lib/session';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
+    answer,
     connectionState,
     decide,
     sendControl,
@@ -68,6 +69,10 @@
         : { requestId: pending.requestId, behavior: 'deny' },
     );
   }
+
+  function onAnswer(requestId: string, answers: QuestionAnswerItem[]): void {
+    answer(sessionId, { requestId, answers });
+  }
 </script>
 
 <svelte:head>
@@ -109,6 +114,7 @@
           entries={session.entries}
           onapprove={() => onDecide('allow')}
           onreject={() => onDecide('deny')}
+          onanswer={onAnswer}
         />
       {/if}
 

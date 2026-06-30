@@ -4,6 +4,7 @@ import {
   type Envelope,
   type MessageType,
   type PermissionDecisionPayload,
+  type QuestionAnswerPayload,
   type SessionControlAction,
   type SessionLaunchPayload,
 } from '@telecode/protocol';
@@ -62,6 +63,8 @@ export interface RelayConnection {
   sendUserMessage(sessionId: string, text: string): void;
   /** Send the human's verdict for a pending `agent.permission_request` on `sessionId`. */
   decide(sessionId: string, decision: PermissionDecisionPayload): void;
+  /** Send the human's answer to a pending `agent.question` on `sessionId` (adopted-session questions). */
+  answer(sessionId: string, payload: QuestionAnswerPayload): void;
   /** Send an operator control (interrupt / end) for `sessionId`. */
   control(sessionId: string, action: SessionControlAction): void;
   close(): void;
@@ -235,6 +238,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     },
     decide(sessionId: string, decision: PermissionDecisionPayload): void {
       enqueueSend(() => sessionFrame('permission.decision', sessionId, decision));
+    },
+    answer(sessionId: string, payload: QuestionAnswerPayload): void {
+      enqueueSend(() => sessionFrame('question.answer', sessionId, payload));
     },
     control(sessionId: string, action: SessionControlAction): void {
       enqueueSend(() => sessionFrame('session.control', sessionId, { action }));

@@ -3,13 +3,14 @@ import {
   sessionStartedPayloadSchema,
   type Envelope,
   type PermissionDecisionPayload,
+  type QuestionAnswerPayload,
   type SessionControlAction,
   type SessionLaunchPayload,
 } from '@telecode/protocol';
 import { get, writable, type Readable } from 'svelte/store';
 
 import { createRelayConnection, type ConnectionStatus, type RelayConnection } from './relay-client';
-import { appendUserMessage, markDeciding } from './session';
+import { appendUserMessage, markAnswering, markDeciding } from './session';
 import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
 /**
@@ -205,6 +206,25 @@ export function decide(sessionId: string, decision: PermissionDecisionPayload): 
     return next;
   });
   conn.decide(sessionId, decision);
+}
+
+/**
+ * Send the human's answer to an adopted session's question (Journey 2); mark it in-flight locally
+ * (confirmed on the daemon's next frame, like {@link decide}). The daemon relays it to the model as
+ * deny-feedback — best-effort (AD-4).
+ */
+export function answer(sessionId: string, payload: QuestionAnswerPayload): void {
+  const conn = connection;
+  // Guard before the optimistic mark: a dropped send would otherwise strand the picker spinning forever.
+  if (!conn) return;
+  sessionMap.update((map) => {
+    const current = map.get(sessionId);
+    if (!current) return map;
+    const next = new Map(map);
+    next.set(sessionId, markAnswering(current, payload.requestId, payload.answers));
+    return next;
+  });
+  conn.answer(sessionId, payload);
 }
 
 /** Send an operator control (interrupt / end); the daemon reports the resulting status. */
