@@ -6,10 +6,11 @@ import { z } from 'zod';
  * Stop). The bridge forwards it over the daemon's Unix socket; the daemon parses it here, at the trust
  * boundary, before correlating it to an adopted session.
  *
- * The shape is the subset telecode needs, confirmed empirically in the Phase 0 spike (Claude Code v2.1.x):
- * a `PreToolUse` event carries `tool_name` / `tool_input` / `tool_use_id` (the latter binds a gate request
- * to the exact tool call); other events omit them. Unknown fields are ignored (zod strips by default) so a
- * Claude Code version that adds fields doesn't break parsing.
+ * The shape is the subset telecode needs, confirmed empirically (Claude Code v2.1.x): a `PreToolUse` event
+ * carries `tool_name` / `tool_input` / `tool_use_id` (the latter binds a gate request to the exact tool call);
+ * `SessionStart` carries `source`; `SessionEnd` carries `reason`; `Notification` carries `message`; other
+ * events omit them. Unknown fields are ignored (zod strips by default) so a Claude Code version that adds
+ * fields doesn't break parsing.
  */
 export const hookEventSchema = z.object({
   hook_event_name: z.string().min(1),
@@ -22,5 +23,11 @@ export const hookEventSchema = z.object({
   tool_name: z.string().optional(),
   tool_input: z.record(z.unknown()).optional(),
   tool_use_id: z.string().optional(),
+  /** SessionStart: why the session started (`startup` / `resume` / `clear`). */
+  source: z.string().optional(),
+  /** SessionEnd: why the session ended (`clear` / `logout` / `other` / `prompt_input_exit`). */
+  reason: z.string().optional(),
+  /** Notification: the human-readable notification text (idle / needs-permission prompts). */
+  message: z.string().optional(),
 });
 export type HookEvent = z.infer<typeof hookEventSchema>;

@@ -377,6 +377,54 @@ describe('daemon: adopted sessions end-to-end', () => {
     // Fail-closed: the hook returns `ask` (defer to the local picker) rather than hanging forever.
     expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
   });
+
+  it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {
+    // Adopt the session via a read-only tool, ack it.
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // The Claude Code process exits → the SessionEnd hook fires. The daemon must end the adopted session
+    // (today it lingers as running forever). Non-PreToolUse events return an empty hook output.
+    const ended = hookRpc(socketPath, {
+      hook_event_name: 'SessionEnd',
+      session_id: CLAUDE_SESSION,
+      reason: 'other',
+    });
+
+    const endFrame = await relay.waitForFrame((e) => e.type === 'session.ended');
+    expect(endFrame.session_id).toBe(TELECODE_SESSION);
+    expect(endFrame.status).toBe('done'); // cleartext routing status on the envelope
+    expect(await ended).toEqual({});
+  });
+
+  it('ignores SessionEnd for a session it never adopted (no phantom row/end)', async () => {
+    // No prior adoption for this Claude session → SessionEnd must be a no-op (return {}, never force-adopt).
+    const ended = hookRpc(socketPath, {
+      hook_event_name: 'SessionEnd',
+      session_id: 'claude-never-adopted',
+      reason: 'other',
+    });
+    expect(await ended).toEqual({});
+
+    // Prove no phantom announce: a subsequent REAL adoption is the FIRST session.adopted frame (had the
+    // unknown SessionEnd wrongly announced, waitForFrame would surface that stale clientRef first).
+    const adopt = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
+    ackAdopted(relay, announce);
+    await adopt;
+  });
 });
 
 describe('daemon: an unanswered adopted question fails closed (no hook-socket deadlock)', () => {

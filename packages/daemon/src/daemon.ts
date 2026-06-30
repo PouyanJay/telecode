@@ -1038,6 +1038,28 @@ export function createDaemon(options: DaemonOptions): Daemon {
    */
   async function handleHookEvent(event: HookEvent): Promise<unknown> {
     if (!adoptedSessions) return {};
+
+    // SessionEnd (Journey 3): the Claude Code process exited. End the adopted session if we are tracking it —
+    // never force-adopt an unknown session just to end it (no phantom row). Until now adopted sessions never
+    // received a `session.ended` and lingered as running forever. Non-PreToolUse events return `{}`.
+    if (event.hook_event_name === 'SessionEnd') {
+      const knownId = adoptedSessions.telecodeIdFor(event.session_id);
+      if (knownId !== undefined) {
+        await mirrorTranscript(knownId, event.transcript_path); // capture any trailing transcript lines
+        const status = recordFor(knownId).status;
+        if (status !== 'done' && status !== 'error') {
+          if (cipher.enabled) cipher.establish(knownId); // idempotent; session.ended must encrypt under E2E
+          setStatus(knownId, 'done');
+          sendForSession(adoptedSource(knownId), 'session.ended', { status: 'done' });
+          log.info(
+            { deviceId: options.deviceId, sessionId: knownId },
+            'daemon: adopted session ended',
+          );
+        }
+      }
+      return {};
+    }
+
     let telecodeSessionId: string;
     try {
       // TODO(Journey 3): derive a `title` from the transcript's first user prompt so the registry row is

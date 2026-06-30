@@ -134,4 +134,56 @@ describe('adopted sessions: daemon-initiated registration', () => {
     expect(count.rows[0]!.n).toBe('0');
     daemon.close();
   });
+
+  it('marks an adopted external session done when the daemon sends session.ended (Journey 3)', async () => {
+    const daemon = await connectDaemon(relayUrl, userId, deviceId);
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+
+    const onBrowser = waitForEnvelope(browser, (e) => e.type === 'session.adopted');
+    daemon.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.adopted',
+          userId,
+          deviceId,
+          payload: { clientRef: 'c-end' },
+        }),
+      ),
+    );
+    const sessionId = (await onBrowser).session_id!;
+
+    // The Claude Code process exits → the daemon's SessionEnd handler sends session.ended with the cleartext
+    // routing status (the relay can't read the encrypted payload). The external row must be marked done.
+    daemon.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.ended',
+          userId,
+          deviceId,
+          sessionId,
+          status: 'done',
+          payload: { status: 'done' },
+        }),
+      ),
+    );
+
+    await vi.waitUntil(
+      async () =>
+        (
+          await admin.query<{ status: string }>('select status from sessions where id = $1', [
+            sessionId,
+          ])
+        ).rows[0]?.status === 'done',
+      { timeout: 3000 },
+    );
+    const row = await admin.query<{ status: string; ended_at: string | null }>(
+      'select status, ended_at from sessions where id = $1',
+      [sessionId],
+    );
+    expect(row.rows[0]?.status).toBe('done');
+    expect(row.rows[0]?.ended_at).not.toBeNull();
+
+    daemon.close();
+    browser.close();
+  });
 });
