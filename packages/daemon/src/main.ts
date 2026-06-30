@@ -137,6 +137,11 @@ const defaultRepoPath = process.env.TELECODE_REPO;
 // reopened session backfills its real transcript (invariant #7) rather than going blank.
 const sessionsRoot = process.env.TELECODE_SESSIONS_ROOT ?? join(telecodeHome, 'sessions');
 const sessionStore = createSessionStore({ dir: sessionsRoot, logger: log });
+// Adopt externally-started Claude Code sessions: the daemon listens here for the `telecode hook` bridge.
+// Listening is harmless until the user opts in with `telecode hooks install` (which is what makes Claude
+// Code actually call the bridge). Disable entirely with TELECODE_ADOPT=0.
+const adoptEnabled = process.env.TELECODE_ADOPT !== '0';
+const hookSocketPath = join(telecodeHome, 'run', 'hook.sock');
 
 const daemon = createDaemon({
   relayUrl: relayWsUrl,
@@ -150,6 +155,7 @@ const daemon = createDaemon({
   repoManager,
   sessionStore,
   ...(defaultRepoPath ? { defaultRepoPath } : {}),
+  ...(adoptEnabled ? { adopt: { socketPath: hookSocketPath } } : {}),
 });
 
 try {

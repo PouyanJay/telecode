@@ -8,6 +8,7 @@ import {
   makeEnvelope,
   parseEnvelope,
   permissionDecisionPayloadSchema,
+  sessionAdoptedPayloadSchema,
   sessionControlPayloadSchema,
   sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
@@ -24,6 +25,10 @@ import {
   type SessionStatusName,
 } from '@telecode/protocol';
 
+import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
+import { preToolUseOutput, type HookEvent } from './adopt/hook-event';
+import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
+import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import {
   type AgentAdapter,
   type PermissionDecision,
@@ -86,6 +91,13 @@ export interface DaemonOptions {
    * tests inject small values for speed.
    */
   readonly reconnect?: { readonly baseMs?: number; readonly maxMs?: number };
+  /**
+   * Adopt externally-started Claude Code sessions (opt-in). When set, the daemon listens on a local Unix
+   * socket for the `telecode hook` bridge: it announces each discovered session to the relay
+   * (`origin='external'`), mirrors its transcript from the hook-provided `transcript_path`, and routes its
+   * consequential tool calls through telecode's existing approval gate. Omitted (default) → no adoption.
+   */
+  readonly adopt?: { readonly socketPath: string; readonly ackTimeoutMs?: number };
   readonly logger?: Logger;
 }
 
@@ -772,6 +784,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
         handleControl(envelope, control.data.action);
         return;
       }
+      case 'session.adopted': {
+        // The relay's ACK to our announce: it carries the minted telecode session id (on the envelope) and
+        // echoes our clientRef (the Claude session id), so the manager pairs future hook events to this id.
+        if (!adoptedSessions || envelope.session_id === undefined) return;
+        const ack = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
+        if (ack.success) adoptedSessions.resolveAck(ack.data.clientRef, envelope.session_id);
+        return;
+      }
       default:
         log.debug({ type: envelope.type }, 'daemon: ignoring message');
     }
@@ -834,6 +854,120 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }, delay);
   }
 
+  // ── Adopted sessions ──────────────────────────────────────────────────────────────────────────────
+  // When `options.adopt` is set, the daemon listens on a local Unix socket for the `telecode hook` bridge
+  // and brings externally-started Claude Code sessions under telecode's monitoring + approval gate. The
+  // socket transport (T4), the id manager (T5), and the transcript mirror (T6) are wired together here.
+  const transcriptMirrors = new Map<string, TranscriptMirror>();
+
+  /** Announce a discovered external session to the relay (cleartext routing metadata, like session.launch). */
+  function announceAdopted(payload: { clientRef: string; title?: string; cwd?: string }): void {
+    enqueueSend(async () =>
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.adopted',
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload,
+          nonce: '',
+        }),
+      ),
+    );
+  }
+
+  const adoptedSessions: AdoptedSessionManager | undefined = options.adopt
+    ? createAdoptedSessionManager({
+        announce: announceAdopted,
+        ...(options.adopt.ackTimeoutMs !== undefined
+          ? { ackTimeoutMs: options.adopt.ackTimeoutMs }
+          : {}),
+        logger: log,
+      })
+    : undefined;
+
+  /**
+   * A synthetic `source` envelope so adopted sessions reuse the session send + gate helpers. Adopted
+   * sessions are cleartext (no per-session content key), so {@link sendForSession} sends plaintext.
+   */
+  function adoptedSource(telecodeSessionId: string): Envelope {
+    return makeEnvelope({
+      type: 'session.adopted',
+      userId: options.userId,
+      deviceId: options.deviceId,
+      sessionId: telecodeSessionId,
+      payload: {},
+    });
+  }
+
+  /** Pull transcript lines appended since the last event into the session record + push them to browsers. */
+  async function mirrorTranscript(
+    telecodeSessionId: string,
+    transcriptPath: string | undefined,
+    source: Envelope,
+  ): Promise<void> {
+    if (transcriptPath === undefined) return;
+    let mirror = transcriptMirrors.get(telecodeSessionId);
+    if (!mirror) {
+      mirror = createTranscriptMirror({ path: transcriptPath, logger: log });
+      transcriptMirrors.set(telecodeSessionId, mirror);
+    }
+    const entries = await mirror.sync();
+    if (entries.length === 0) return;
+    for (const entry of entries) record(telecodeSessionId, entry);
+    // Push the full transcript so the browser sees every kind — including the user's own prompts, which it
+    // never sent for an adopted session. Heavier than per-line streaming but correct for the walking
+    // skeleton (a later pass can stream incrementally + dedupe against the gate's permission entries).
+    sendForSession(source, 'session.history', historyPayloadFor(telecodeSessionId));
+  }
+
+  /**
+   * Handle one hook event from the bridge (the T4 socket calls this). Adopt the session (announce + await
+   * the relay's minted id), mirror its transcript, and for a `PreToolUse` route the tool through telecode's
+   * existing gate: a read-only tool auto-allows; a consequential one blocks on the browser's decision.
+   * FAIL-CLOSED (AD-2): any failure returns `ask` / `{}`, so Claude Code falls back to its own local prompt
+   * — never an auto-allow of a consequential tool because adoption hit a snag.
+   */
+  async function handleHookEvent(event: HookEvent): Promise<unknown> {
+    if (!adoptedSessions) return {};
+    let telecodeSessionId: string;
+    try {
+      telecodeSessionId = await adoptedSessions.ensureAdopted({
+        claudeSessionId: event.session_id,
+        ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
+      });
+    } catch (err) {
+      log.warn(
+        { err, deviceId: options.deviceId },
+        'daemon: could not adopt session — failing closed',
+      );
+      return preToolUseOutput('ask');
+    }
+    // An adopted session is live the moment we first see it.
+    if (recordFor(telecodeSessionId).status === 'starting') setStatus(telecodeSessionId, 'running');
+    const source = adoptedSource(telecodeSessionId);
+    await mirrorTranscript(telecodeSessionId, event.transcript_path, source);
+
+    if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
+      const decision = await requestPermission(source, {
+        toolName: event.tool_name,
+        input: event.tool_input ?? {},
+      });
+      return decision.behavior === 'allow'
+        ? preToolUseOutput('allow')
+        : preToolUseOutput('deny', decision.message);
+    }
+    // Non-PreToolUse events (Notification/SessionStart/etc., Journey 3) only drove adoption + the mirror.
+    return {};
+  }
+
+  const hookSocket: HookSocketServer | undefined = options.adopt
+    ? createHookSocketServer({
+        socketPath: options.adopt.socketPath,
+        handle: handleHookEvent,
+        logger: log,
+      })
+    : undefined;
+
   return {
     async start(): Promise<void> {
       await restorePersistedSessions();
@@ -853,10 +987,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
         };
         openConnection(onReady, onFirstError);
       });
+      // Listen for the `telecode hook` bridge only after the relay link is up, so an early hook event
+      // (whose announce would be dropped on a not-yet-connected socket) is unlikely to fail closed.
+      await hookSocket?.start();
     },
 
     async stop(): Promise<void> {
       stopped = true;
+      await hookSocket?.stop();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
