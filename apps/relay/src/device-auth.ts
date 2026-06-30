@@ -41,7 +41,7 @@ export interface DeviceAuthOptions {
 export type ApproveOutcome = 'approved' | 'invalid' | 'rate_limited';
 
 export interface DeviceAuthService {
-  requestCode(input: { name?: string; publicKey?: string }): DeviceCodeResponse;
+  requestCode(input: { name?: string; publicKey?: string; os?: string }): DeviceCodeResponse;
   poll(deviceCode: string): PollResult;
   /** Persist + bind the device to `userId` (server-derived). See {@link ApproveOutcome}. */
   approve(userCode: string, userId: string): Promise<ApproveOutcome>;
@@ -52,6 +52,7 @@ interface PendingRecord {
   expiresAt: number;
   name?: string;
   publicKey?: string;
+  os?: string;
   approved: boolean;
   userId?: string;
   deviceId?: string;
@@ -122,7 +123,7 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
   }
 
   return {
-    requestCode({ name, publicKey }): DeviceCodeResponse {
+    requestCode({ name, publicKey, os }): DeviceCodeResponse {
       const deviceCode = randomUUID();
       const userCode = generateUserCode();
       const record: PendingRecord = {
@@ -132,6 +133,7 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       };
       if (name !== undefined) record.name = name;
       if (publicKey !== undefined) record.publicKey = publicKey;
+      if (os !== undefined) record.os = os;
       byDeviceCode.set(deviceCode, record);
       userCodeToDeviceCode.set(userCode, deviceCode);
       return {
@@ -189,6 +191,7 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
         name: record.name ?? 'device',
         deviceTokenHash: hashDeviceToken(rawToken),
         ...(record.publicKey !== undefined ? { publicKey: record.publicKey } : {}),
+        ...(record.os !== undefined ? { os: record.os } : {}),
       });
       record.approved = true;
       record.userId = userId;
@@ -222,6 +225,7 @@ export function registerDeviceAuthRoutes(
       return service.requestCode({
         ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
         ...(parsed.data.public_key !== undefined ? { publicKey: parsed.data.public_key } : {}),
+        ...(parsed.data.os !== undefined ? { os: parsed.data.os } : {}),
       });
     },
   );

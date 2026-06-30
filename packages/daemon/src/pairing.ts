@@ -10,6 +10,8 @@ export interface PairDeviceOptions {
   readonly relayHttpUrl: string;
   /** Human label for this device (defaults to the hostname). */
   readonly name?: string;
+  /** Short OS descriptor (e.g. "macOS 15.4") shown next to the device in the UI. */
+  readonly os?: string;
   /** This device's X25519 public key (base64), registered at pairing for E2E in Phase 3. */
   readonly publicKey?: string;
   readonly intervalMs?: number;
@@ -26,13 +28,16 @@ export interface DeviceCredentials {
 }
 
 export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCredentials> {
-  const log = options.logger ?? pino({ name: 'daemon:pair' });
+  // A logger-less caller gets a silent floor (never an unredacted root logger); main.ts passes the
+  // real, redacting logger.
+  const log = options.logger ?? pino({ level: 'silent' });
 
   const codeRes = await fetch(`${options.relayHttpUrl}/device/code`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       ...(options.name !== undefined ? { name: options.name } : {}),
+      ...(options.os !== undefined ? { os: options.os } : {}),
       ...(options.publicKey !== undefined ? { public_key: options.publicKey } : {}),
     }),
   });

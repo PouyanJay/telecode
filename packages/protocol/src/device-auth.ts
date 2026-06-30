@@ -6,10 +6,14 @@ import { z } from 'zod';
  * interfaces, no `as` casts across the HTTP boundary.
  */
 
-/** Body the daemon sends to `POST /device/code` — a human label and its X25519 public key (base64). */
+/**
+ * Body the daemon sends to `POST /device/code` — a human label, its X25519 public key (base64), and a
+ * short OS descriptor (e.g. "macOS 15.4", "Ubuntu 24.04") shown next to the device in the UI.
+ */
 export const deviceCodeRequestSchema = z.object({
   name: z.string().min(1).optional(),
   public_key: z.string().min(1).optional(),
+  os: z.string().min(1).max(64).optional(),
 });
 export type DeviceCodeRequest = z.infer<typeof deviceCodeRequestSchema>;
 

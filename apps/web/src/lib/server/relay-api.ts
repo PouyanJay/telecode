@@ -29,6 +29,8 @@ export interface CreatedSession {
 export interface RelayDevice {
   id: string;
   name: string;
+  /** Short OS descriptor (e.g. "macOS 15.4") reported by the daemon at pairing; null if unknown. */
+  os: string | null;
   lastSeenAt: Date | null;
   /** The device daemon's X25519 public key (base64) for E2E key exchange; null if paired pre-E2E. */
   publicKey: string | null;
@@ -110,14 +112,41 @@ export async function listDevices(sessionToken: string): Promise<RelayDevice[]> 
     return [];
   }
   const body = (await res.json()) as {
-    devices: { id: string; name: string; last_seen_at: string | null; public_key: string | null }[];
+    devices: {
+      id: string;
+      name: string;
+      os: string | null;
+      last_seen_at: string | null;
+      public_key: string | null;
+    }[];
   };
   return body.devices.map((device) => ({
     id: device.id,
     name: device.name,
+    os: device.os,
     lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
     publicKey: device.public_key ?? null,
   }));
+}
+
+/** The outcome of a revoke attempt — `notFound` distinguishes "already gone" from a transient failure. */
+export interface RevokeResult {
+  readonly ok: boolean;
+  readonly notFound: boolean;
+}
+
+/** Revoke one of the user's devices (session-token authed; the relay scopes it to the owner). */
+export async function revokeDevice(sessionToken: string, deviceId: string): Promise<RevokeResult> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${sessionToken}` },
+    });
+    return { ok: res.ok, notFound: res.status === 404 };
+  } catch {
+    // Relay unreachable — surface a retryable failure rather than throwing a 500 at the page action.
+    return { ok: false, notFound: false };
+  }
 }
 
 /** List the user's sessions, newest-first (session-token authed). Empty on any error. */
