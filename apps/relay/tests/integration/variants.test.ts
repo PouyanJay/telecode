@@ -23,6 +23,7 @@ import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createSessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import { expectSessionStatus } from '../_helpers/db';
 import { connectBrowser } from '../_helpers/ws';
 
 /**
@@ -171,17 +172,15 @@ describe('session variants: broadcast, error paths, and the one-turn-at-a-time g
     expect(sessionEndedPayloadSchema.parse(lifecycle[0]!.payload).status).toBe('error');
 
     const sessionId = lifecycle[0]?.session_id;
-    const row = await admin.query<{ status: string }>('select status from sessions where id = $1', [
-      sessionId,
-    ]);
-    expect(row.rows[0]?.status).toBe('error');
+    await expectSessionStatus(admin, sessionId, 'error');
     browser.close();
   });
 
   it('broadcasts the whole session to every browser watching the channel', async () => {
     const adapter = createFakeAgentAdapter([
       { type: 'message', text: 'hi' },
-      { type: 'tool_use', toolName: 'Read', input: { path: 'x' } },
+      // A consequential tool so the human gate fires (a read-only tool would auto-approve, no broadcast).
+      { type: 'tool_use', toolName: 'Bash', input: { command: 'echo x' } },
       { type: 'message', text: 'bye' },
     ]);
     await withDaemon(adapter, async () => {
@@ -237,11 +236,7 @@ describe('session variants: broadcast, error paths, and the one-turn-at-a-time g
       expect(ended.status).toBe('error');
 
       const sessionId = col.frames[0]?.session_id;
-      const row = await admin.query<{ status: string }>(
-        'select status from sessions where id = $1',
-        [sessionId],
-      );
-      expect(row.rows[0]?.status).toBe('error');
+      await expectSessionStatus(admin, sessionId, 'error');
       browser.close();
     });
   });
@@ -259,20 +254,17 @@ describe('session variants: broadcast, error paths, and the one-turn-at-a-time g
       expect(sessionEndedPayloadSchema.parse(col.frames[0]!.payload).status).toBe('error');
 
       const sessionId = col.frames[0]?.session_id;
-      const row = await admin.query<{ status: string }>(
-        'select status from sessions where id = $1',
-        [sessionId],
-      );
-      expect(row.rows[0]?.status).toBe('error');
+      await expectSessionStatus(admin, sessionId, 'error');
       browser.close();
     });
   });
 
   it('runs one turn at a time per session: a follow-up during an active turn is dropped', async () => {
-    // Each turn streams a message then a gated tool, so a turn stays blocked until approved.
+    // Each turn streams a message then a gated tool, so a turn stays blocked until approved. A read-only
+    // tool would auto-approve and never block, so use a consequential one to hold the turn at the gate.
     const adapter = createFakeAgentAdapter([
       { type: 'message', text: 'turn' },
-      { type: 'tool_use', toolName: 'Read', input: {} },
+      { type: 'tool_use', toolName: 'Bash', input: { command: 'echo hi' } },
     ]);
     await withDaemon(adapter, async () => {
       const browser = await connectBrowser(relayUrl, userId, deviceId);

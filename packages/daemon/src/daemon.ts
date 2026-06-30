@@ -16,6 +16,7 @@ import {
   type Envelope,
   type MessageType,
   type PermissionDecisionPayload,
+  type PermissionModeName,
   type SessionControlAction,
   type SessionHistoryEntry,
   type SessionHistoryPayload,
@@ -29,8 +30,10 @@ import {
   type PermissionRequest,
 } from './agent-adapter';
 import { createClaudeAgentAdapter } from './claude-agent-adapter';
+import { classifyTool } from './permission-policy';
 import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
+import { type SessionStore } from './sessions/session-store';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
 /**
@@ -71,6 +74,13 @@ export interface DaemonOptions {
    */
   readonly defaultRepoPath?: string;
   /**
+   * Durable on-disk store for finished session transcripts (architecture invariant #7). When provided, the
+   * daemon loads persisted sessions on start and writes a session's transcript when it reaches a terminal
+   * state, so a reopened-but-finished session survives a daemon restart instead of backfilling empty.
+   * Omitted (e.g. in tests) keeps sessions in memory only.
+   */
+  readonly sessionStore?: SessionStore;
+  /**
    * Reconnect backoff bounds (Phase 4). The daemon dials *out* to the relay; if that link drops it
    * redials with exponential backoff + jitter between `baseMs` and `maxMs`. Defaults to 500ms → 10s;
    * tests inject small values for speed.
@@ -92,6 +102,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const worktreeManager = options.worktreeManager;
   const repoManager = options.repoManager;
   const defaultRepoPath = options.defaultRepoPath;
+  const sessionStore = options.sessionStore;
   // E2E key management (Phase 3): holds the daemon private key + per-session content keys. Cleartext when
   // no keypair is configured (existing tests / pre-E2E daemons).
   const cipher = createSessionCipher(options.keyPair?.privateKey);
@@ -141,19 +152,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // this as `session.history` — so the relay never needs the plaintext (E2E-consistent in Phase 3). Kept
   // for the daemon's lifetime; a daemon restart loses it (Phase 4 resilience), reported as offline.
   // TODO(Phase 4): evict done/error records after a TTL so a long-lived daemon doesn't grow unbounded.
-  const sessionRecords = new Map<
-    string,
-    { status: SessionStatusName; transcript: SessionHistoryEntry[] }
-  >();
-
-  /** The record for a session, created on first use. */
-  function recordFor(sessionId: string): {
+  interface SessionRecord {
     status: SessionStatusName;
     transcript: SessionHistoryEntry[];
-  } {
+    /** The mode the operator launched with; drives the per-tool gate (and is reused for follow-up turns). */
+    permissionMode: PermissionModeName;
+  }
+  const sessionRecords = new Map<string, SessionRecord>();
+
+  /** The record for a session, created on first use. */
+  function recordFor(sessionId: string): SessionRecord {
     let existing = sessionRecords.get(sessionId);
     if (!existing) {
-      existing = { status: 'starting', transcript: [] };
+      existing = { status: 'starting', transcript: [], permissionMode: 'default' };
       sessionRecords.set(sessionId, existing);
     }
     return existing;
@@ -166,7 +177,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
   /** Set a session's tracked status (no-op when the envelope carries no session id). */
   function setStatus(sessionId: string | undefined, status: SessionStatusName): void {
-    if (sessionId !== undefined) recordFor(sessionId).status = status;
+    if (sessionId === undefined) return;
+    const rec = recordFor(sessionId);
+    rec.status = status;
+    // Persist on the terminal states so a finished session survives a daemon restart (invariant #7). The
+    // full transcript is already recorded by the time a turn settles to done/error, so this captures it. A
+    // running/awaiting session is intentionally not persisted — it can't be resumed across a restart anyway.
+    if ((status === 'done' || status === 'error') && sessionStore) {
+      sessionStore.save(sessionId, {
+        status,
+        permissionMode: rec.permissionMode,
+        transcript: rec.transcript,
+      });
+    }
   }
 
   /**
@@ -179,6 +202,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return rec
       ? { status: rec.status, entries: rec.transcript }
       : { status: 'offline_paused', entries: [] };
+  }
+
+  /**
+   * Seed sessions persisted by an earlier daemon run (invariant #7) so a reopened-but-finished session
+   * backfills its real transcript instead of an empty offline record. In-memory sessions always win (there
+   * are none at start), so this only adds ids the daemon doesn't already hold. Best-effort — never fails start.
+   */
+  async function restorePersistedSessions(): Promise<void> {
+    if (!sessionStore) return;
+    try {
+      for (const [sessionId, persisted] of await sessionStore.loadAll()) {
+        if (!sessionRecords.has(sessionId)) {
+          sessionRecords.set(sessionId, {
+            status: persisted.status,
+            transcript: persisted.transcript,
+            permissionMode: persisted.permissionMode,
+          });
+        }
+      }
+      log.info({ deviceId: options.deviceId }, 'daemon: restored persisted sessions');
+    } catch (err) {
+      log.warn({ err, deviceId: options.deviceId }, 'daemon: failed to restore persisted sessions');
+    }
   }
 
   /**
@@ -254,14 +300,30 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
-   * The human-in-the-loop gate: forward a tool the agent wants to run to the browser as
-   * `agent.permission_request` and return a promise that resolves with the human's decision. The agent
-   * run is blocked on this promise until the matching `permission.decision` arrives.
+   * The human-in-the-loop gate: decide whether a tool the agent wants to run may proceed. Telecode's
+   * own policy ({@link classifyTool}) is authoritative — a read-only tool auto-runs (no prompt, no
+   * round-trip), while every consequential tool is forwarded to the browser as `agent.permission_request`
+   * and the agent run is blocked on the returned promise until the matching `permission.decision` arrives.
+   * The real adapter already forces this same policy via its `PreToolUse` hook; applying it here too makes
+   * the in-process test adapter model production and backstops any tool that reaches the gate ungated.
    */
   function requestPermission(
     source: Envelope,
     request: PermissionRequest,
   ): Promise<PermissionDecision> {
+    const mode =
+      source.session_id !== undefined
+        ? (sessionRecords.get(source.session_id)?.permissionMode ?? 'default')
+        : 'default';
+    if (classifyTool(request.toolName, mode) === 'allow') {
+      // A read-only (or mode-permitted) tool — auto-approve without a human gate. The tool itself is still
+      // streamed up as `agent.tool_use` (via the run's onEvent), so the transcript shows that it ran.
+      log.debug(
+        { deviceId: options.deviceId, sessionId: source.session_id, tool: request.toolName },
+        'daemon: tool auto-approved by policy',
+      );
+      return Promise.resolve({ behavior: 'allow' });
+    }
     const requestId = randomUUID();
     record(source.session_id, {
       kind: 'permission',
@@ -378,11 +440,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
       activeRuns.add(sessionId);
       sessionAborts.set(sessionId, abort);
     }
+    const permissionMode =
+      sessionId !== undefined ? sessionRecords.get(sessionId)?.permissionMode : undefined;
     try {
       const result = await agentAdapter.run(prompt, {
         canUseTool: (request) => requestPermission(envelope, request),
         signal: abort.signal,
         ...(cwd !== undefined ? { cwd } : {}),
+        ...(permissionMode !== undefined ? { permissionMode } : {}),
         onEvent: (event) => {
           if (event.type === 'message') {
             record(sessionId, { kind: 'message', text: event.text });
@@ -522,6 +587,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // sessions never share a cwd. A failure here fails the launch cleanly — it must never stick at `starting`.
     const cwd = await prepareWorkspace(envelope, launch.data);
     if (cwd === FAILED) return;
+    // Remember the operator's chosen mode so every turn (this one and follow-ups) gates tools the same way.
+    if (envelope.session_id !== undefined && launch.data.permissionMode !== undefined) {
+      recordFor(envelope.session_id).permissionMode = launch.data.permissionMode;
+    }
     record(envelope.session_id, { kind: 'user', text: launch.data.prompt });
     setStatus(envelope.session_id, 'running');
     // Echo the launch's correlation id so the launching browser can pair the relay-minted session id.
@@ -767,6 +836,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
   return {
     async start(): Promise<void> {
+      await restorePersistedSessions();
       await new Promise<void>((resolve, reject) => {
         let settled = false;
         const onReady = (): void => {

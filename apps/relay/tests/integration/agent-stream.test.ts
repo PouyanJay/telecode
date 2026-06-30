@@ -18,6 +18,7 @@ import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createSessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import { expectSessionStatus } from '../_helpers/db';
 import { connectBrowser } from '../_helpers/ws';
 
 /**
@@ -96,8 +97,9 @@ describe('agent streaming: launch → streamed messages/tool calls → ended', (
       browser.on('message', (raw: Buffer) => {
         const envelope = parseEnvelope(JSON.parse(raw.toString()));
         received.push(envelope);
-        // This test isn't about the gate (that's agent-permission.test.ts) — auto-approve any tool so
-        // the stream proceeds, but assert the request still appears in order.
+        // This test isn't about the gate (that's agent-permission.test.ts). The scripted tool is read-only,
+        // so it auto-approves and streams with NO permission_request; this handler just defensively approves
+        // any consequential tool that might appear so the stream always proceeds.
         if (envelope.type === 'agent.permission_request' && envelope.session_id) {
           const request = agentPermissionRequestPayloadSchema.parse(envelope.payload);
           browser.send(
@@ -124,10 +126,10 @@ describe('agent streaming: launch → streamed messages/tool calls → ended', (
     );
     await ended;
 
+    // A read-only tool auto-approves: it streams as agent.tool_use with NO preceding permission_request.
     expect(received.map((e) => e.type)).toEqual([
       'session.started',
       'agent.message',
-      'agent.permission_request',
       'agent.tool_use',
       'agent.message',
       'session.ended',
@@ -144,10 +146,7 @@ describe('agent streaming: launch → streamed messages/tool calls → ended', (
     // Every streamed frame carried the same session id, and the row is now `done`.
     const sessionId = received[0]?.session_id;
     expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
-    const row = await admin.query<{ status: string }>('select status from sessions where id = $1', [
-      sessionId,
-    ]);
-    expect(row.rows[0]?.status).toBe('done');
+    await expectSessionStatus(admin, sessionId, 'done');
 
     browser.close();
   });

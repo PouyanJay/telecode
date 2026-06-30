@@ -18,6 +18,7 @@ import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createSessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import { expectSessionStatus } from '../_helpers/db';
 import { connectBrowser } from '../_helpers/ws';
 
 /**
@@ -106,7 +107,7 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
   ): Promise<{
     types: string[];
     statusAtRequest: string | undefined;
-    finalStatus: string | undefined;
+    sessionId: string | undefined;
     toolInput: Record<string, unknown> | undefined;
   }> {
     const browser = await connectBrowser(relayUrl, userId, deviceId);
@@ -165,15 +166,11 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
     }
 
     const sessionId = received[0]?.session_id;
-    const finalRow = await admin.query<{ status: string }>(
-      'select status from sessions where id = $1',
-      [sessionId],
-    );
     const toolUse = received.find((e) => e.type === 'agent.tool_use');
     return {
       types: received.map((e) => e.type),
       statusAtRequest,
-      finalStatus: finalRow.rows[0]?.status,
+      sessionId,
       toolInput: toolUse ? agentToolUsePayloadSchema.parse(toolUse.payload).input : undefined,
     };
   }
@@ -191,7 +188,7 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
       'session.ended',
     ]);
     expect(result.toolInput).toEqual({ path: 'README.md', content: 'original' });
-    expect(result.finalStatus).toBe('done');
+    await expectSessionStatus(admin, result.sessionId, 'done');
   });
 
   it('runs the gated tool with the human-edited input on allow-with-edit', async () => {
@@ -211,7 +208,7 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
       'session.ended',
     ]);
     expect(result.toolInput).toEqual({ path: 'SAFE.md', content: 'edited by human' });
-    expect(result.finalStatus).toBe('done');
+    await expectSessionStatus(admin, result.sessionId, 'done');
   });
 
   it('never runs the gated tool when the human denies it', async () => {
@@ -230,6 +227,6 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
       'session.ended',
     ]);
     expect(result.toolInput).toBeUndefined();
-    expect(result.finalStatus).toBe('done');
+    await expectSessionStatus(admin, result.sessionId, 'done');
   });
 });

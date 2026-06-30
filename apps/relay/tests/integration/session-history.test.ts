@@ -69,7 +69,9 @@ describe('reconnect: session.subscribe → session.history backfill', () => {
       logger: pino({ level: 'silent' }),
       agentAdapter: createFakeAgentAdapter([
         { type: 'message', text: 'Working on it' },
+        // A read-only tool auto-approves (no human gate); a consequential one is gated to the operator.
         { type: 'tool_use', toolName: 'Read', input: { path: 'README.md' } },
+        { type: 'tool_use', toolName: 'Bash', input: { command: 'ls' } },
         { type: 'message', text: 'All done' },
       ]),
     });
@@ -137,15 +139,17 @@ describe('reconnect: session.subscribe → session.history backfill', () => {
 
     const payload = sessionHistoryPayloadSchema.parse(envelope.payload);
     expect(payload.status).toBe('done');
-    // The full ordered transcript: user prompt, agent text, the (resolved) gate, the tool, agent text.
+    // The full ordered transcript: user prompt, agent text, the auto-approved read (tool only, no gate),
+    // then the gated bash (resolved gate + tool), agent text.
     expect(payload.entries).toMatchObject([
       { kind: 'user', text: 'do it' },
       { kind: 'message', text: 'Working on it' },
-      { kind: 'permission', toolName: 'Read', input: { path: 'README.md' }, decision: 'allow' },
       { kind: 'tool', toolName: 'Read', input: { path: 'README.md' } },
+      { kind: 'permission', toolName: 'Bash', input: { command: 'ls' }, decision: 'allow' },
+      { kind: 'tool', toolName: 'Bash', input: { command: 'ls' } },
       { kind: 'message', text: 'All done' },
     ]);
-    const gate = payload.entries[2];
+    const gate = payload.entries[3];
     expect(gate?.kind).toBe('permission');
     if (gate?.kind === 'permission') expect(typeof gate.requestId).toBe('string');
 

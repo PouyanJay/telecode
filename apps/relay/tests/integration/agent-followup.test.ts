@@ -11,6 +11,7 @@ import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createSessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import { expectSessionStatus } from '../_helpers/db';
 import { connectBrowser } from '../_helpers/ws';
 
 /**
@@ -135,10 +136,7 @@ describe('follow-ups: launch → turn → user.message → resumed turn', () => 
     ]);
     expect(runs).toEqual([{ prompt: 'do it' }, { prompt: 'now do more', resume: SDK_SESSION_ID }]);
 
-    const row = await admin.query<{ status: string }>('select status from sessions where id = $1', [
-      sessionId,
-    ]);
-    expect(row.rows[0]?.status).toBe('done');
+    await expectSessionStatus(admin, sessionId, 'done');
 
     browser.close();
   });

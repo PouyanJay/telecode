@@ -4,12 +4,13 @@ import { makeEnvelope } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
 
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createSessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import { expectSessionStatus } from '../_helpers/db';
 import { connectBrowser, connectDaemon, waitForEnvelope } from '../_helpers/ws';
 
 /**
@@ -81,18 +82,13 @@ describe('relay reads session status from the cleartext envelope field (E2E)', (
     return launch.session_id;
   }
 
-  function statusOf(sessionId: string): Promise<string | undefined> {
-    return admin
-      .query<{ status: string }>('select status from sessions where id = $1', [sessionId])
-      .then((r) => r.rows[0]?.status);
-  }
-
   it('marks ended with the envelope status (error) when the payload is opaque ciphertext', async () => {
     const daemon = await connectDaemon(relayUrl, userId, deviceId);
     const browser = await connectBrowser(relayUrl, userId, deviceId);
     const sessionId = await launchSession(daemon, browser);
 
-    // The relay awaits the registry write before broadcasting, so observing the broadcast means written.
+    // session.ended now reaches the browser before the relay persists the status (so DONE/ERROR isn't gated
+    // on a DB round-trip), so the persisted status is asserted with a short poll.
     const ended = waitForEnvelope(browser, (e) => e.type === 'session.ended');
     daemon.send(
       JSON.stringify(
@@ -109,7 +105,7 @@ describe('relay reads session status from the cleartext envelope field (E2E)', (
     await ended;
 
     // If the relay had parsed the payload it would have fallen back to 'done'; 'error' proves it read the field.
-    expect(await statusOf(sessionId)).toBe('error');
+    await expectSessionStatus(admin, sessionId, 'error');
 
     daemon.close();
     browser.close();

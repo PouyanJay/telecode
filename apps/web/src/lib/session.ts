@@ -173,6 +173,19 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
       // replays as decided (no action buttons); a still-open one stays `pending` and actionable.
       const parsed = sessionHistoryPayloadSchema.safeParse(envelope.payload);
       if (!parsed.success) return base;
+      // Guard: an EMPTY backfill means the daemon no longer holds this session (it restarted, or a
+      // different daemon process answered) and replied `offline_paused` with no entries. Never let that
+      // wipe a transcript we already have — that is exactly the "finished session went blank on reconnect"
+      // bug. Keep our entries; keep a terminal status (a done session stays DONE, not OFFLINE), but let an
+      // in-flight session adopt the backfilled status so it can honestly show offline.
+      if (parsed.data.entries.length === 0 && base.entries.length > 0) {
+        const terminal = base.status === 'done' || base.status === 'error';
+        return {
+          ...base,
+          sessionId: envelope.session_id ?? base.sessionId,
+          status: terminal ? base.status : parsed.data.status,
+        };
+      }
       const entries: TranscriptEntry[] = parsed.data.entries.map((entry, i) => {
         const id = `e${i}`;
         switch (entry.kind) {

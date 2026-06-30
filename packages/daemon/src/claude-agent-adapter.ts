@@ -1,9 +1,10 @@
 import {
   query,
-  type PermissionMode,
+  type HookCallback,
   type PermissionResult,
   type SettingSource,
 } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionModeName } from '@telecode/protocol';
 import { pino, type Logger } from 'pino';
 
 import type {
@@ -12,6 +13,7 @@ import type {
   AgentRunResult,
   PermissionRequest,
 } from './agent-adapter';
+import { classifyTool } from './permission-policy';
 
 /**
  * The real {@link AgentAdapter} backed by the Claude Agent SDK. Maps the SDK's `canUseTool` callback
@@ -19,7 +21,7 @@ import type {
  * `ANTHROPIC_API_KEY` (or Claude Code auth) in the environment.
  */
 export interface ClaudeAgentAdapterOptions {
-  readonly permissionMode?: PermissionMode;
+  readonly permissionMode?: PermissionModeName;
   readonly allowedTools?: string[];
   readonly maxTurns?: number;
   readonly model?: string;
@@ -45,12 +47,16 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
   return {
     async run(
       prompt: string,
-      { canUseTool, onEvent, resume, cwd, signal }: AgentRunOptions,
+      { canUseTool, onEvent, resume, cwd, signal, permissionMode }: AgentRunOptions,
     ): Promise<AgentRunResult> {
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
       const denied: string[] = [];
       let sessionId: string | undefined;
+
+      // The session's mode drives both the SDK and telecode's own gate. `bypassPermissions` is never honored
+      // (telecode never surrenders the approval gate), so it is clamped to `default` for the SDK below.
+      const sessionMode: PermissionModeName = permissionMode ?? options.permissionMode ?? 'default';
 
       const sdkCanUseTool = async (
         toolName: string,
@@ -67,6 +73,27 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
         return { behavior: 'deny', message: decision.message };
       };
 
+      // THE approval-gate fix: in the SDK's `default` mode an internal classifier silently auto-allows tools
+      // it deems "safe" (reads, some bash) WITHOUT ever calling `canUseTool` — which let consequential
+      // commands run before the operator approved them. A `PreToolUse` hook fires for EVERY tool (it runs
+      // before, and bypasses, the classifier), so we force telecode's own policy here: read-only tools
+      // auto-run; everything consequential is elevated to `ask`, which routes to `sdkCanUseTool` above and
+      // therefore to the browser. The gate is telecode's, not the SDK's (architecture invariant #4).
+      const preToolUseGate: HookCallback = async (hookEvent) => {
+        if (hookEvent.hook_event_name !== 'PreToolUse') return {};
+        const decision = classifyTool(hookEvent.tool_name, sessionMode);
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: decision,
+            permissionDecisionReason:
+              decision === 'allow'
+                ? 'telecode: read-only tool auto-approved'
+                : 'telecode: forwarded to the operator for approval',
+          },
+        };
+      };
+
       // Bridge our AbortSignal onto the SDK's AbortController so an interrupt/end aborts the query.
       const abortController = new AbortController();
       if (signal) {
@@ -78,7 +105,10 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
         prompt,
         options: {
           canUseTool: sdkCanUseTool,
-          permissionMode: options.permissionMode ?? 'default',
+          hooks: { PreToolUse: [{ hooks: [preToolUseGate] }] },
+          // Drive the SDK with the session's mode (so `plan` plans and `acceptEdits` accepts), but never
+          // `bypassPermissions` — telecode's gate stays in force regardless.
+          permissionMode: sessionMode === 'bypassPermissions' ? 'default' : sessionMode,
           maxTurns: options.maxTurns ?? 4,
           settingSources: options.settingSources ?? [],
           abortController,

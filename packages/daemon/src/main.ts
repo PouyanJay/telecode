@@ -11,6 +11,7 @@ import { detectOs } from './os-info';
 import { pairDevice } from './pairing';
 import { resolveRelayUrl } from './relay-url';
 import { createGitRepoManager } from './sessions/repo-manager';
+import { createSessionStore } from './sessions/session-store';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
 
 /**
@@ -90,6 +91,10 @@ const worktreesRoot = process.env.TELECODE_WORKTREES_ROOT ?? join(telecodeHome, 
 const repoManager = createGitRepoManager({ reposRoot, logger: log });
 const worktreeManager = createGitWorktreeManager({ worktreesRoot, logger: log });
 const defaultRepoPath = process.env.TELECODE_REPO;
+// Finished session transcripts live under `~/.telecode/sessions` so they survive a daemon restart and a
+// reopened session backfills its real transcript (invariant #7) rather than going blank.
+const sessionsRoot = process.env.TELECODE_SESSIONS_ROOT ?? join(telecodeHome, 'sessions');
+const sessionStore = createSessionStore({ dir: sessionsRoot, logger: log });
 
 const daemon = createDaemon({
   relayUrl: relayWsUrl,
@@ -101,6 +106,7 @@ const daemon = createDaemon({
   logger: log,
   worktreeManager,
   repoManager,
+  sessionStore,
   ...(defaultRepoPath ? { defaultRepoPath } : {}),
 });
 

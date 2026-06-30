@@ -78,7 +78,8 @@ describe('walking skeleton: two concurrent sessions on one device, enumerated', 
       deviceId,
       logger: daemonLogger,
       agentAdapter: createFakeAgentAdapter([
-        { type: 'tool_use', toolName: 'Read', input: { path: 'README.md' } },
+        // A consequential tool so each run blocks at the human gate (a read-only tool would auto-approve).
+        { type: 'tool_use', toolName: 'Bash', input: { command: 'echo hi' } },
       ]),
     });
     await daemon.start();
