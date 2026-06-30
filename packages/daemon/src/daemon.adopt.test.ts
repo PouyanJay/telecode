@@ -259,6 +259,95 @@ describe('daemon: adopted sessions end-to-end', () => {
     });
     expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
   });
+
+  // Variant coverage (final journey task): the full hook → socket → daemon → relay → answer path over the
+  // answer shapes Claude Code can produce — single-select, multi-select, "Other" free text, and several
+  // questions in one call — each asserting the deny-feedback reason carries every relayed pick.
+  const variants = [
+    {
+      name: 'single-select',
+      questions: [
+        {
+          question: 'DB?',
+          header: 'Database',
+          multiSelect: false,
+          options: [{ label: 'Postgres' }],
+        },
+      ],
+      answers: [{ selectedLabels: ['Postgres'] }],
+      expected: ['Postgres'],
+    },
+    {
+      name: 'multi-select',
+      questions: [
+        {
+          question: 'Features?',
+          header: 'Features',
+          multiSelect: true,
+          options: [{ label: 'Auth' }, { label: 'Billing' }],
+        },
+      ],
+      answers: [{ selectedLabels: ['Auth', 'Billing'] }],
+      expected: ['Auth', 'Billing'],
+    },
+    {
+      name: 'Other free-text only',
+      questions: [
+        {
+          question: 'DB?',
+          header: 'Database',
+          multiSelect: false,
+          options: [{ label: 'Postgres' }],
+        },
+      ],
+      answers: [{ selectedLabels: [], otherText: 'DuckDB' }],
+      expected: ['DuckDB'],
+    },
+    {
+      name: 'multiple questions in one call',
+      questions: [
+        {
+          question: 'DB?',
+          header: 'Database',
+          multiSelect: false,
+          options: [{ label: 'Postgres' }],
+        },
+        { question: 'Region?', header: 'Region', multiSelect: false, options: [{ label: 'EU' }] },
+      ],
+      answers: [{ selectedLabels: ['Postgres'] }, { selectedLabels: ['EU'] }],
+      expected: ['Postgres', 'EU'],
+    },
+  ];
+
+  it.each(variants)('relays a $name answer back as deny-feedback', async (variant) => {
+    const ask = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: variant.questions },
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    const question = await relay.waitForFrame((e) => e.type === 'agent.question');
+    const requestId = (question.payload as { requestId: string }).requestId;
+
+    relay.send(
+      makeEnvelope({
+        type: 'question.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: { requestId, answers: variant.answers },
+      }),
+    );
+
+    const out = (await ask) as {
+      hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
+    for (const fragment of variant.expected) {
+      expect(out.hookSpecificOutput.permissionDecisionReason).toContain(fragment);
+    }
+  });
 });
 
 describe('daemon: an unanswered adopted question fails closed (no hook-socket deadlock)', () => {
@@ -339,6 +428,55 @@ describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
       // with a non-empty nonce, NOT the cleartext { requestId, toolName, input } object.
       expect(request.nonce).not.toBe('');
       expect(typeof request.payload).toBe('string');
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sends an adopted-session agent.question as ciphertext (questions never hit the relay in cleartext)', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-q-e2e-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const keyPair = await generateKeyPair();
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+      keyPair: {
+        publicKey: encodeKey(keyPair.publicKey),
+        privateKey: encodeKey(keyPair.privateKey),
+      },
+    });
+    await daemon.start();
+    try {
+      const blocked = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'AskUserQuestion',
+        tool_input: {
+          questions: [
+            {
+              question: 'DB?',
+              header: 'Database',
+              multiSelect: false,
+              options: [{ label: 'Postgres' }],
+            },
+          ],
+        },
+      });
+      blocked.catch(() => undefined); // resolves/rejects on stop() — we don't await it
+
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      const question = await relay.waitForFrame((e) => e.type === 'agent.question');
+
+      // Invariant #5: the question (which can contain sensitive prompt text) is opaque ciphertext to the
+      // relay — an encrypted string with a non-empty nonce, never the cleartext { requestId, questions }.
+      expect(question.nonce).not.toBe('');
+      expect(typeof question.payload).toBe('string');
     } finally {
       await daemon.stop();
       await relay.close();
