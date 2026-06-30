@@ -33,8 +33,13 @@ export const MESSAGE_TYPES = [
   'agent.message',
   'agent.tool_use',
   'agent.permission_request',
+  // adopted-session questions (daemon -> web): an `AskUserQuestion` raised by an externally-driven Claude
+  // Code session, intercepted at the PreToolUse hook so the phone can answer it (best-effort, Journey 2).
+  'agent.question',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
+  // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).
+  'question.answer',
   'user.message',
   // per-session controls (web -> daemon): end / interrupt / pause / resume
   'session.control',

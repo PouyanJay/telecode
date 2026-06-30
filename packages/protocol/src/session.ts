@@ -183,6 +183,68 @@ export const permissionDecisionPayloadSchema = z.discriminatedUnion('behavior', 
 export type PermissionDecisionPayload = z.infer<typeof permissionDecisionPayloadSchema>;
 
 /**
+ * One option of an adopted-session question, mirroring a Claude Code `AskUserQuestion` option. `description`
+ * is optional for resilience against tool-schema drift across Claude Code versions (the UI tolerates its
+ * absence); bounded so a buggy/old version can't bloat the encrypted frame.
+ */
+export const agentQuestionOptionSchema = z.object({
+  label: z.string().min(1).max(256),
+  description: z.string().max(2000).optional(),
+});
+export type AgentQuestionOption = z.infer<typeof agentQuestionOptionSchema>;
+
+/** One question of an adopted-session `AskUserQuestion`, with its options and single/multi-select mode. */
+export const agentQuestionItemSchema = z.object({
+  question: z.string().min(1).max(4000),
+  header: z.string().min(1).max(120),
+  multiSelect: z.boolean(),
+  options: z.array(agentQuestionOptionSchema).min(1).max(20),
+});
+export type AgentQuestionItem = z.infer<typeof agentQuestionItemSchema>;
+
+/**
+ * Payload for `agent.question` (daemon → web, Journey 2 / Phase 3): an adopted Claude Code session raised
+ * the built-in `AskUserQuestion` tool, intercepted at the `PreToolUse` hook. It mirrors the tool's input so
+ * the phone can render the picker; the human's reply ({@link questionAnswerPayloadSchema}) is relayed back
+ * to the model as *deny-feedback* (a best-effort answer — the only channel an externally-driven session
+ * exposes). The `requestId` correlates the question with its answer (the same gate pattern as
+ * {@link agentPermissionRequestPayloadSchema}). "Other" is always implicitly available — Claude Code sends
+ * no `allowsOther` flag — so the UI always offers a free-text field and it is carried only on the answer.
+ */
+export const agentQuestionPayloadSchema = z.object({
+  requestId: z.string().min(1),
+  questions: z.array(agentQuestionItemSchema).min(1).max(10),
+});
+export type AgentQuestionPayload = z.infer<typeof agentQuestionPayloadSchema>;
+
+/**
+ * One answer to a question, positionally matching the question at the same index. A pick is some chosen
+ * option `selectedLabels` (one for single-select, several for multi-select) and/or free-text `otherText`
+ * (the always-available "Other"). At least one must be present — an empty answer is meaningless.
+ */
+export const questionAnswerItemSchema = z
+  .object({
+    selectedLabels: z.array(z.string().min(1).max(256)).max(20).default([]),
+    otherText: z.string().min(1).max(4000).optional(),
+  })
+  .refine((a) => a.selectedLabels.length > 0 || a.otherText !== undefined, {
+    message: 'each answer must carry at least one selected label or otherText',
+  });
+export type QuestionAnswerItem = z.infer<typeof questionAnswerItemSchema>;
+
+/**
+ * Payload for `question.answer` (web → daemon, Journey 2 / Phase 3): the human's reply to a pending
+ * {@link agentQuestionPayloadSchema}, one entry per question (same order). The daemon frames these as a
+ * relayed user answer and returns it to the model via the `PreToolUse` deny-feedback channel. `requestId`
+ * ties the answer to its question.
+ */
+export const questionAnswerPayloadSchema = z.object({
+  requestId: z.string().min(1),
+  answers: z.array(questionAnswerItemSchema).min(1).max(10),
+});
+export type QuestionAnswerPayload = z.infer<typeof questionAnswerPayloadSchema>;
+
+/**
  * Payload for `user.message` (web → daemon): a follow-up instruction the human sends to steer an
  * already-launched session. The daemon resumes the same agent conversation for the next turn (the
  * session id is on the envelope).
