@@ -20,6 +20,10 @@ function deps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
       privateKey: 'sk',
     }),
     probeRelay: async () => ({ ok: true }),
+    adoptionHooks: async () => ({
+      installed: true,
+      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification'],
+    }),
     ...overrides,
   };
 }
@@ -53,6 +57,28 @@ describe('runDoctor', () => {
     expect(find(report, 'Device pairing')?.status).toBe('warn');
     // A warning must not sink the overall result — a fresh install can still pass.
     expect(report.ok).toBe(true);
+  });
+
+  it('reports adopted-session status (advisory — installed / not-installed / disabled, never fails)', async () => {
+    const installed = await runDoctor(deps());
+    const ok = find(installed, 'Adopted sessions');
+    expect(ok?.status).toBe('pass');
+    expect(ok?.detail).toContain('SessionEnd');
+
+    const notInstalled = await runDoctor(
+      deps({ adoptionHooks: async () => ({ installed: false, events: [] }) }),
+    );
+    expect(find(notInstalled, 'Adopted sessions')?.status).toBe('warn');
+    expect(find(notInstalled, 'Adopted sessions')?.detail).toContain('telecode hooks install');
+
+    const disabled = await runDoctor(
+      deps({ env: { ANTHROPIC_API_KEY: 'sk', TELECODE_ADOPT: '0' } }),
+    );
+    expect(find(disabled, 'Adopted sessions')?.status).toBe('warn');
+    expect(find(disabled, 'Adopted sessions')?.detail).toContain('TELECODE_ADOPT=0');
+
+    // Advisory only — none of these sink the run.
+    expect(notInstalled.ok && disabled.ok).toBe(true);
   });
 
   it('fails when the relay is unreachable, surfacing the probe error', async () => {

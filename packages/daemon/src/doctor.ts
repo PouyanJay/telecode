@@ -33,6 +33,8 @@ export interface DoctorDeps {
   readonly loadCredentials: () => Promise<StoredCredentials | null>;
   /** GET the relay health URL; resolves `{ ok }` (plus an `error` detail when unreachable). */
   readonly probeRelay: (healthUrl: string) => Promise<{ ok: boolean; error?: string }>;
+  /** Whether telecode's Claude Code hooks are installed (and for which events) — the adoption opt-in. */
+  readonly adoptionHooks: () => Promise<{ installed: boolean; events: readonly string[] }>;
 }
 
 /** Node floor: WebCrypto X25519 (the E2E handshake, Phase 4) needs Node 22+. */
@@ -99,6 +101,32 @@ async function relayCheck(
       );
 }
 
+/**
+ * Adoption is opt-in and optional, so this check is advisory (never `fail`): it reports whether telecode is
+ * set up to adopt the user's own Claude Code sessions — the `TELECODE_ADOPT` master switch and whether the
+ * hooks are installed in `~/.claude/settings.json` (Journey 3).
+ */
+function adoptionCheck(
+  env: NodeJS.ProcessEnv,
+  hooks: { installed: boolean; events: readonly string[] },
+): DoctorCheck {
+  if (env.TELECODE_ADOPT === '0') {
+    return makeCheck('Adopted sessions', 'warn', 'off — TELECODE_ADOPT=0 disables adoption');
+  }
+  if (!hooks.installed) {
+    return makeCheck(
+      'Adopted sessions',
+      'warn',
+      'hooks not installed — run `telecode hooks install` to adopt your own Claude Code sessions',
+    );
+  }
+  return makeCheck(
+    'Adopted sessions',
+    'pass',
+    `adopting your own sessions (hooks: ${hooks.events.join(', ')})`,
+  );
+}
+
 /** Run all diagnostics and assemble the report. */
 export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
@@ -106,6 +134,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     apiKeyCheck(deps.env),
     await pairingCheck(deps.loadCredentials),
     await relayCheck(deps.relay, deps.probeRelay),
+    adoptionCheck(deps.env, await deps.adoptionHooks()),
   ];
   return { checks, ok: checks.every((c) => c.status !== 'fail') };
 }

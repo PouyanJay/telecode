@@ -8,8 +8,15 @@ import { stripTelecodeHooks } from './strip-telecode-hooks';
  * JSON the user can inspect. Removal lives in the sibling `hooks-uninstall` / status in `hooks-status`.
  */
 
-/** The hook events telecode registers for adoption (Journey 1: PreToolUse gates tools + drives adoption). */
-const TELECODE_HOOK_EVENTS = ['PreToolUse'] as const;
+/**
+ * The hook events telecode registers for adoption:
+ *  - `PreToolUse` — gate consequential tools + answer AskUserQuestion + drive adoption (Journey 1/2).
+ *  - `SessionStart` — adopt a session before its first tool, incl. chat-only ones (Journey 3).
+ *  - `SessionEnd` — end the adopted session when the Claude Code process exits (Journey 3).
+ *  - `Notification` — surface "needs attention / went idle" cues (Journey 3).
+ * (`Stop` is reserved for the free-form handover detector in a later journey.)
+ */
+const TELECODE_HOOK_EVENTS = ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification'] as const;
 
 export interface InstallHooksOptions {
   readonly settingsPath: string;

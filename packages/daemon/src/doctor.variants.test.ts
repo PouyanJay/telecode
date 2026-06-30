@@ -20,6 +20,7 @@ function deps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
       privateKey: 'sk',
     }),
     probeRelay: async () => ({ ok: true }),
+    adoptionHooks: async () => ({ installed: true, events: ['PreToolUse'] }),
     ...overrides,
   };
 }
