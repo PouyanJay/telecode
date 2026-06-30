@@ -331,6 +331,34 @@ describe('sessionHistoryPayloadSchema', () => {
     expect(parsed.entries).toHaveLength(4);
   });
 
+  it('parses a question entry — pending (no answers) and answered (answers present)', () => {
+    const question = {
+      question: 'Which DB?',
+      header: 'DB',
+      multiSelect: false,
+      options: [{ label: 'Postgres' }],
+    };
+    const parsed = sessionHistoryPayloadSchema.parse({
+      status: 'awaiting_input',
+      entries: [
+        { kind: 'question', requestId: 'q1', questions: [question] },
+        {
+          kind: 'question',
+          requestId: 'q2',
+          questions: [question],
+          answers: [{ selectedLabels: ['Postgres'] }],
+        },
+      ],
+    });
+    expect(parsed.entries).toHaveLength(2);
+    const [pending, answered] = parsed.entries;
+    if (pending?.kind !== 'question' || answered?.kind !== 'question') {
+      throw new Error('expected question entries');
+    }
+    expect(pending.answers).toBeUndefined();
+    expect(answered.answers?.[0]?.selectedLabels).toEqual(['Postgres']);
+  });
+
   it('accepts an empty transcript (a not-live session)', () => {
     expect(
       sessionHistoryPayloadSchema.safeParse({ status: 'offline_paused', entries: [] }).success,

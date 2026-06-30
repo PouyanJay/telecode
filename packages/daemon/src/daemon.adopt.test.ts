@@ -177,6 +177,130 @@ describe('daemon: adopted sessions end-to-end', () => {
 
     expect(await bash).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
   });
+
+  it('forwards an AskUserQuestion as agent.question and relays the pick as deny-feedback', async () => {
+    // Adopt the session first (a read-only tool), then ack it.
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // Claude raises a multiple-choice question (the captured AskUserQuestion tool_input shape).
+    const ask = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'AskUserQuestion',
+      tool_use_id: 'toolu_q1',
+      tool_input: {
+        questions: [
+          {
+            question: 'Which database should we use?',
+            header: 'Database',
+            multiSelect: false,
+            options: [
+              { label: 'Postgres', description: 'Relational.' },
+              { label: 'SQLite', description: 'Embedded.' },
+            ],
+          },
+        ],
+      },
+    });
+
+    // The daemon forwards it to the browser as a structured agent.question (NOT a permission_request).
+    const question = await relay.waitForFrame((e) => e.type === 'agent.question');
+    expect(question.session_id).toBe(TELECODE_SESSION);
+    const qPayload = question.payload as {
+      requestId: string;
+      questions: { header: string; options: { label: string }[] }[];
+    };
+    expect(qPayload.questions[0]?.header).toBe('Database');
+    expect(qPayload.questions[0]?.options.map((o) => o.label)).toEqual(['Postgres', 'SQLite']);
+
+    // The user picks Postgres on the phone.
+    relay.send(
+      makeEnvelope({
+        type: 'question.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: { requestId: qPayload.requestId, answers: [{ selectedLabels: ['Postgres'] }] },
+      }),
+    );
+
+    // The hook denies the tool but carries the user's pick as a relayed answer (deny-feedback, AD-4).
+    const out = (await ask) as {
+      hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain('Postgres');
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain('relayed');
+  });
+
+  it('fails closed (ask) when the AskUserQuestion input cannot be parsed', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // A malformed AskUserQuestion (no parsable questions) must never auto-answer — defer to the local picker.
+    const ask = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'AskUserQuestion',
+      tool_input: { not_questions: true },
+    });
+    expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
+  });
+});
+
+describe('daemon: an unanswered adopted question fails closed (no hook-socket deadlock)', () => {
+  it('settles a pending question when the daemon stops, instead of hanging', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-q-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+    });
+    await daemon.start();
+    try {
+      const ask = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'AskUserQuestion',
+        tool_input: {
+          questions: [
+            { question: 'q?', header: 'H', multiSelect: false, options: [{ label: 'a' }] },
+          ],
+        },
+      });
+      // Don't let an unsettled rejection escape — we only assert that stop() releases it.
+      const settled = ask.then(
+        () => 'resolved',
+        () => 'rejected',
+      );
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      await relay.waitForFrame((e) => e.type === 'agent.question');
+
+      // No answer arrives. stop() must release the blocked question (J1's deadlock regression guard).
+      await daemon.stop();
+      expect(['resolved', 'rejected']).toContain(await settled);
+    } finally {
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {

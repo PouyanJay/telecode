@@ -289,6 +289,15 @@ export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
     input: z.record(z.unknown()),
     decision: z.enum(['pending', 'allow', 'deny']),
   }),
+  // An adopted-session multiple-choice question (Journey 2). Carries the question(s) so a replay can render
+  // the picker; `answers` is present once the human has answered (one per question) and absent while pending
+  // — the same decided-vs-pending distinction as a `permission` entry, so backfill shows it correctly.
+  z.object({
+    kind: z.literal('question'),
+    requestId: z.string().min(1),
+    questions: z.array(agentQuestionItemSchema).min(1),
+    answers: z.array(questionAnswerItemSchema).optional(),
+  }),
 ]);
 export type SessionHistoryEntry = z.infer<typeof sessionHistoryEntrySchema>;
 
