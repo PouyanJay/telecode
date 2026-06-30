@@ -34,6 +34,13 @@ export interface BrowserSessionCipher {
   publicKey(): Promise<string | undefined>;
   /** Seal a launch payload to the daemon, returning the wire fields + the announced browser pubkey. */
   sealLaunch(payload: unknown): Promise<EncryptedEnvelopeFields & { senderPublicKey: string }>;
+  /**
+   * Seal a device-scoped payload to the daemon (e.g. `adopt.config`), returning the wire fields + the
+   * announced browser pubkey for the daemon's sealed reply. Same seam as {@link sealLaunch}, session-less.
+   */
+  sealToDaemon(payload: unknown): Promise<EncryptedEnvelopeFields & { senderPublicKey: string }>;
+  /** Open a device-scoped payload the daemon sealed to this browser (e.g. `adopt.state`). */
+  openFromDaemon(envelope: Envelope): Promise<unknown>;
   /** Unwrap + store the content key from an inbound `session.key` envelope. */
   receiveKey(envelope: Envelope): Promise<void>;
   /** Whether a content key has been established for `sessionId`. */
@@ -100,6 +107,20 @@ export function createBrowserSessionCipher(
         ...sealed,
         senderPublicKey: await exportIdentityPublicKey((await keyPair()).publicKey),
       };
+    },
+
+    async sealToDaemon(payload): Promise<EncryptedEnvelopeFields & { senderPublicKey: string }> {
+      if (!enabled) throw new Error('no daemon public key for E2E');
+      const sealed = await sealPayload(payload, await sharedKey());
+      return {
+        ...sealed,
+        senderPublicKey: await exportIdentityPublicKey((await keyPair()).publicKey),
+      };
+    },
+
+    async openFromDaemon(envelope): Promise<unknown> {
+      if (!enabled) throw new Error('no daemon public key for E2E');
+      return openPayload(envelope, await sharedKey());
     },
 
     async receiveKey(envelope): Promise<void> {

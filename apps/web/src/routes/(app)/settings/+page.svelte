@@ -11,6 +11,12 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import PermissionModeField from '$lib/components/PermissionModeField.svelte';
   import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
+  import {
+    adoptState,
+    connectionState,
+    requestAdoptConfig,
+    setAdoptConfig,
+  } from '$lib/session-store';
   import { DEFAULT_PERMISSION_MODE, readPermissionMode, writePermissionMode } from '$lib/settings';
 
   import type { ActionData, PageData } from './$types';
@@ -66,6 +72,32 @@
       enabling = false;
     }
   }
+
+  // Adopted-sessions policy (Journey 3): the daemon owns it; the web reads/writes it over the sealed
+  // channel. Ask for the current policy once the channel is live; every edit sends the full new policy and
+  // the UI reflects the daemon's confirmed reply (adoptState).
+  let newDenyPath = $state('');
+  const adoptConnected = $derived($connectionState === 'connected');
+
+  $effect(() => {
+    if (adoptConnected) requestAdoptConfig();
+  });
+
+  function toggleAdoption(): void {
+    const s = $adoptState;
+    if (s) setAdoptConfig({ enabled: !s.enabled, denylist: s.denylist });
+  }
+  function addDeny(): void {
+    const s = $adoptState;
+    const path = newDenyPath.trim();
+    if (!s || path === '' || s.denylist.includes(path)) return;
+    setAdoptConfig({ enabled: s.enabled, denylist: [...s.denylist, path] });
+    newDenyPath = '';
+  }
+  function removeDeny(path: string): void {
+    const s = $adoptState;
+    if (s) setAdoptConfig({ enabled: s.enabled, denylist: s.denylist.filter((p) => p !== path) });
+  }
 </script>
 
 <svelte:head>
@@ -103,6 +135,84 @@
             </div>
           {/if}
         </div>
+      </div>
+    </Panel>
+
+    <Panel title="Adopted sessions" meta="this device">
+      <div class="body">
+        <p class="hint">
+          telecode can monitor and steer the Claude Code sessions you start yourself (terminal or IDE). Run
+          <code class="mono">telecode hooks install</code> on this device to enable it.
+        </p>
+
+        {#if !$adoptState}
+          <p class="hint">
+            {adoptConnected
+              ? 'Loading adoption settings…'
+              : 'Connect this device to manage adoption.'}
+          </p>
+        {:else}
+          <div class="toggle">
+            <div class="toggle-text">
+              <span class="toggle-label">Adopt my sessions</span>
+              <p class="hint">
+                When on, sessions you start are mirrored here — except the excluded projects below.
+              </p>
+            </div>
+            <Switch
+              checked={$adoptState.enabled}
+              onclick={toggleAdoption}
+              label="Adopt my Claude Code sessions"
+            />
+          </div>
+
+          <div class="field">
+            <span class="label">Excluded projects</span>
+            <p class="hint">
+              A session whose folder is one of these (or inside it) is never mirrored — it runs entirely on
+              your machine.
+            </p>
+            {#if $adoptState.denylist.length === 0}
+              <p class="hint">No exclusions — every project is adopted.</p>
+            {:else}
+              <ul class="denylist" role="list">
+                {#each $adoptState.denylist as path (path)}
+                  <li>
+                    <code class="mono deny-path" title={path}>{path}</code>
+                    <button
+                      class="remove"
+                      type="button"
+                      onclick={() => removeDeny(path)}
+                      aria-label={`Stop excluding ${path}`}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <form
+              class="add"
+              onsubmit={(e) => {
+                e.preventDefault();
+                addDeny();
+              }}
+            >
+              <input
+                class="deny-input mono"
+                type="text"
+                bind:value={newDenyPath}
+                placeholder="/Users/you/private-repo"
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="Project path to exclude from adoption"
+              />
+              <Button type="submit" variant="secondary" size="sm" disabled={newDenyPath.trim() === ''}>
+                Add
+              </Button>
+            </form>
+          </div>
+        {/if}
       </div>
     </Panel>
 
@@ -260,6 +370,69 @@
     margin: 0;
     font-size: var(--text-xs);
     color: var(--danger);
+  }
+  .denylist {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .denylist li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-muted);
+  }
+  .deny-path {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .remove {
+    flex: none;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+  .remove:hover {
+    color: var(--danger);
+  }
+  .remove:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus-ring);
+  }
+  .add {
+    display: flex;
+    gap: var(--space-2);
+    margin: 0;
+  }
+  .deny-input {
+    flex: 1;
+    min-width: 0;
+    /* 16px so iOS Safari doesn't auto-zoom the field on focus. */
+    font-size: 1rem;
+    color: var(--text);
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+  }
+  .deny-input:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus-ring);
   }
 
   @media (max-width: 640px) {
