@@ -75,6 +75,31 @@ export type SessionLaunchPayload = z.infer<typeof sessionLaunchPayloadSchema>;
 export const sessionStartedPayloadSchema = z.object({ clientRef: z.string().optional() });
 export type SessionStartedPayload = z.infer<typeof sessionStartedPayloadSchema>;
 
+/**
+ * How a session came to exist, mirroring the `sessions.origin` column.
+ *  - `launched` — started from telecode (a browser `session.launch`; the daemon drives it via the SDK).
+ *  - `external` — a Claude Code session the user started themselves (terminal / IDE) that telecode
+ *    **adopted** through the hooks bridge. telecode monitors + gates it but does not own its run loop.
+ * Defaults to `launched` everywhere so the registry stays backward-compatible.
+ */
+export const sessionOriginSchema = z.enum(['launched', 'external']);
+export type SessionOrigin = z.infer<typeof sessionOriginSchema>;
+
+/**
+ * Payload for `session.adopted` (daemon → relay → browser): the daemon announces an externally-started
+ * Claude Code session it discovered via the hooks bridge, so the relay mints a registry row
+ * (`origin: 'external'`) and the dashboard surfaces it. `clientRef` is the daemon's own correlation token
+ * (the Claude `session_id`); the relay echoes it back with the minted telecode `session_id` so the daemon
+ * can pair its hook events to that id — the same correlation pattern as `session.launch` → `session.started`,
+ * but daemon-initiated. `title`/`cwd` are derived hints for the row (first prompt / working directory).
+ */
+export const sessionAdoptedPayloadSchema = z.object({
+  clientRef: z.string().min(1),
+  title: z.string().min(1).optional(),
+  cwd: z.string().min(1).optional(),
+});
+export type SessionAdoptedPayload = z.infer<typeof sessionAdoptedPayloadSchema>;
+
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
   'starting',
