@@ -3,14 +3,12 @@ import { dirname } from 'node:path';
 
 import { z } from 'zod';
 
-import { isTelecodeHookCommand } from './telecode-hook-command';
-
 /**
- * The `~/.claude/settings.json` access layer shared by the `telecode hooks install|uninstall|status`
+ * The `~/.claude/settings.json` read/write layer shared by the `telecode hooks install|uninstall|status`
  * commands. It is a trust boundary (persisted JSON the user and other tools also edit), so its shape is
  * validated with zod rather than asserted with a cast — a corrupted `hooks` field must degrade to "no
- * telecode hooks", never crash. `passthrough()` preserves the user's other keys; the read/write/strip
- * helpers here are the only place that touches the file, so each operation file stays a thin one-export module.
+ * telecode hooks", never crash. `passthrough()` preserves the user's other keys. The pure
+ * {@link import('./strip-telecode-hooks').stripTelecodeHooks} transform lives in its own sibling module.
  */
 const commandHookSchema = z.object({
   type: z.literal('command'),
@@ -26,8 +24,6 @@ const claudeSettingsSchema = z
   .passthrough();
 
 export type CommandHook = z.infer<typeof commandHookSchema>;
-type MatcherGroup = z.infer<typeof matcherGroupSchema>;
-type HooksByEvent = Record<string, MatcherGroup[]>;
 export type ClaudeSettings = z.infer<typeof claudeSettingsSchema>;
 
 export async function readClaudeSettings(settingsPath: string): Promise<ClaudeSettings> {
@@ -46,19 +42,4 @@ export async function writeClaudeSettings(
 ): Promise<void> {
   await mkdir(dirname(settingsPath), { recursive: true });
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
-}
-
-/** Drop telecode's hook entries from every event; prune the empty groups/events/object it leaves behind. */
-export function stripTelecodeHooks(hooks: HooksByEvent): HooksByEvent {
-  const cleaned: HooksByEvent = {};
-  for (const [event, groups] of Object.entries(hooks)) {
-    const keptGroups = groups
-      .map((group) => ({
-        ...group,
-        hooks: group.hooks.filter((hook) => !isTelecodeHookCommand(hook.command)),
-      }))
-      .filter((group) => group.hooks.length > 0);
-    if (keptGroups.length > 0) cleaned[event] = keptGroups;
-  }
-  return cleaned;
 }

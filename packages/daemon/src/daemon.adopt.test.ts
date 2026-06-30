@@ -344,9 +344,38 @@ describe('daemon: adopted sessions end-to-end', () => {
       hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string };
     };
     expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(variant.expected.length).toBeGreaterThan(0); // guard: a misconfigured variant must fail loudly
     for (const fragment of variant.expected) {
       expect(out.hookSpecificOutput.permissionDecisionReason).toContain(fragment);
     }
+  });
+
+  it('releases a pending question when the session is interrupted (fails closed, no deadlock)', async () => {
+    const ask = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'AskUserQuestion',
+      tool_input: {
+        questions: [{ question: 'q?', header: 'H', multiSelect: false, options: [{ label: 'a' }] }],
+      },
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await relay.waitForFrame((e) => e.type === 'agent.question');
+
+    // The operator interrupts the session while the question is still pending. An adopted session has no
+    // AbortController, so stopTurn must explicitly release the pending question (J1 deadlock guard).
+    relay.send(
+      makeEnvelope({
+        type: 'session.control',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: { action: 'interrupt' },
+      }),
+    );
+
+    // Fail-closed: the hook returns `ask` (defer to the local picker) rather than hanging forever.
+    expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
   });
 });
 

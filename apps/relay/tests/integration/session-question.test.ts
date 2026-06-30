@@ -1,11 +1,16 @@
 import type { AddressInfo } from 'node:net';
 
-import { makeEnvelope, type Envelope } from '@telecode/protocol';
+import {
+  agentQuestionPayloadSchema,
+  makeEnvelope,
+  questionAnswerPayloadSchema,
+  type Envelope,
+} from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
 import WebSocket from 'ws';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
@@ -41,6 +46,20 @@ describe('adopted sessions: question routing', () => {
   let relayUrl: string;
   let userId: string;
   let deviceId: string;
+  // Track every socket a test opens so afterEach closes them unconditionally — even if an assertion throws
+  // mid-test (an inline close at the end of the body would leak the socket on failure).
+  const openSockets: WebSocket[] = [];
+
+  async function daemonConn(): Promise<WebSocket> {
+    const socket = await connectDaemon(relayUrl, userId, deviceId);
+    openSockets.push(socket);
+    return socket;
+  }
+  async function browserConn(): Promise<WebSocket> {
+    const socket = await connectBrowser(relayUrl, userId, deviceId);
+    openSockets.push(socket);
+    return socket;
+  }
 
   beforeAll(async () => {
     if (!DATABASE_URL) {
@@ -79,6 +98,10 @@ describe('adopted sessions: question routing', () => {
     await admin.query('truncate table sessions');
   });
 
+  afterEach(() => {
+    for (const socket of openSockets.splice(0)) socket.close();
+  });
+
   /** Adopt an external session and return the relay-minted id (the daemon↔browser pairing of Task 3). */
   async function adopt(daemon: WebSocket, browser: WebSocket): Promise<string> {
     const onBrowser = waitForEnvelope(browser, (e) => e.type === 'session.adopted');
@@ -113,8 +136,8 @@ describe('adopted sessions: question routing', () => {
   }
 
   it('persists awaiting_input and broadcasts agent.question to the browser', async () => {
-    const daemon = await connectDaemon(relayUrl, userId, deviceId);
-    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    const daemon = await daemonConn();
+    const browser = await browserConn();
     const sessionId = await adopt(daemon, browser);
 
     const onQuestion = waitForEnvelope(browser, (e) => e.type === 'agent.question');
@@ -122,18 +145,17 @@ describe('adopted sessions: question routing', () => {
     const received = await onQuestion;
 
     // The browser sees the question; once it does, the relay has already persisted awaiting_input
-    // (markAwaitingInput is awaited before the broadcast).
+    // (markAwaitingInput is awaited before the broadcast). Parse the payload so a shape regression fails loudly.
     expect(received.session_id).toBe(sessionId);
-    expect((received.payload as typeof QUESTION_PAYLOAD).questions[0]!.header).toBe('Database');
+    expect(agentQuestionPayloadSchema.parse(received.payload).questions[0]?.header).toBe(
+      'Database',
+    );
     expect(await statusOf(sessionId)).toBe('awaiting_input');
-
-    daemon.close();
-    browser.close();
   });
 
   it('flips the session back to running and forwards question.answer to the daemon', async () => {
-    const daemon = await connectDaemon(relayUrl, userId, deviceId);
-    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    const daemon = await daemonConn();
+    const browser = await browserConn();
     const sessionId = await adopt(daemon, browser);
     const onQuestion = waitForEnvelope(browser, (e) => e.type === 'agent.question');
     sendQuestion(daemon, sessionId);
@@ -154,23 +176,20 @@ describe('adopted sessions: question routing', () => {
     const forwarded = await onAnswer;
 
     // The daemon receives the opaque answer; by then the relay has already flipped the row to running.
-    expect((forwarded.payload as { requestId: string }).requestId).toBe('q1');
+    expect(questionAnswerPayloadSchema.parse(forwarded.payload).requestId).toBe('q1');
     expect(await statusOf(sessionId)).toBe('running');
-
-    daemon.close();
-    browser.close();
   });
 
   it('caches agent.question so a reopening browser replays the pending question', async () => {
-    const daemon = await connectDaemon(relayUrl, userId, deviceId);
-    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    const daemon = await daemonConn();
+    const browser = await browserConn();
     const sessionId = await adopt(daemon, browser);
     const onQuestion = waitForEnvelope(browser, (e) => e.type === 'agent.question');
     sendQuestion(daemon, sessionId);
     await onQuestion;
 
     // A second browser reopens the session — the relay replays the cached question immediately.
-    const reopened = await connectBrowser(relayUrl, userId, deviceId);
+    const reopened = await browserConn();
     const onReplay = waitForEnvelope(reopened, (e) => e.type === 'agent.question');
     reopened.send(
       JSON.stringify(
@@ -179,10 +198,8 @@ describe('adopted sessions: question routing', () => {
     );
     const replayed = await onReplay;
     expect(replayed.session_id).toBe(sessionId);
-    expect((replayed.payload as typeof QUESTION_PAYLOAD).questions[0]!.header).toBe('Database');
-
-    daemon.close();
-    browser.close();
-    reopened.close();
+    expect(agentQuestionPayloadSchema.parse(replayed.payload).questions[0]?.header).toBe(
+      'Database',
+    );
   });
 });

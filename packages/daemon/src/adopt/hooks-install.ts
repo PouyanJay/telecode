@@ -1,9 +1,5 @@
-import {
-  readClaudeSettings,
-  stripTelecodeHooks,
-  writeClaudeSettings,
-  type CommandHook,
-} from './claude-settings';
+import { readClaudeSettings, writeClaudeSettings, type CommandHook } from './claude-settings';
+import { stripTelecodeHooks } from './strip-telecode-hooks';
 
 /**
  * Install telecode's Claude Code hooks into `~/.claude/settings.json`. Adoption is opt-in and reversible:

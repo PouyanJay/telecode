@@ -33,12 +33,20 @@ describe('buildQuestionDenyReason', () => {
     expect(reason).toContain('"Features": Auth, Billing');
   });
 
-  it('includes "Other" free text alongside (or instead of) selected labels', () => {
+  it('includes "Other" free text instead of selected labels', () => {
     const reason = buildQuestionDenyReason(
       [dbQuestion],
       [{ selectedLabels: [], otherText: 'DuckDB, actually' }],
     );
     expect(reason).toContain('"Database": DuckDB, actually');
+  });
+
+  it('combines a selected label AND "Other" free text on the same question', () => {
+    const reason = buildQuestionDenyReason(
+      [dbQuestion],
+      [{ selectedLabels: ['Postgres'], otherText: 'and DuckDB for analytics' }],
+    );
+    expect(reason).toContain('"Database": Postgres, and DuckDB for analytics');
   });
 
   it('lists one line per question for a multi-question call', () => {

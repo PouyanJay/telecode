@@ -19,8 +19,6 @@
     onanswer,
   }: { entry: QuestionEntry; onanswer: (answers: QuestionAnswerItem[]) => void } = $props();
 
-  const OTHER = '__other__';
-
   /** One working answer per question: the chosen option label(s) plus the always-available free text. */
   type Draft = { selected: string[]; otherOn: boolean; otherText: string };
   // Seed once from the (id-keyed, stable) entry; the operator then edits this local copy independently.

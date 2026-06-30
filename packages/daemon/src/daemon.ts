@@ -156,14 +156,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
   >();
   // Adopted-session questions the hook is blocked on (Journey 2), keyed by the same correlation id we send
   // to the browser; each resolves when its `question.answer` returns. `null` settles it fail-closed (the
-  // daemon is stopping / no remote answer) so the hook defers to Claude Code's own local picker.
+  // daemon is stopping, or the turn was interrupted/ended) so the hook defers to Claude Code's own picker.
   const pendingQuestions = new Map<
     string,
-    {
-      sessionId: string | undefined;
-      questions: AgentQuestionItem[];
-      resolve: (answers: QuestionAnswerItem[] | null) => void;
-    }
+    { sessionId: string | undefined; resolve: (answers: QuestionAnswerItem[] | null) => void }
   >();
   // The agent conversation id per telecode session, so a `user.message` follow-up resumes the same chat.
   const sdkSessions = new Map<string, string>();
@@ -395,7 +391,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     record(source.session_id, { kind: 'question', requestId, questions });
     setStatus(source.session_id, 'awaiting_input');
     return new Promise<QuestionAnswerItem[] | null>((resolve) => {
-      pendingQuestions.set(requestId, { sessionId: source.session_id, questions, resolve });
+      pendingQuestions.set(requestId, { sessionId: source.session_id, resolve });
       log.info(
         { deviceId: options.deviceId, sessionId: source.session_id, requestId },
         'daemon: question relayed to browser',
@@ -430,6 +426,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (entry) entry.decision = 'deny';
       pendingPermissions.delete(requestId);
       pending.resolve({ behavior: 'deny', message: reason });
+    }
+    // Release any adopted-session question the hook is blocked on for this session — same deadlock guard as
+    // the permissions above. `null` fails it closed (the hook returns `ask`, deferring to the local picker);
+    // adopted sessions have no AbortController, so without this an interrupt/end would strand the hook.
+    for (const [requestId, pending] of pendingQuestions) {
+      if (pending.sessionId !== sessionId) continue;
+      pendingQuestions.delete(requestId);
+      pending.resolve(null);
     }
     const abort = sessionAborts.get(sessionId);
     if (abort) {
