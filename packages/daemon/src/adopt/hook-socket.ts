@@ -39,8 +39,13 @@ export function createHookSocketServer(options: HookSocketOptions): HookSocketSe
   const log = options.logger ?? pino({ name: 'hook-socket' });
   const { socketPath } = options;
   let server: Server | undefined;
+  // Track live connections so stop() can force-close any whose handler is still blocked on a human
+  // decision — otherwise server.close() would wait on them forever and the daemon couldn't shut down.
+  const connections = new Set<Socket>();
 
   function onConnection(socket: Socket): void {
+    connections.add(socket);
+    socket.once('close', () => connections.delete(socket));
     const chunks: Buffer[] = [];
     socket.on('data', (chunk: Buffer) => chunks.push(chunk));
     socket.on('error', (err) => log.warn({ err }, 'hook-socket: connection error'));
@@ -91,6 +96,10 @@ export function createHookSocketServer(options: HookSocketOptions): HookSocketSe
       const listening = server;
       server = undefined;
       if (listening) {
+        // Force-close any in-flight connection first (a handler may still be blocked on a human decision),
+        // then close the server — otherwise server.close() would await those connections indefinitely.
+        for (const socket of connections) socket.destroy();
+        connections.clear();
         await new Promise<void>((resolve) => listening.close(() => resolve()));
       }
       await rm(socketPath, { force: true });

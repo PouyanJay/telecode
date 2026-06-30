@@ -3,7 +3,7 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { makeEnvelope, type Envelope } from '@telecode/protocol';
+import { encodeKey, generateKeyPair, makeEnvelope, type Envelope } from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createFakeAgentAdapter } from './agent-adapter';
@@ -31,7 +31,15 @@ function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
     client.on('data', (chunk: Buffer) => {
       out += chunk.toString('utf8');
     });
-    client.on('end', () => resolve(JSON.parse(out)));
+    client.on('end', () => {
+      // A force-closed connection (daemon stop while the gate blocks) leaves `out` empty — reject rather
+      // than let JSON.parse throw uncaught inside this event callback.
+      try {
+        resolve(JSON.parse(out));
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('hook response parse failed'));
+      }
+    });
     client.on('error', reject);
   });
 }
@@ -168,5 +176,49 @@ describe('daemon: adopted sessions end-to-end', () => {
     );
 
     expect(await bash).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
+});
+
+describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
+  it('sends adopted-session frames to the relay as ciphertext, not plaintext', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-e2e-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const keyPair = await generateKeyPair();
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+      // A keypair (as every paired daemon has) makes adopted sessions run end-to-end encrypted.
+      keyPair: {
+        publicKey: encodeKey(keyPair.publicKey),
+        privateKey: encodeKey(keyPair.privateKey),
+      },
+    });
+    await daemon.start();
+    try {
+      // The hook will block on the gate (Bash is consequential); we only assert what the relay sees.
+      const blocked = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'Bash',
+        tool_input: { command: 'ls' },
+      });
+      blocked.catch(() => undefined); // resolves/rejects on stop() — we don't await it
+
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      const request = await relay.waitForFrame((e) => e.type === 'agent.permission_request');
+
+      // Invariant #5: the relay forwards ciphertext only — the gate payload is an opaque encrypted string
+      // with a non-empty nonce, NOT the cleartext { requestId, toolName, input } object.
+      expect(request.nonce).not.toBe('');
+      expect(typeof request.payload).toBe('string');
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

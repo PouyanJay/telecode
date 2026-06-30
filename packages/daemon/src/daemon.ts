@@ -944,6 +944,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     // An adopted session is live the moment we first see it.
     if (recordFor(telecodeSessionId).status === 'starting') setStatus(telecodeSessionId, 'running');
+    // E2E (invariant #5): mint this session's content key so its frames go to the relay as ciphertext, not
+    // plaintext. Idempotent. The key is delivered to the browser on `session.subscribe` (it announces its
+    // pubkey then), exactly like a launched session's reconnect. Cleartext only on a pre-E2E daemon (tests).
+    if (cipher.enabled) cipher.establish(telecodeSessionId);
     const source = adoptedSource(telecodeSessionId);
     await mirrorTranscript(telecodeSessionId, event.transcript_path, source);
 
@@ -994,17 +998,18 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
     async stop(): Promise<void> {
       stopped = true;
-      await hookSocket?.stop();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      // Unblock any in-flight turns waiting on a human decision so their runs can finish instead of
-      // hanging on a closed socket.
+      // Unblock any in-flight turns waiting on a human decision (incl. an adopted session's hook, which is
+      // blocking the hook socket) so their runs finish instead of hanging on a closed socket. Settle BEFORE
+      // stopping the hook socket, so a blocked hook gets its deny response rather than a dropped connection.
       for (const { resolve } of pendingPermissions.values()) {
         resolve({ behavior: 'deny', message: 'daemon stopping' });
       }
       pendingPermissions.clear();
+      await hookSocket?.stop();
       socket?.close();
       socket = null;
     },
