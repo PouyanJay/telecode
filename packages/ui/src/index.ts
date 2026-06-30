@@ -9,4 +9,5 @@ export { IconButton } from './IconButton';
 export { Panel } from './Panel';
 export { Pill, type PillTone } from './Pill';
 export { StatusDot } from './StatusDot';
+export { Switch } from './Switch';
 export { trapFocus } from './actions';

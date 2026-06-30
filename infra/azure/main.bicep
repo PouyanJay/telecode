@@ -45,6 +45,8 @@ param githubClientId string = ''
 param ratelimitAllowlist string = ''
 @description('Opt-in relay telemetry: empty (off) or "on".')
 param telemetryEnabled string = ''
+@description('Comma-separated operator emails allowed to use the infra scale-to-zero toggles. Empty disables the controls.')
+param operatorEmails string = ''
 
 // --- Secrets (pass at deploy time; never commit) ---------------------------------------------------------
 @secure()
@@ -121,6 +123,43 @@ resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+// Least-privilege role for the operator scale-to-zero toggles: read + write Container Apps and NOTHING
+// else. Granted to the same managed identity the relay runs as, so the relay flips minReplicas via ARM with
+// no stored secret. Creating a custom role definition + assignment needs Owner / User Access Administrator
+// at deploy time (the operator has it). Absent the assignment, the relay's `getSettings` simply fails (502)
+// and the toggles error — no security impact.
+resource scaleRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, 'telecode-containerapp-scaler')
+  properties: {
+    roleName: 'Telecode Container App Scaler (${namePrefix})'
+    description: 'Read and update Container Apps (operator scale-to-zero toggles). Least privilege.'
+    type: 'CustomRole'
+    permissions: [
+      {
+        actions: [
+          'Microsoft.App/containerApps/read'
+          'Microsoft.App/containerApps/write'
+        ]
+        notActions: []
+        dataActions: []
+        notDataActions: []
+      }
+    ]
+    assignableScopes: [
+      resourceGroup().id
+    ]
+  }
+}
+
+resource scaleRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, uami.id, 'containerapp-scaler')
+  properties: {
+    roleDefinitionId: scaleRole.id
+    principalId: uami.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 // No Redis: the relay is a single replica, so its in-memory rate-limit store is equivalent to a shared one
 // (Redis only matters across multiple relay instances — which also need a routing backplane, future work).
 // The classic Azure Cache for Redis is being retired; re-add via Azure Managed Redis if the relay ever scales.
@@ -183,6 +222,14 @@ resource relay 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'RELAY_SERVICE_SECRET', secretRef: 'relay-service-secret' }
             { name: 'TOKEN_ENCRYPTION_KEY', secretRef: 'token-encryption-key' }
             { name: 'VAPID_PRIVATE_KEY', secretRef: 'vapid-private-key' }
+            // Operator scale-to-zero toggles. With an operator allowlist + this Azure context, the relay
+            // can read/write each app's minReplicas via its managed identity (the scaleRole above).
+            { name: 'TELECODE_OPERATOR_EMAILS', value: operatorEmails }
+            { name: 'AZURE_SUBSCRIPTION_ID', value: subscription().subscriptionId }
+            { name: 'AZURE_RESOURCE_GROUP', value: resourceGroup().name }
+            { name: 'AZURE_WEB_APP_NAME', value: '${namePrefix}-web' }
+            { name: 'AZURE_RELAY_APP_NAME', value: '${namePrefix}-relay' }
+            { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
           ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/healthz', port: 8080 }, initialDelaySeconds: 5, periodSeconds: 15 }

@@ -17,6 +17,8 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@azure/arm-appcontainers": "^3.0.0",
+    "@azure/identity": "^4.13.1",
     "@fastify/rate-limit": "^11.0.0",
     "@fastify/websocket": "^11.0.2",
     "@telecode/protocol": "workspace:*",
