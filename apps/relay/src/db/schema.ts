@@ -1,4 +1,4 @@
-import { SESSION_STATUSES } from '@telecode/protocol';
+import { SESSION_ORIGINS, SESSION_STATUSES } from '@telecode/protocol';
 import { index, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
 
 /**
@@ -70,6 +70,12 @@ export const sessions = pgTable(
       .references(() => devices.id, { onDelete: 'cascade' }),
     title: text('title'),
     status: text('status', { enum: SESSION_STATUSES }).default('starting').notNull(),
+    /**
+     * How the session came to exist: `launched` (started from telecode, daemon-driven via the SDK) or
+     * `external` (a Claude Code session the user started themselves, adopted via the hooks bridge). Defaults
+     * to `launched` so every pre-existing row and every browser-initiated launch is unchanged.
+     */
+    origin: text('origin', { enum: SESSION_ORIGINS }).default('launched').notNull(),
     /** Working directory the session runs in (single cwd in Phase 1; worktrees in Phase 2). */
     cwd: text('cwd'),
     permissionMode: text('permission_mode'),

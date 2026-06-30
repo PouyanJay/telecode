@@ -61,6 +61,7 @@ export {
   sessionRepoSchema,
   sessionLaunchPayloadSchema,
   sessionStartedPayloadSchema,
+  SESSION_ORIGINS,
   sessionOriginSchema,
   sessionAdoptedPayloadSchema,
   SESSION_STATUSES,

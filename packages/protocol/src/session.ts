@@ -82,7 +82,8 @@ export type SessionStartedPayload = z.infer<typeof sessionStartedPayloadSchema>;
  *    **adopted** through the hooks bridge. telecode monitors + gates it but does not own its run loop.
  * Defaults to `launched` everywhere so the registry stays backward-compatible.
  */
-export const sessionOriginSchema = z.enum(['launched', 'external']);
+export const SESSION_ORIGINS = ['launched', 'external'] as const;
+export const sessionOriginSchema = z.enum(SESSION_ORIGINS);
 export type SessionOrigin = z.infer<typeof sessionOriginSchema>;
 
 /**
