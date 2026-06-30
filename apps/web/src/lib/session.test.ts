@@ -310,6 +310,34 @@ describe('session reducer: adopted-session questions (Journey 2)', () => {
   });
 });
 
+describe('session reducer: adopted-session notice (Journey 3)', () => {
+  it('sets the notice on agent.notice (needs attention)', () => {
+    const state = fold([
+      frame('session.started', {}),
+      frame('agent.notice', { message: 'Claude is waiting for your input' }),
+    ]);
+    expect(state.notice).toBe('Claude is waiting for your input');
+  });
+
+  it('clears the notice on the next frame (the session moved on)', () => {
+    let state = fold([frame('session.started', {}), frame('agent.notice', { message: 'idle' })]);
+    expect(state.notice).toBe('idle');
+    state = applyEnvelope(state, frame('agent.message', { text: 'back to work' }));
+    expect(state.notice).toBeNull();
+  });
+
+  it('clears the notice when the session ends', () => {
+    let state = fold([frame('session.started', {}), frame('agent.notice', { message: 'idle' })]);
+    state = applyEnvelope(state, frame('session.ended', { status: 'done' }));
+    expect(state.notice).toBeNull();
+  });
+
+  it('ignores an agent.notice with an invalid payload', () => {
+    const state = applyEnvelope(startingState(), frame('agent.notice', { message: '' }));
+    expect(state.notice).toBeNull();
+  });
+});
+
 // Variant coverage (Task 11): every wire session status must have a display mapping — a parametrized
 // guard so adding a status without a display fails here.
 describe('session status coverage', () => {
