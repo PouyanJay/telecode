@@ -36,6 +36,13 @@
       "when": 1782778238324,
       "tag": "0004_device_os",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1782840201170,
+      "tag": "0005_session_origin",
+      "breakpoints": true
     }
   ]
 }

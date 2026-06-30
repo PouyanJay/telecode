@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
   agentPermissionRequestPayloadSchema,
   permissionDecisionPayloadSchema,
+  sessionAdoptedPayloadSchema,
   sessionControlPayloadSchema,
   sessionHistoryPayloadSchema,
   sessionKeyPayloadSchema,
   sessionLaunchPayloadSchema,
+  sessionOriginSchema,
   userMessagePayloadSchema,
 } from './session';
 
@@ -210,6 +212,42 @@ describe('sessionHistoryPayloadSchema', () => {
       entries: [{ kind: 'diff', text: 'x' }],
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('sessionOriginSchema (adopted sessions)', () => {
+  it('parses the two origins', () => {
+    for (const origin of ['launched', 'external'] as const) {
+      expect(sessionOriginSchema.parse(origin)).toBe(origin);
+    }
+  });
+
+  it('rejects an unknown origin', () => {
+    expect(sessionOriginSchema.safeParse('imported').success).toBe(false);
+  });
+});
+
+describe('sessionAdoptedPayloadSchema (adopted sessions)', () => {
+  it('parses a daemon adoption announce with a derived title + cwd', () => {
+    const parsed = sessionAdoptedPayloadSchema.parse({
+      clientRef: 'claude-abc123',
+      title: 'fix the bug',
+      cwd: '/Users/me/repo',
+    });
+    expect(parsed.clientRef).toBe('claude-abc123');
+    expect(parsed.title).toBe('fix the bug');
+    expect(parsed.cwd).toBe('/Users/me/repo');
+  });
+
+  it('parses with only the required clientRef (title/cwd optional)', () => {
+    const parsed = sessionAdoptedPayloadSchema.parse({ clientRef: 'c1' });
+    expect(parsed.title).toBeUndefined();
+    expect(parsed.cwd).toBeUndefined();
+  });
+
+  it('rejects an announce without a clientRef (the daemon↔id correlation)', () => {
+    expect(sessionAdoptedPayloadSchema.safeParse({ title: 'x' }).success).toBe(false);
+    expect(sessionAdoptedPayloadSchema.safeParse({ clientRef: '' }).success).toBe(false);
   });
 });
 

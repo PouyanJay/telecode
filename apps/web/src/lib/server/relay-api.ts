@@ -1,4 +1,4 @@
-import { type SessionStatusName } from '@telecode/protocol';
+import { type SessionOrigin, type SessionStatusName } from '@telecode/protocol';
 
 import { env } from '$env/dynamic/private';
 
@@ -42,6 +42,8 @@ export interface RelaySession {
   deviceId: string;
   title: string | null;
   status: SessionStatusName;
+  /** `launched` (started from telecode) or `external` (a session telecode adopted from the user's machine). */
+  origin: SessionOrigin;
   createdAt: Date;
   updatedAt: Date;
   endedAt: Date | null;
@@ -163,6 +165,7 @@ export async function listSessions(sessionToken: string): Promise<RelaySession[]
       device_id: string;
       title: string | null;
       status: SessionStatusName;
+      origin?: SessionOrigin;
       created_at: string;
       updated_at: string;
       ended_at: string | null;
@@ -173,6 +176,8 @@ export async function listSessions(sessionToken: string): Promise<RelaySession[]
     deviceId: session.device_id,
     title: session.title,
     status: session.status,
+    // Default to `launched` so a relay that predates the origin field degrades cleanly.
+    origin: session.origin ?? 'launched',
     createdAt: new Date(session.created_at),
     updatedAt: new Date(session.updated_at),
     endedAt: session.ended_at ? new Date(session.ended_at) : null,

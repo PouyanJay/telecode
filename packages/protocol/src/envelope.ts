@@ -26,6 +26,9 @@ export const MESSAGE_TYPES = [
   'session.launch',
   'session.started',
   'session.ended',
+  // adopted sessions (daemon -> relay -> web): the daemon announces an externally-started Claude Code
+  // session it discovered via the hooks bridge, so the relay mints a registry row (origin='external').
+  'session.adopted',
   // agent stream (daemon -> web)
   'agent.message',
   'agent.tool_use',

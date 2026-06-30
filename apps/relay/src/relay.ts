@@ -7,6 +7,7 @@ import {
   helloPayloadSchema,
   makeEnvelope,
   parseEnvelope,
+  sessionAdoptedPayloadSchema,
   sessionEndedPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
@@ -375,6 +376,66 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
+    // Adopted sessions: the daemon discovered a Claude Code session the user started themselves and
+    // announces it (no id yet). The relay mints an `origin='external'` row — daemon-initiated registration,
+    // the mirror of a browser `session.launch` — then ACKs the daemon with the minted id (so it can pair
+    // its hook events) and broadcasts the adopted session to the browsers. Routing metadata only; the
+    // relay never reads the agent payload.
+    if (
+      envelope.type === 'session.adopted' &&
+      sessionRegistry &&
+      envelope.session_id === undefined
+    ) {
+      const parsed = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) {
+        log.warn({ channel }, 'relay: dropped session.adopted with invalid payload');
+        return;
+      }
+      const { clientRef, title, cwd } = parsed.data;
+      const sessionId = await sessionRegistry.createSession({
+        userId: envelope.user_id,
+        deviceId: envelope.device_id,
+        origin: 'external',
+        ...(title !== undefined ? { title } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
+      });
+      log.info({ channel, sessionId }, 'relay: session adopted (external)');
+      // ACK the daemon with the minted id + its own clientRef so it can pair its hook events to this id.
+      daemons.get(channel)?.send(
+        JSON.stringify(
+          makeEnvelope({
+            type: 'session.adopted',
+            userId: envelope.user_id,
+            deviceId: envelope.device_id,
+            sessionId,
+            payload: { clientRef },
+          }),
+        ),
+      );
+      // Surface the new adopted session to the watching browsers (the dashboard renders it as on-device).
+      broadcastToBrowsers(
+        channel,
+        JSON.stringify(
+          makeEnvelope({
+            type: 'session.adopted',
+            userId: envelope.user_id,
+            deviceId: envelope.device_id,
+            sessionId,
+            payload: {
+              clientRef,
+              ...(title !== undefined ? { title } : {}),
+              ...(cwd !== undefined ? { cwd } : {}),
+            },
+          }),
+        ),
+      );
+      return;
+    }
+    // Any other `session.adopted` (e.g. one already carrying a session_id) is handled entirely above; drop
+    // it rather than letting it fall through to the broadcast at the end of this function.
+    if (envelope.type === 'session.adopted') {
+      return;
+    }
     // `session.ended` is terminal: get DONE to the watching browser IMMEDIATELY, then persist. The browser
     // is the live view and the daemon is the source of truth, so making the operator wait on a DB
     // round-trip to see the run finish — slow on a cold/auto-pausing DB — is the wrong tradeoff here. (The

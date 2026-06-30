@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD COLUMN "origin" text DEFAULT 'launched' NOT NULL;

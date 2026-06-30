@@ -1,4 +1,4 @@
-import { type SessionStatusName } from '@telecode/protocol';
+import { type SessionOrigin, type SessionStatusName } from '@telecode/protocol';
 import { and, desc, eq } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
@@ -14,6 +14,8 @@ export interface SessionSummary {
   readonly deviceId: string;
   readonly title: string | null;
   readonly status: SessionStatusName;
+  /** `launched` (started from telecode) or `external` (a user's own Claude Code session telecode adopted). */
+  readonly origin: SessionOrigin;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly endedAt: Date | null;
@@ -26,8 +28,18 @@ export interface SessionSummary {
  * scopes them to the owning user.
  */
 export interface SessionRegistry {
-  /** Insert a new `starting` session for the user/device and return its generated id. */
-  createSession(input: { userId: string; deviceId: string }): Promise<string>;
+  /**
+   * Insert a new session for the user/device and return its generated id. A `launched` session (default)
+   * starts at `starting`; an adopted `external` one starts at `running` (it is already underway on the
+   * user's machine). `title`/`cwd` seed the row for adopted sessions (a launch fills them in later).
+   */
+  createSession(input: {
+    userId: string;
+    deviceId: string;
+    origin?: SessionOrigin;
+    title?: string;
+    cwd?: string;
+  }): Promise<string>;
   /** List the user's sessions, newest first (RLS-scoped). Powers the dashboard list + reconnect. */
   listByUser(userId: string): Promise<SessionSummary[]>;
   /** Flip a session to `running` once the daemon reports it started. No-op if the row isn't the user's. */
@@ -54,11 +66,21 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
   }
 
   return {
-    async createSession({ userId, deviceId }): Promise<string> {
+    async createSession({ userId, deviceId, origin, title, cwd }): Promise<string> {
+      const sessionOrigin: SessionOrigin = origin ?? 'launched';
+      // An adopted session is already running on the user's machine; a launched one is just starting.
+      const status: SessionStatusName = sessionOrigin === 'external' ? 'running' : 'starting';
       return withUserContext(db, userId, async (scoped) => {
         const [row] = await scoped
           .insert(sessions)
-          .values({ userId, deviceId, status: 'starting' })
+          .values({
+            userId,
+            deviceId,
+            origin: sessionOrigin,
+            status,
+            ...(title !== undefined ? { title } : {}),
+            ...(cwd !== undefined ? { cwd } : {}),
+          })
           .returning({ id: sessions.id });
         if (!row) {
           throw new Error('session insert returned no row');
@@ -75,6 +97,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             deviceId: sessions.deviceId,
             title: sessions.title,
             status: sessions.status,
+            origin: sessions.origin,
             createdAt: sessions.createdAt,
             updatedAt: sessions.updatedAt,
             endedAt: sessions.endedAt,

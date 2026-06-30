@@ -123,6 +123,10 @@ describe('envelope E2E routing-metadata fields (Phase 3)', () => {
   it('recognizes session.key as a valid message type', () => {
     expect(safeParseEnvelope({ ...validWire, type: 'session.key' }).success).toBe(true);
   });
+
+  it('recognizes session.adopted as a valid message type (adopted sessions)', () => {
+    expect(safeParseEnvelope({ ...validWire, type: 'session.adopted' }).success).toBe(true);
+  });
 });
 
 describe('makeEnvelope routing-metadata fields', () => {
