@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
   agentQuestionPayloadSchema,
   permissionDecisionPayloadSchema,
@@ -237,6 +238,20 @@ describe('questionAnswerPayloadSchema (adopted-session answers)', () => {
     expect(questionAnswerPayloadSchema.safeParse({ requestId: 'r', answers: [] }).success).toBe(
       false,
     );
+  });
+});
+
+describe('agentNoticePayloadSchema (adopted-session notifications, Journey 3)', () => {
+  it('parses a notification message', () => {
+    const parsed = agentNoticePayloadSchema.parse({
+      message: 'Claude is waiting for your input',
+    });
+    expect(parsed.message).toBe('Claude is waiting for your input');
+  });
+
+  it('rejects an empty message', () => {
+    expect(agentNoticePayloadSchema.safeParse({ message: '' }).success).toBe(false);
+    expect(agentNoticePayloadSchema.safeParse({}).success).toBe(false);
   });
 });
 

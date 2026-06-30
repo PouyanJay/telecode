@@ -186,4 +186,48 @@ describe('adopted sessions: daemon-initiated registration', () => {
     daemon.close();
     browser.close();
   });
+
+  it('forwards an agent.notice to the browser without changing the persisted status (Journey 3)', async () => {
+    const daemon = await connectDaemon(relayUrl, userId, deviceId);
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+
+    const onBrowser = waitForEnvelope(browser, (e) => e.type === 'session.adopted');
+    daemon.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.adopted',
+          userId,
+          deviceId,
+          payload: { clientRef: 'c-notice' },
+        }),
+      ),
+    );
+    const sessionId = (await onBrowser).session_id!;
+
+    // The adopted session goes idle → the daemon sends agent.notice. The relay forwards it to the browser
+    // and pings the user, but the row stays running (a notice is not a gate — no awaiting_input).
+    const onNotice = waitForEnvelope(browser, (e) => e.type === 'agent.notice');
+    daemon.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'agent.notice',
+          userId,
+          deviceId,
+          sessionId,
+          payload: { message: 'Claude is waiting for your input' },
+        }),
+      ),
+    );
+    const notice = await onNotice;
+    expect((notice.payload as { message: string }).message).toBe(
+      'Claude is waiting for your input',
+    );
+    const row = await admin.query<{ status: string }>('select status from sessions where id = $1', [
+      sessionId,
+    ]);
+    expect(row.rows[0]?.status).toBe('running'); // unchanged — a notice never flips to awaiting_input
+
+    daemon.close();
+    browser.close();
+  });
 });

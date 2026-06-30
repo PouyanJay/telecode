@@ -481,6 +481,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session awaiting input');
         // Ping the user (web push) that a session needs them — fire-and-forget, routing metadata only.
         pushAwaitingInput(envelope.user_id, envelope.session_id);
+      } else if (envelope.type === 'agent.notice') {
+        // A non-blocking attention cue (an adopted session went idle). Ping the user, but DON'T change the
+        // persisted status — a notice is not a gate. The frame still broadcasts to live browsers below.
+        pushAwaitingInput(envelope.user_id, envelope.session_id);
       }
     }
     // Cache the recent ciphertext for an instant reopen (Task 8) — the forwarded string, never decrypted.

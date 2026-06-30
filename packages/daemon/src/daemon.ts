@@ -1061,6 +1061,28 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return {};
     }
 
+    // Notification (Journey 3): a non-blocking attention cue (e.g. the session went idle waiting for input).
+    // Surface it only for a session we already track — never force-adopt on a stray notification — and skip
+    // it while a gate/question is already showing (a permission-prompt notification is redundant then). It
+    // requires no answer; the hook returns `{}`.
+    if (event.hook_event_name === 'Notification') {
+      const knownId = adoptedSessions.telecodeIdFor(event.session_id);
+      if (
+        knownId !== undefined &&
+        event.message !== undefined &&
+        event.message.length > 0 &&
+        recordFor(knownId).status !== 'awaiting_input'
+      ) {
+        if (cipher.enabled) cipher.establish(knownId); // idempotent; the notice must encrypt under E2E
+        sendForSession(adoptedSource(knownId), 'agent.notice', { message: event.message });
+        log.info(
+          { deviceId: options.deviceId, sessionId: knownId },
+          'daemon: adopted session notice',
+        );
+      }
+      return {};
+    }
+
     let telecodeSessionId: string;
     try {
       // Name the registry row from the project directory (e.g. `…/myrepo` → "myrepo") so a session adopted

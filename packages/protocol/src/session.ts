@@ -127,6 +127,15 @@ export type DevicePresencePayload = z.infer<typeof devicePresencePayloadSchema>;
 export const agentMessagePayloadSchema = z.object({ text: z.string() });
 export type AgentMessagePayload = z.infer<typeof agentMessagePayloadSchema>;
 
+/**
+ * Payload for `agent.notice` (daemon → web, Journey 3): a non-blocking attention signal for an adopted
+ * session, carrying Claude Code's own `Notification` text (e.g. "Claude is waiting for your input" when a
+ * session goes idle). Unlike `agent.permission_request` / `agent.question` it requires no answer — it just
+ * tells the dashboard the session needs a look. Transient (not cached for reopen).
+ */
+export const agentNoticePayloadSchema = z.object({ message: z.string().min(1).max(2000) });
+export type AgentNoticePayload = z.infer<typeof agentNoticePayloadSchema>;
+
 /** Payload for `agent.tool_use` (daemon → web): a tool the agent ran (informational stream). */
 export const agentToolUsePayloadSchema = z.object({
   toolName: z.string().min(1),

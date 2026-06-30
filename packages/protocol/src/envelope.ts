@@ -36,6 +36,9 @@ export const MESSAGE_TYPES = [
   // adopted-session questions (daemon -> web): an `AskUserQuestion` raised by an externally-driven Claude
   // Code session, intercepted at the PreToolUse hook so the phone can answer it (best-effort, Journey 2).
   'agent.question',
+  // adopted-session attention signal (daemon -> web): Claude Code's `Notification` (e.g. went idle waiting
+  // for input) surfaced as a non-blocking "needs a look" cue. No answer required (Journey 3).
+  'agent.notice',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).

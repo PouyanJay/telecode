@@ -420,6 +420,81 @@ describe('daemon: adopted sessions end-to-end', () => {
     expect(await ended).toEqual({});
   });
 
+  it('emits agent.notice on a Notification for an adopted session (idle/needs attention)', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // The session goes idle → Claude Code fires a Notification. The daemon surfaces it as a non-blocking
+    // attention signal (no answer required). Notification events return an empty hook output.
+    const notif = hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'Claude is waiting for your input',
+    });
+    const notice = await relay.waitForFrame((e) => e.type === 'agent.notice');
+    expect(notice.session_id).toBe(TELECODE_SESSION);
+    expect((notice.payload as { message: string }).message).toBe(
+      'Claude is waiting for your input',
+    );
+    expect(await notif).toEqual({});
+  });
+
+  it('skips the notice while a gate is already showing, but emits once the session resumes', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // A consequential tool parks the session at awaiting_input.
+    const bash = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Bash',
+      tool_input: { command: 'ls' },
+    });
+    const request = await relay.waitForFrame((e) => e.type === 'agent.permission_request');
+    const requestId = (request.payload as { requestId: string }).requestId;
+
+    // A Notification arriving WHILE the gate shows is redundant → skipped (not emitted as a notice).
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'redundant-permission-prompt',
+    });
+
+    // Resolve the gate; the session resumes (running).
+    relay.send(
+      makeEnvelope({
+        type: 'permission.decision',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: { requestId, behavior: 'allow' },
+      }),
+    );
+    await bash;
+
+    // A Notification after the gate clears DOES emit — and it is the FIRST agent.notice (proving the one
+    // sent during the gate was skipped, not merely delayed).
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'now-idle',
+    });
+    const notice = await relay.waitForFrame((e) => e.type === 'agent.notice');
+    expect((notice.payload as { message: string }).message).toBe('now-idle');
+  });
+
   it('ignores SessionEnd for a session it never adopted (no phantom row/end)', async () => {
     // No prior adoption for this Claude session → SessionEnd must be a no-op (return {}, never force-adopt).
     const ended = hookRpc(socketPath, {
