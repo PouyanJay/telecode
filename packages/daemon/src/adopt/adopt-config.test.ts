@@ -32,4 +32,9 @@ describe('adopt-config store', () => {
     await writeFile(path, '{ not valid json', 'utf8');
     expect(await loadAdoptConfig(path)).toEqual(DEFAULT_ADOPT_SETTINGS);
   });
+
+  it('degrades to the default on valid JSON that fails the schema', async () => {
+    await writeFile(path, JSON.stringify({ enabled: 'yes', denylist: [42] }), 'utf8');
+    expect(await loadAdoptConfig(path)).toEqual(DEFAULT_ADOPT_SETTINGS);
+  });
 });

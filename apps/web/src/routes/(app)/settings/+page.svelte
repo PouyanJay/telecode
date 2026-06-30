@@ -84,19 +84,21 @@
   });
 
   function toggleAdoption(): void {
-    const s = $adoptState;
-    if (s) setAdoptConfig({ enabled: !s.enabled, denylist: s.denylist });
+    const state = $adoptState;
+    if (state) setAdoptConfig({ enabled: !state.enabled, denylist: state.denylist });
   }
   function addDeny(): void {
-    const s = $adoptState;
+    const state = $adoptState;
     const path = newDenyPath.trim();
-    if (!s || path === '' || s.denylist.includes(path)) return;
-    setAdoptConfig({ enabled: s.enabled, denylist: [...s.denylist, path] });
+    if (!state || path === '' || state.denylist.includes(path)) return;
+    setAdoptConfig({ enabled: state.enabled, denylist: [...state.denylist, path] });
     newDenyPath = '';
   }
   function removeDeny(path: string): void {
-    const s = $adoptState;
-    if (s) setAdoptConfig({ enabled: s.enabled, denylist: s.denylist.filter((p) => p !== path) });
+    const state = $adoptState;
+    if (state) {
+      setAdoptConfig({ enabled: state.enabled, denylist: state.denylist.filter((p) => p !== path) });
+    }
   }
 </script>
 

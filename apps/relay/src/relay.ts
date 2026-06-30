@@ -135,7 +135,11 @@ export interface RelayOptions {
  */
 export const WS_CLOSE_CODE_CONNECTION_CAP = 4029;
 
-/** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
+/**
+ * The daemon→browser frame types worth caching for an instant reopen (the session's recent history).
+ * `agent.notice` is deliberately excluded — it is a transient "needs attention" cue the web clears on the
+ * next frame, so replaying a stale one on reopen would be misleading.
+ */
 const CACHEABLE_TYPES = new Set<string>([
   'session.started',
   'agent.message',

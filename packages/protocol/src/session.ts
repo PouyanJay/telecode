@@ -124,7 +124,11 @@ export type AdoptSettings = z.infer<typeof adoptSettingsSchema>;
 export const adoptConfigPayloadSchema = z.object({ set: adoptSettingsSchema.optional() });
 export type AdoptConfigPayload = z.infer<typeof adoptConfigPayloadSchema>;
 
-/** Payload for `adopt.state` (daemon → web, Journey 3): the daemon's current adoption policy, for display. */
+/**
+ * Payload for `adopt.state` (daemon → web, Journey 3): the daemon's current adoption policy, for display.
+ * Intentionally the same shape as {@link adoptSettingsSchema} — the state the daemon reports is exactly the
+ * settings it holds; aliased rather than re-declared so the two can never drift.
+ */
 export const adoptStatePayloadSchema = adoptSettingsSchema;
 export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
 

@@ -59,26 +59,28 @@ describe('runDoctor', () => {
     expect(report.ok).toBe(true);
   });
 
-  it('reports adopted-session status (advisory — installed / not-installed / disabled, never fails)', async () => {
-    const installed = await runDoctor(deps());
-    const ok = find(installed, 'Adopted sessions');
-    expect(ok?.status).toBe('pass');
-    expect(ok?.detail).toContain('SessionEnd');
+  it('passes the adoption check when the hooks are installed (listing the events)', async () => {
+    const check = find(await runDoctor(deps()), 'Adopted sessions');
+    expect(check?.status).toBe('pass');
+    expect(check?.detail).toContain('SessionEnd');
+  });
 
-    const notInstalled = await runDoctor(
+  it('warns (does not fail) the adoption check when hooks are not installed', async () => {
+    const report = await runDoctor(
       deps({ adoptionHooks: async () => ({ installed: false, events: [] }) }),
     );
-    expect(find(notInstalled, 'Adopted sessions')?.status).toBe('warn');
-    expect(find(notInstalled, 'Adopted sessions')?.detail).toContain('telecode hooks install');
+    const check = find(report, 'Adopted sessions');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('telecode hooks install');
+    expect(report.ok).toBe(true); // advisory — never sinks the run
+  });
 
-    const disabled = await runDoctor(
-      deps({ env: { ANTHROPIC_API_KEY: 'sk', TELECODE_ADOPT: '0' } }),
-    );
-    expect(find(disabled, 'Adopted sessions')?.status).toBe('warn');
-    expect(find(disabled, 'Adopted sessions')?.detail).toContain('TELECODE_ADOPT=0');
-
-    // Advisory only — none of these sink the run.
-    expect(notInstalled.ok && disabled.ok).toBe(true);
+  it('warns (does not fail) the adoption check when TELECODE_ADOPT=0', async () => {
+    const report = await runDoctor(deps({ env: { ANTHROPIC_API_KEY: 'sk', TELECODE_ADOPT: '0' } }));
+    const check = find(report, 'Adopted sessions');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('TELECODE_ADOPT=0');
+    expect(report.ok).toBe(true);
   });
 
   it('fails when the relay is unreachable, surfacing the probe error', async () => {

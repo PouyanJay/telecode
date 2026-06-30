@@ -23,6 +23,12 @@ export interface DoctorReport {
   readonly ok: boolean;
 }
 
+/** Whether telecode's Claude Code hooks are installed, and for which events (the adoption opt-in state). */
+export interface HookStatus {
+  readonly installed: boolean;
+  readonly events: readonly string[];
+}
+
 /** Injected dependencies — the CLI binds these to real probes; tests bind deterministic fakes. */
 export interface DoctorDeps {
   /** `process.versions.node`, e.g. `"22.4.0"`. */
@@ -34,7 +40,7 @@ export interface DoctorDeps {
   /** GET the relay health URL; resolves `{ ok }` (plus an `error` detail when unreachable). */
   readonly probeRelay: (healthUrl: string) => Promise<{ ok: boolean; error?: string }>;
   /** Whether telecode's Claude Code hooks are installed (and for which events) — the adoption opt-in. */
-  readonly adoptionHooks: () => Promise<{ installed: boolean; events: readonly string[] }>;
+  readonly adoptionHooks: () => Promise<HookStatus>;
 }
 
 /** Node floor: WebCrypto X25519 (the E2E handshake, Phase 4) needs Node 22+. */
@@ -106,10 +112,7 @@ async function relayCheck(
  * set up to adopt the user's own Claude Code sessions — the `TELECODE_ADOPT` master switch and whether the
  * hooks are installed in `~/.claude/settings.json` (Journey 3).
  */
-function adoptionCheck(
-  env: NodeJS.ProcessEnv,
-  hooks: { installed: boolean; events: readonly string[] },
-): DoctorCheck {
+function adoptionCheck(env: NodeJS.ProcessEnv, hooks: HookStatus): DoctorCheck {
   if (env.TELECODE_ADOPT === '0') {
     return makeCheck('Adopted sessions', 'warn', 'off — TELECODE_ADOPT=0 disables adoption');
   }

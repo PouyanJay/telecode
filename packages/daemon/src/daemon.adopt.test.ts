@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  agentNoticePayloadSchema,
   deriveSharedKey,
   encodeKey,
   generateKeyPair,
@@ -12,6 +13,7 @@ import {
   makeEnvelope,
   openPayload,
   sealPayload,
+  sessionAdoptedPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -52,6 +54,12 @@ function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
     });
     client.on('error', reject);
   });
+}
+
+/** Assert a deny-feedback reason carries every expected fragment (keeps the loop out of the test body). */
+function assertReasonContainsAll(reason: string | undefined, expected: readonly string[]): void {
+  expect(expected.length).toBeGreaterThan(0); // a misconfigured variant must fail loudly, not vacuously
+  for (const fragment of expected) expect(reason).toContain(fragment);
 }
 
 /** Reply to the daemon's `session.adopted` announce with the relay-minted id (pairs the Claude session). */
@@ -354,10 +362,7 @@ describe('daemon: adopted sessions end-to-end', () => {
       hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string };
     };
     expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
-    expect(variant.expected.length).toBeGreaterThan(0); // guard: a misconfigured variant must fail loudly
-    for (const fragment of variant.expected) {
-      expect(out.hookSpecificOutput.permissionDecisionReason).toContain(fragment);
-    }
+    assertReasonContainsAll(out.hookSpecificOutput.permissionDecisionReason, variant.expected);
   });
 
   it('releases a pending question when the session is interrupted (fails closed, no deadlock)', async () => {
@@ -397,7 +402,7 @@ describe('daemon: adopted sessions end-to-end', () => {
       source: 'startup',
     });
     const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
-    const payload = announce.payload as { clientRef: string; title?: string; cwd?: string };
+    const payload = sessionAdoptedPayloadSchema.parse(announce.payload);
     expect(payload.clientRef).toBe(CLAUDE_SESSION);
     expect(payload.title).toBe('myrepo'); // derived from the cwd basename so the row has a sensible name
     expect(payload.cwd).toBe('/Users/me/myrepo');
@@ -449,7 +454,7 @@ describe('daemon: adopted sessions end-to-end', () => {
     });
     const notice = await relay.waitForFrame((e) => e.type === 'agent.notice');
     expect(notice.session_id).toBe(TELECODE_SESSION);
-    expect((notice.payload as { message: string }).message).toBe(
+    expect(agentNoticePayloadSchema.parse(notice.payload).message).toBe(
       'Claude is waiting for your input',
     );
     expect(await notif).toEqual({});
@@ -502,7 +507,7 @@ describe('daemon: adopted sessions end-to-end', () => {
       message: 'now-idle',
     });
     const notice = await relay.waitForFrame((e) => e.type === 'agent.notice');
-    expect((notice.payload as { message: string }).message).toBe('now-idle');
+    expect(agentNoticePayloadSchema.parse(notice.payload).message).toBe('now-idle');
   });
 
   it('ignores SessionEnd for a session it never adopted (no phantom row/end)', async () => {

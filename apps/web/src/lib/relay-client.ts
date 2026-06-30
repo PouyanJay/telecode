@@ -217,8 +217,10 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
         const raw = cipher.enabled ? await cipher.openFromDaemon(envelope) : envelope.payload;
         options.onAdoptState?.(adoptStatePayloadSchema.parse(raw));
       } catch {
-        // A state sealed to a different browser (broadcast), or invalid — ignore. The browser that asked
-        // gets one it can open; others re-request when their Settings page mounts.
+        // Ignore: most often a state sealed to a DIFFERENT browser (the relay broadcasts it to the channel),
+        // which we can't open — the browser that asked gets one it can, and others re-request on mount. A
+        // genuine schema mismatch (daemon version skew) also lands here; it surfaces as the Settings panel
+        // staying on its loading state rather than a thrown error, which is acceptable for a rare edge.
       }
       return;
     }

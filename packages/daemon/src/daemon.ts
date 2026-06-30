@@ -1039,10 +1039,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const browserPublicKey = envelope.sender_public_key;
     const state = adoptConfig;
     enqueueSend(async () => {
-      const fields =
+      const fields: { payload: unknown; nonce: string } =
         cipher.enabled && browserPublicKey !== undefined
           ? await cipher.sealToBrowser(browserPublicKey, state)
-          : { payload: state as unknown, nonce: '' };
+          : { payload: state, nonce: '' };
       return JSON.stringify(
         makeEnvelope({
           type: 'adopt.state',
@@ -1112,51 +1112,59 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * FAIL-CLOSED (AD-2): any failure returns `ask` / `{}`, so Claude Code falls back to its own local prompt
    * — never an auto-allow of a consequential tool because adoption hit a snag.
    */
-  async function handleHookEvent(event: HookEvent): Promise<unknown> {
-    if (!adoptedSessions) return {};
-
-    // SessionEnd (Journey 3): the Claude Code process exited. End the adopted session if we are tracking it —
-    // never force-adopt an unknown session just to end it (no phantom row). Until now adopted sessions never
-    // received a `session.ended` and lingered as running forever. Non-PreToolUse events return `{}`.
-    if (event.hook_event_name === 'SessionEnd') {
-      const knownId = adoptedSessions.telecodeIdFor(event.session_id);
-      if (knownId !== undefined) {
-        await mirrorTranscript(knownId, event.transcript_path); // capture any trailing transcript lines
-        const status = recordFor(knownId).status;
-        if (status !== 'done' && status !== 'error') {
-          if (cipher.enabled) cipher.establish(knownId); // idempotent; session.ended must encrypt under E2E
-          setStatus(knownId, 'done');
-          sendForSession(adoptedSource(knownId), 'session.ended', { status: 'done' });
-          log.info(
-            { deviceId: options.deviceId, sessionId: knownId },
-            'daemon: adopted session ended',
-          );
-        }
-      }
-      return {};
-    }
-
-    // Notification (Journey 3): a non-blocking attention cue (e.g. the session went idle waiting for input).
-    // Surface it only for a session we already track — never force-adopt on a stray notification — and skip
-    // it while a gate/question is already showing (a permission-prompt notification is redundant then). It
-    // requires no answer; the hook returns `{}`.
-    if (event.hook_event_name === 'Notification') {
-      const knownId = adoptedSessions.telecodeIdFor(event.session_id);
-      if (
-        knownId !== undefined &&
-        event.message !== undefined &&
-        event.message.length > 0 &&
-        recordFor(knownId).status !== 'awaiting_input'
-      ) {
-        if (cipher.enabled) cipher.establish(knownId); // idempotent; the notice must encrypt under E2E
-        sendForSession(adoptedSource(knownId), 'agent.notice', { message: event.message });
+  /**
+   * SessionEnd (Journey 3): the Claude Code process exited. End the adopted session if we are tracking it —
+   * never force-adopt an unknown session just to end it (no phantom row). Until now adopted sessions never
+   * received a `session.ended` and lingered as running forever. A final transcript mirror captures any
+   * trailing lines before the terminal frame. Idempotent (a re-fired SessionEnd won't re-end).
+   */
+  async function handleSessionEndHook(event: HookEvent): Promise<unknown> {
+    const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
+    if (knownId !== undefined) {
+      await mirrorTranscript(knownId, event.transcript_path);
+      const status = recordFor(knownId).status;
+      if (status !== 'done' && status !== 'error') {
+        if (cipher.enabled) cipher.establish(knownId); // idempotent; session.ended must encrypt under E2E
+        setStatus(knownId, 'done');
+        sendForSession(adoptedSource(knownId), 'session.ended', { status: 'done' });
         log.info(
           { deviceId: options.deviceId, sessionId: knownId },
-          'daemon: adopted session notice',
+          'daemon: adopted session ended',
         );
       }
-      return {};
     }
+    return {};
+  }
+
+  /**
+   * Notification (Journey 3): a non-blocking attention cue (e.g. the session went idle waiting for input).
+   * Surface it only for a session we already track — never force-adopt on a stray notification. The
+   * `awaiting_input` guard is about gate STATE (a permission-prompt notification is redundant while a gate
+   * shows), not rate-limiting — several idle notices are fine; the web clears each on the next frame.
+   */
+  function handleNotificationHook(event: HookEvent): unknown {
+    const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
+    if (
+      knownId !== undefined &&
+      event.message !== undefined &&
+      event.message.length > 0 &&
+      recordFor(knownId).status !== 'awaiting_input'
+    ) {
+      if (cipher.enabled) cipher.establish(knownId); // idempotent; the notice must encrypt under E2E
+      sendForSession(adoptedSource(knownId), 'agent.notice', { message: event.message });
+      log.info(
+        { deviceId: options.deviceId, sessionId: knownId },
+        'daemon: adopted session notice',
+      );
+    }
+    return {};
+  }
+
+  async function handleHookEvent(event: HookEvent): Promise<unknown> {
+    if (!adoptedSessions) return {};
+    // Lifecycle events act only on a session we already track (never force-adopt to handle them).
+    if (event.hook_event_name === 'SessionEnd') return handleSessionEndHook(event);
+    if (event.hook_event_name === 'Notification') return handleNotificationHook(event);
 
     // Adoption policy gate (Journey 3): for a session we are NOT already tracking, apply the per-machine
     // policy — if adoption is disabled or this project is on the denylist, telecode stays out entirely and
