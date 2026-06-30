@@ -26,8 +26,9 @@ import {
 } from '@telecode/protocol';
 
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
-import { preToolUseOutput, type HookEvent } from './adopt/hook-event';
+import { type HookEvent } from './adopt/hook-event';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
+import { preToolUseOutput } from './adopt/pretooluse-output';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import {
   type AgentAdapter,

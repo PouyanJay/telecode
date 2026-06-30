@@ -1,81 +1,19 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
-
-import { z } from 'zod';
+import {
+  readClaudeSettings,
+  stripTelecodeHooks,
+  writeClaudeSettings,
+  type CommandHook,
+} from './claude-settings';
 
 /**
- * Install / remove telecode's Claude Code hooks in `~/.claude/settings.json` (the `telecode hooks
- * install|uninstall|status` commands). Adoption is opt-in and reversible: installing adds telecode's
- * `command` hook to the relevant events; uninstalling removes exactly telecode's entries and leaves the
- * user's own hooks untouched. The edit is transparent (writes pretty JSON the user can inspect) and
- * idempotent (install replaces any prior telecode entries rather than duplicating them).
- *
- * A telecode hook is recognized by its `command` invoking the `telecode hook` bridge — see
- * {@link isTelecodeHookCommand}.
+ * Install telecode's Claude Code hooks into `~/.claude/settings.json`. Adoption is opt-in and reversible:
+ * installing adds telecode's `command` hook to the relevant events, replacing any prior telecode entries
+ * (idempotent) while leaving the user's own hooks untouched. The edit is transparent — it writes pretty
+ * JSON the user can inspect. Removal lives in the sibling `hooks-uninstall` / status in `hooks-status`.
  */
 
 /** The hook events telecode registers for adoption (Journey 1: PreToolUse gates tools + drives adoption). */
-export const TELECODE_HOOK_EVENTS = ['PreToolUse'] as const;
-
-// `~/.claude/settings.json` is a trust boundary (persisted JSON the user/other tools also edit), so its
-// shape is validated with zod rather than asserted with a cast — a corrupted `hooks` field must degrade to
-// "no telecode hooks", never crash `stripTelecodeHooks`. `passthrough()` preserves the user's other keys.
-const commandHookSchema = z.object({
-  type: z.literal('command'),
-  command: z.string(),
-  timeout: z.number().optional(),
-});
-const matcherGroupSchema = z.object({
-  matcher: z.string().optional(),
-  hooks: z.array(commandHookSchema),
-});
-const claudeSettingsSchema = z
-  .object({ hooks: z.record(z.array(matcherGroupSchema)).optional() })
-  .passthrough();
-
-type CommandHook = z.infer<typeof commandHookSchema>;
-type MatcherGroup = z.infer<typeof matcherGroupSchema>;
-type HooksByEvent = Record<string, MatcherGroup[]>;
-type ClaudeSettings = z.infer<typeof claudeSettingsSchema>;
-
-/**
- * A hook entry is telecode's when its command invokes the `telecode hook` bridge — i.e. it mentions
- * `telecode` (the bin, `@telecode/cli`, or a `telecode.mjs` path) and then the `hook` subcommand. Used for
- * idempotent install and a clean uninstall, so we only ever touch entries telecode created.
- */
-export function isTelecodeHookCommand(command: string): boolean {
-  return /telecode\b[\s\S]*\bhook\b/.test(command);
-}
-
-async function readSettings(settingsPath: string): Promise<ClaudeSettings> {
-  try {
-    const raw = await readFile(settingsPath, 'utf8');
-    const parsed = claudeSettingsSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : {}; // unparseable/corrupt hooks → start fresh, never crash
-  } catch {
-    return {}; // missing or invalid JSON — start fresh (we never clobber valid JSON; see writeSettings)
-  }
-}
-
-async function writeSettings(settingsPath: string, settings: ClaudeSettings): Promise<void> {
-  await mkdir(dirname(settingsPath), { recursive: true });
-  await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
-}
-
-/** Drop telecode's hook entries from every event; prune the empty groups/events/object it leaves behind. */
-function stripTelecodeHooks(hooks: HooksByEvent): HooksByEvent {
-  const cleaned: HooksByEvent = {};
-  for (const [event, groups] of Object.entries(hooks)) {
-    const keptGroups = groups
-      .map((group) => ({
-        ...group,
-        hooks: group.hooks.filter((hook) => !isTelecodeHookCommand(hook.command)),
-      }))
-      .filter((group) => group.hooks.length > 0);
-    if (keptGroups.length > 0) cleaned[event] = keptGroups;
-  }
-  return cleaned;
-}
+const TELECODE_HOOK_EVENTS = ['PreToolUse'] as const;
 
 export interface InstallHooksOptions {
   readonly settingsPath: string;
@@ -87,7 +25,7 @@ export interface InstallHooksOptions {
 
 /** Add telecode's hooks (idempotent: any prior telecode entries are replaced, user hooks preserved). */
 export async function installHooks(options: InstallHooksOptions): Promise<void> {
-  const settings = await readSettings(options.settingsPath);
+  const settings = await readClaudeSettings(options.settingsPath);
   const hooks = stripTelecodeHooks(settings.hooks ?? {});
   const entry: CommandHook = {
     type: 'command',
@@ -97,29 +35,5 @@ export async function installHooks(options: InstallHooksOptions): Promise<void> 
   for (const event of TELECODE_HOOK_EVENTS) {
     hooks[event] = [...(hooks[event] ?? []), { matcher: '*', hooks: [entry] }];
   }
-  await writeSettings(options.settingsPath, { ...settings, hooks });
-}
-
-/** Remove exactly telecode's hooks; leave the user's own hooks (and the rest of settings) intact. */
-export async function uninstallHooks(options: { settingsPath: string }): Promise<void> {
-  const settings = await readSettings(options.settingsPath);
-  if (!settings.hooks) return;
-  const hooks = stripTelecodeHooks(settings.hooks);
-  const next: ClaudeSettings = { ...settings };
-  if (Object.keys(hooks).length > 0) next.hooks = hooks;
-  else delete next.hooks;
-  await writeSettings(options.settingsPath, next);
-}
-
-/** Report whether telecode's hooks are installed and for which events. */
-export async function readHooksStatus(options: {
-  settingsPath: string;
-}): Promise<{ installed: boolean; events: string[] }> {
-  const settings = await readSettings(options.settingsPath);
-  const events = Object.entries(settings.hooks ?? {})
-    .filter(([, groups]) =>
-      groups.some((group) => group.hooks.some((hook) => isTelecodeHookCommand(hook.command))),
-    )
-    .map(([event]) => event);
-  return { installed: events.length > 0, events };
+  await writeClaudeSettings(options.settingsPath, { ...settings, hooks });
 }
