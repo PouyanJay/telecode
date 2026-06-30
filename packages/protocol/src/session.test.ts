@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   agentPermissionRequestPayloadSchema,
+  agentQuestionPayloadSchema,
   permissionDecisionPayloadSchema,
+  questionAnswerPayloadSchema,
   sessionAdoptedPayloadSchema,
   sessionControlPayloadSchema,
   sessionHistoryPayloadSchema,
@@ -99,6 +101,145 @@ describe('permissionDecisionPayloadSchema', () => {
   });
 });
 
+/**
+ * The adopted-session question messages (Journey 2 / Phase 3). `agent.question` (daemon → web) mirrors the
+ * Claude Code `AskUserQuestion` tool input (questions + options + per-question multiSelect) so the phone can
+ * render the picker; `question.answer` (web → daemon) carries the human's pick(s) per question, which the
+ * daemon relays back to the model as deny-feedback. "Other" is always implicitly allowed (Claude Code never
+ * sends an `allowsOther` flag), so it is expressed purely as `otherText` on the answer — there is no flag.
+ */
+describe('agentQuestionPayloadSchema (adopted-session questions)', () => {
+  const singleQuestion = {
+    requestId: 'req_q1',
+    questions: [
+      {
+        question: 'Which database should we use?',
+        header: 'Database',
+        multiSelect: false,
+        options: [
+          { label: 'Postgres', description: 'Relational, strong consistency.' },
+          { label: 'SQLite', description: 'Embedded, zero-config.' },
+        ],
+      },
+    ],
+  };
+
+  it('parses a single-select question with options (mirrors the captured tool_input)', () => {
+    const parsed = agentQuestionPayloadSchema.parse(singleQuestion);
+    expect(parsed.requestId).toBe('req_q1');
+    expect(parsed.questions).toHaveLength(1);
+    expect(parsed.questions[0]?.multiSelect).toBe(false);
+    expect(parsed.questions[0]?.options.map((o) => o.label)).toEqual(['Postgres', 'SQLite']);
+  });
+
+  it('parses a multi-select question and a missing option description (version-drift safe)', () => {
+    const parsed = agentQuestionPayloadSchema.parse({
+      requestId: 'req_q2',
+      questions: [
+        {
+          question: 'Pick the features to enable.',
+          header: 'Features',
+          multiSelect: true,
+          options: [{ label: 'Auth' }, { label: 'Billing', description: 'Stripe.' }],
+        },
+      ],
+    });
+    expect(parsed.questions[0]?.multiSelect).toBe(true);
+    expect(parsed.questions[0]?.options[0]?.description).toBeUndefined();
+  });
+
+  it('parses multiple questions in one AskUserQuestion call', () => {
+    const parsed = agentQuestionPayloadSchema.parse({
+      requestId: 'req_q3',
+      questions: [
+        { question: 'A?', header: 'A', multiSelect: false, options: [{ label: 'x' }] },
+        {
+          question: 'B?',
+          header: 'B',
+          multiSelect: true,
+          options: [{ label: 'y' }, { label: 'z' }],
+        },
+      ],
+    });
+    expect(parsed.questions).toHaveLength(2);
+  });
+
+  it('rejects a question with no options or no questions at all', () => {
+    expect(
+      agentQuestionPayloadSchema.safeParse({
+        requestId: 'r',
+        questions: [{ question: 'q', header: 'h', multiSelect: false, options: [] }],
+      }).success,
+    ).toBe(false);
+    expect(agentQuestionPayloadSchema.safeParse({ requestId: 'r', questions: [] }).success).toBe(
+      false,
+    );
+  });
+
+  it('rejects a question payload without a correlation id', () => {
+    expect(
+      agentQuestionPayloadSchema.safeParse({ requestId: '', questions: singleQuestion.questions })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('questionAnswerPayloadSchema (adopted-session answers)', () => {
+  it('parses a single-select pick (one label)', () => {
+    const parsed = questionAnswerPayloadSchema.parse({
+      requestId: 'req_q1',
+      answers: [{ selectedLabels: ['Postgres'] }],
+    });
+    expect(parsed.answers[0]?.selectedLabels).toEqual(['Postgres']);
+    expect(parsed.answers[0]?.otherText).toBeUndefined();
+  });
+
+  it('parses a multi-select pick (several labels)', () => {
+    const parsed = questionAnswerPayloadSchema.parse({
+      requestId: 'req_q2',
+      answers: [{ selectedLabels: ['Auth', 'Billing'] }],
+    });
+    expect(parsed.answers[0]?.selectedLabels).toEqual(['Auth', 'Billing']);
+  });
+
+  it('parses an "Other" free-text answer with no selected labels (selectedLabels defaults to [])', () => {
+    const parsed = questionAnswerPayloadSchema.parse({
+      requestId: 'req_q1',
+      answers: [{ otherText: 'DuckDB, actually' }],
+    });
+    expect(parsed.answers[0]?.selectedLabels).toEqual([]);
+    expect(parsed.answers[0]?.otherText).toBe('DuckDB, actually');
+  });
+
+  it('parses one answer per question for a multi-question call', () => {
+    const parsed = questionAnswerPayloadSchema.parse({
+      requestId: 'req_q3',
+      answers: [{ selectedLabels: ['x'] }, { selectedLabels: ['y', 'z'] }],
+    });
+    expect(parsed.answers).toHaveLength(2);
+  });
+
+  it('rejects an empty answer (no selection and no otherText)', () => {
+    expect(
+      questionAnswerPayloadSchema.safeParse({ requestId: 'r', answers: [{ selectedLabels: [] }] })
+        .success,
+    ).toBe(false);
+    expect(questionAnswerPayloadSchema.safeParse({ requestId: 'r', answers: [{}] }).success).toBe(
+      false,
+    );
+  });
+
+  it('rejects an answer payload without a correlation id or with no answers', () => {
+    expect(
+      questionAnswerPayloadSchema.safeParse({ requestId: '', answers: [{ selectedLabels: ['x'] }] })
+        .success,
+    ).toBe(false);
+    expect(questionAnswerPayloadSchema.safeParse({ requestId: 'r', answers: [] }).success).toBe(
+      false,
+    );
+  });
+});
+
 describe('sessionLaunchPayloadSchema: repo selection (Task 8)', () => {
   it('parses a launch carrying a repo to clone on demand', () => {
     const parsed = sessionLaunchPayloadSchema.parse({
@@ -188,6 +329,34 @@ describe('sessionHistoryPayloadSchema', () => {
     });
     expect(parsed.status).toBe('awaiting_input');
     expect(parsed.entries).toHaveLength(4);
+  });
+
+  it('parses a question entry — pending (no answers) and answered (answers present)', () => {
+    const question = {
+      question: 'Which DB?',
+      header: 'DB',
+      multiSelect: false,
+      options: [{ label: 'Postgres' }],
+    };
+    const parsed = sessionHistoryPayloadSchema.parse({
+      status: 'awaiting_input',
+      entries: [
+        { kind: 'question', requestId: 'q1', questions: [question] },
+        {
+          kind: 'question',
+          requestId: 'q2',
+          questions: [question],
+          answers: [{ selectedLabels: ['Postgres'] }],
+        },
+      ],
+    });
+    expect(parsed.entries).toHaveLength(2);
+    const [pending, answered] = parsed.entries;
+    if (pending?.kind !== 'question' || answered?.kind !== 'question') {
+      throw new Error('expected question entries');
+    }
+    expect(pending.answers).toBeUndefined();
+    expect(answered.answers?.[0]?.selectedLabels).toEqual(['Postgres']);
   });
 
   it('accepts an empty transcript (a not-live session)', () => {

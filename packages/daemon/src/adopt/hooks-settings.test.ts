@@ -4,12 +4,10 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import {
-  installHooks,
-  isTelecodeHookCommand,
-  readHooksStatus,
-  uninstallHooks,
-} from './hooks-install';
+import { installHooks } from './hooks-install';
+import { readHooksStatus } from './hooks-status';
+import { uninstallHooks } from './hooks-uninstall';
+import { isTelecodeHookCommand } from './telecode-hook-command';
 
 /**
  * The `~/.claude/settings.json` installer (Journey 1, Task 7): adoption is opt-in, transparent (pretty

@@ -5,7 +5,9 @@ import { encodeKey, generateKeyPair } from '@telecode/protocol';
 import { pino } from 'pino';
 
 import { runHookBridge } from './adopt/hook-bridge';
-import { installHooks, readHooksStatus, uninstallHooks } from './adopt/hooks-install';
+import { installHooks } from './adopt/hooks-install';
+import { readHooksStatus } from './adopt/hooks-status';
+import { uninstallHooks } from './adopt/hooks-uninstall';
 import { loadCredentials, saveCredentials } from './credentials';
 import { createDaemon } from './daemon';
 import { runDoctorCli } from './doctor-cli';

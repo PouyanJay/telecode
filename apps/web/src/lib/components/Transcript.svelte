@@ -1,24 +1,29 @@
 <script lang="ts">
+  import type { QuestionAnswerItem } from '@telecode/protocol';
+
   import type { TranscriptEntry } from '$lib/session';
 
   import MessageBody from './MessageBody.svelte';
   import PermissionGate from './PermissionGate.svelte';
+  import QuestionGate from './QuestionGate.svelte';
   import ToolEntry from './ToolEntry.svelte';
 
   /**
-   * The session stream (enterprise-ui §7): an append-only transcript of agent messages, tool calls, and
-   * permission gates. Machine data (tool names + inputs) is monospace; agent prose is sans for reading.
-   * Auto-scrolls to the newest line while the operator is pinned to the bottom, and releases the moment
-   * they scroll up to read history.
+   * The session stream (enterprise-ui §7): an append-only transcript of agent messages, tool calls,
+   * permission gates, and adopted-session questions. Machine data (tool names + inputs) is monospace;
+   * agent prose is sans for reading. Auto-scrolls to the newest line while the operator is pinned to the
+   * bottom, and releases the moment they scroll up to read history.
    */
   let {
     entries,
     onapprove,
     onreject,
+    onanswer,
   }: {
     entries: readonly TranscriptEntry[];
     onapprove: (requestId: string) => void;
     onreject: (requestId: string) => void;
+    onanswer: (requestId: string, answers: QuestionAnswerItem[]) => void;
   } = $props();
 
   let listEl = $state<HTMLDivElement>();
@@ -59,12 +64,14 @@
         <div class="message"><MessageBody text={entry.text} /></div>
       {:else if entry.kind === 'tool'}
         <ToolEntry toolName={entry.toolName} input={entry.input} />
-      {:else}
+      {:else if entry.kind === 'permission'}
         <PermissionGate
           {entry}
           onapprove={() => onapprove(entry.requestId)}
           onreject={() => onreject(entry.requestId)}
         />
+      {:else}
+        <QuestionGate {entry} onanswer={(answers) => onanswer(entry.requestId, answers)} />
       {/if}
     </div>
   {/each}

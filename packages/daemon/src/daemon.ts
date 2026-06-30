@@ -8,16 +8,19 @@ import {
   makeEnvelope,
   parseEnvelope,
   permissionDecisionPayloadSchema,
+  questionAnswerPayloadSchema,
   sessionAdoptedPayloadSchema,
   sessionControlPayloadSchema,
   sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
+  type AgentQuestionItem,
   type Envelope,
   type MessageType,
   type PermissionDecisionPayload,
   type PermissionModeName,
+  type QuestionAnswerItem,
   type SessionControlAction,
   type SessionHistoryEntry,
   type SessionHistoryPayload,
@@ -26,8 +29,11 @@ import {
 } from '@telecode/protocol';
 
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
-import { preToolUseOutput, type HookEvent } from './adopt/hook-event';
+import { type HookEvent } from './adopt/hook-event';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
+import { preToolUseOutput } from './adopt/pretooluse-output';
+import { buildQuestionDenyReason } from './adopt/question-deny-reason';
+import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import {
   type AgentAdapter,
@@ -147,6 +153,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const pendingPermissions = new Map<
     string,
     { sessionId: string | undefined; resolve: (decision: PermissionDecision) => void }
+  >();
+  // Adopted-session questions the hook is blocked on (Journey 2), keyed by the same correlation id we send
+  // to the browser; each resolves when its `question.answer` returns. `null` settles it fail-closed (the
+  // daemon is stopping, or the turn was interrupted/ended) so the hook defers to Claude Code's own picker.
+  const pendingQuestions = new Map<
+    string,
+    { sessionId: string | undefined; resolve: (answers: QuestionAnswerItem[] | null) => void }
   >();
   // The agent conversation id per telecode session, so a `user.message` follow-up resumes the same chat.
   const sdkSessions = new Map<string, string>();
@@ -364,6 +377,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
   }
 
+  /**
+   * Forward an adopted session's `AskUserQuestion` to the browser as a structured `agent.question`, park the
+   * session at `awaiting_input`, and block until the human's `question.answer` returns. Resolves with the
+   * per-question answers, or `null` when the gate is settled without an answer (daemon stopping) so the
+   * caller fails closed (defers to the local picker). Mirrors {@link requestPermission} but for questions.
+   */
+  function requestQuestionAnswer(
+    source: Envelope,
+    questions: AgentQuestionItem[],
+  ): Promise<QuestionAnswerItem[] | null> {
+    const requestId = randomUUID();
+    record(source.session_id, { kind: 'question', requestId, questions });
+    setStatus(source.session_id, 'awaiting_input');
+    return new Promise<QuestionAnswerItem[] | null>((resolve) => {
+      pendingQuestions.set(requestId, { sessionId: source.session_id, resolve });
+      log.info(
+        { deviceId: options.deviceId, sessionId: source.session_id, requestId },
+        'daemon: question relayed to browser',
+      );
+      sendForSession(source, 'agent.question', { requestId, questions });
+    });
+  }
+
   /** Map a wire decision onto the adapter's internal contract (a deny always carries a message). */
   function toPermissionDecision(payload: PermissionDecisionPayload): PermissionDecision {
     if (payload.behavior === 'allow') {
@@ -390,6 +426,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (entry) entry.decision = 'deny';
       pendingPermissions.delete(requestId);
       pending.resolve({ behavior: 'deny', message: reason });
+    }
+    // Release any adopted-session question the hook is blocked on for this session — same deadlock guard as
+    // the permissions above. `null` fails it closed (the hook returns `ask`, deferring to the local picker);
+    // adopted sessions have no AbortController, so without this an interrupt/end would strand the hook.
+    for (const [requestId, pending] of pendingQuestions) {
+      if (pending.sessionId !== sessionId) continue;
+      pendingQuestions.delete(requestId);
+      pending.resolve(null);
     }
     const abort = sessionAborts.get(sessionId);
     if (abort) {
@@ -772,6 +816,47 @@ export function createDaemon(options: DaemonOptions): Daemon {
         pending.resolve(toPermissionDecision(decision.data));
         return;
       }
+      case 'question.answer': {
+        const answer = questionAnswerPayloadSchema.safeParse(await readSessionPayload(envelope));
+        if (!answer.success) {
+          log.warn(
+            { deviceId: options.deviceId },
+            'daemon: dropped question.answer with invalid payload',
+          );
+          return;
+        }
+        const pending = pendingQuestions.get(answer.data.requestId);
+        if (!pending) {
+          // The question was already settled (daemon restart / a stale or duplicate answer). Reconcile with
+          // the authoritative session state — exactly as the permission-decision race does — so the browser's
+          // "sending…" doesn't strand on a question that's no longer pending.
+          log.info(
+            { deviceId: options.deviceId, requestId: answer.data.requestId },
+            'daemon: answer for a settled question — reconciling with session state',
+          );
+          sendForSession(envelope, 'session.history', historyPayloadFor(envelope.session_id));
+          return;
+        }
+        pendingQuestions.delete(answer.data.requestId);
+        // Record the answer on the question entry so a later backfill shows it answered, then resume.
+        const sessionId = envelope.session_id;
+        if (sessionId !== undefined) {
+          const entry = sessionRecords
+            .get(sessionId)
+            ?.transcript.find(
+              (e): e is Extract<SessionHistoryEntry, { kind: 'question' }> =>
+                e.kind === 'question' && e.requestId === answer.data.requestId,
+            );
+          if (entry) entry.answers = answer.data.answers;
+          setStatus(sessionId, 'running');
+        }
+        log.info(
+          { deviceId: options.deviceId, requestId: answer.data.requestId },
+          'daemon: question answered',
+        );
+        pending.resolve(answer.data.answers);
+        return;
+      }
       case 'session.control': {
         const control = sessionControlPayloadSchema.safeParse(await readSessionPayload(envelope));
         if (!control.success) {
@@ -977,6 +1062,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
     await mirrorTranscript(telecodeSessionId, event.transcript_path);
 
     if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
+      // AskUserQuestion (Journey 2): the agent is asking the human a multiple-choice question. PreToolUse
+      // fires before it renders locally, so we forward it to the browser and relay the remote pick back as
+      // deny-feedback (best-effort, AD-4). An unparseable question fails closed — defer to the local picker.
+      if (event.tool_name === 'AskUserQuestion') {
+        const questions = questionsFromToolInput(event.tool_input);
+        if (!questions) {
+          log.warn(
+            { deviceId: options.deviceId, sessionId: telecodeSessionId },
+            'daemon: could not parse AskUserQuestion — failing closed',
+          );
+          return preToolUseOutput('ask');
+        }
+        const answers = await requestQuestionAnswer(adoptedSource(telecodeSessionId), questions);
+        // No remote answer (daemon stopping) — fail closed so Claude Code shows its own picker locally.
+        if (answers === null) return preToolUseOutput('ask');
+        return preToolUseOutput('deny', buildQuestionDenyReason(questions, answers));
+      }
       const decision = await requestPermission(adoptedSource(telecodeSessionId), {
         toolName: event.tool_name,
         input: event.tool_input ?? {},
@@ -1029,11 +1131,17 @@ export function createDaemon(options: DaemonOptions): Daemon {
       }
       // Unblock any in-flight turns waiting on a human decision (incl. an adopted session's hook, which is
       // blocking the hook socket) so their runs finish instead of hanging on a closed socket. Settle BEFORE
-      // stopping the hook socket, so a blocked hook gets its deny response rather than a dropped connection.
+      // stopping the hook socket, so a blocked hook gets its response rather than a dropped connection.
       for (const { resolve } of pendingPermissions.values()) {
         resolve({ behavior: 'deny', message: 'daemon stopping' });
       }
       pendingPermissions.clear();
+      // Likewise release any adopted-session question the hook is blocked on — `null` fails it closed so the
+      // hook defers to Claude Code's local picker (never auto-answered). Same J1 deadlock guard as above.
+      for (const { resolve } of pendingQuestions.values()) {
+        resolve(null);
+      }
+      pendingQuestions.clear();
       await hookSocket?.stop();
       socket?.close();
       socket = null;

@@ -1,10 +1,13 @@
 import {
   agentMessagePayloadSchema,
   agentPermissionRequestPayloadSchema,
+  agentQuestionPayloadSchema,
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
   sessionHistoryPayloadSchema,
+  type AgentQuestionItem,
   type Envelope,
+  type QuestionAnswerItem,
   type SessionStatusName,
 } from '@telecode/protocol';
 
@@ -19,6 +22,14 @@ export type SessionStatus = SessionStatusName | 'idle';
 
 /** Lifecycle of one permission request as the human acts on it (verification-gated — never optimistic). */
 export type DecisionState = 'pending' | 'approving' | 'rejecting' | 'approved' | 'rejected';
+
+/**
+ * Lifecycle of an adopted-session question (Journey 2): `pending` awaits the human; `answering` is the
+ * verification-gated in-flight state (confirmed on the daemon's next frame, never optimistic — like a
+ * permission); `answered` is delivered; `closed` is a question the session ended before answering (the
+ * picker disappears, honestly unanswered — telecode couldn't relay it). Answering is best-effort (AD-4).
+ */
+export type AnswerState = 'pending' | 'answering' | 'answered' | 'closed';
 
 export type TranscriptEntry =
   | { readonly kind: 'user'; readonly id: string; readonly text: string }
@@ -36,6 +47,15 @@ export type TranscriptEntry =
       readonly toolName: string;
       readonly input: Record<string, unknown>;
       readonly decision: DecisionState;
+    }
+  | {
+      readonly kind: 'question';
+      readonly id: string;
+      readonly requestId: string;
+      readonly questions: readonly AgentQuestionItem[];
+      readonly answer: AnswerState;
+      /** The human's pick(s), one per question — present once answering/answered. */
+      readonly answers?: readonly QuestionAnswerItem[];
     };
 
 export interface SessionState {
@@ -59,21 +79,27 @@ export function startingState(): SessionState {
 }
 
 /**
- * Any inbound frame proves the daemon has moved on, so an in-flight decision (`approving`/`rejecting`)
- * is now confirmed — flip it to its terminal state. This is the round-trip confirmation that keeps the
- * approve/reject gate honest rather than optimistic.
+ * Any inbound frame proves the daemon has moved on, so an in-flight action — a permission decision
+ * (`approving`/`rejecting`) or a question answer (`answering`) — is now confirmed; flip it to its terminal
+ * state. This is the round-trip confirmation that keeps the gate/picker honest rather than optimistic.
  */
-function confirmInFlightDecisions(entries: readonly TranscriptEntry[]): readonly TranscriptEntry[] {
+function confirmInFlightActions(entries: readonly TranscriptEntry[]): readonly TranscriptEntry[] {
   let changed = false;
   const next = entries.map((entry) => {
-    if (entry.kind !== 'permission') return entry;
-    if (entry.decision === 'approving') {
-      changed = true;
-      return { ...entry, decision: 'approved' as const };
+    if (entry.kind === 'permission') {
+      if (entry.decision === 'approving') {
+        changed = true;
+        return { ...entry, decision: 'approved' as const };
+      }
+      if (entry.decision === 'rejecting') {
+        changed = true;
+        return { ...entry, decision: 'rejected' as const };
+      }
+      return entry;
     }
-    if (entry.decision === 'rejecting') {
+    if (entry.kind === 'question' && entry.answer === 'answering') {
       changed = true;
-      return { ...entry, decision: 'rejected' as const };
+      return { ...entry, answer: 'answered' as const };
     }
     return entry;
   });
@@ -81,24 +107,30 @@ function confirmInFlightDecisions(entries: readonly TranscriptEntry[]): readonly
 }
 
 /**
- * When a session reaches a terminal state, any gate still awaiting a verdict can never be answered —
- * the daemon's `canUseTool` is no longer waiting. Close it so the Approve/Reject buttons disappear and a
- * late click can't strand on the daemon (which already settled the gate on interrupt/end). An unanswered
- * gate means the tool never ran, so it reads as rejected — matching the verdict the daemon records.
+ * When a session reaches a terminal state, any gate or question still awaiting the human can never be
+ * answered — the daemon is no longer waiting. Close them so the action controls disappear and a late click
+ * can't strand. An unanswered permission means the tool never ran, so it reads as rejected (matching the
+ * daemon's recorded verdict); an unanswered question is `closed` (the picker disappears, honestly unanswered).
  */
 function closeOpenGates(entries: readonly TranscriptEntry[]): readonly TranscriptEntry[] {
   let changed = false;
   const next = entries.map((entry) => {
-    if (entry.kind !== 'permission' || entry.decision !== 'pending') return entry;
-    changed = true;
-    return { ...entry, decision: 'rejected' as const };
+    if (entry.kind === 'permission' && entry.decision === 'pending') {
+      changed = true;
+      return { ...entry, decision: 'rejected' as const };
+    }
+    if (entry.kind === 'question' && (entry.answer === 'pending' || entry.answer === 'answering')) {
+      changed = true;
+      return { ...entry, answer: 'closed' as const };
+    }
+    return entry;
   });
   return changed ? next : entries;
 }
 
 /** Fold one inbound relay frame into the session state. Unknown/invalid frames are ignored. */
 export function applyEnvelope(state: SessionState, envelope: Envelope): SessionState {
-  const entries = confirmInFlightDecisions(state.entries);
+  const entries = confirmInFlightActions(state.entries);
   const base = entries === state.entries ? state : { ...state, entries };
 
   switch (envelope.type) {
@@ -158,6 +190,27 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
       };
     }
 
+    case 'agent.question': {
+      // An adopted session's AskUserQuestion (Journey 2): park at awaiting_input and surface the picker.
+      const parsed = agentQuestionPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return base;
+      return {
+        ...base,
+        status: 'awaiting_input',
+        entries: [
+          ...base.entries,
+          {
+            kind: 'question',
+            id: `e${base.seq}`,
+            requestId: parsed.data.requestId,
+            questions: parsed.data.questions,
+            answer: 'pending',
+          },
+        ],
+        seq: base.seq + 1,
+      };
+    }
+
     case 'session.ended': {
       const parsed = sessionEndedPayloadSchema.safeParse(envelope.payload);
       return {
@@ -209,6 +262,17 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
                     ? 'rejected'
                     : 'pending',
             };
+          case 'question':
+            // A backfilled question replays as decided (answered, no picker) when it carries answers, or
+            // still-open (pending, actionable) otherwise — the same decided-vs-pending split as a permission.
+            return {
+              kind: 'question',
+              id,
+              requestId: entry.requestId,
+              questions: entry.questions,
+              answer: entry.answers !== undefined ? 'answered' : 'pending',
+              ...(entry.answers !== undefined ? { answers: entry.answers } : {}),
+            };
           default: {
             // Exhaustiveness: a new history-entry kind must be handled here (parse already rejects
             // unknown kinds at runtime, so this is unreachable).
@@ -258,4 +322,30 @@ export function markDeciding(
 /** The permission request currently awaiting a human decision, if any. */
 export function pendingPermission(state: SessionState): TranscriptEntry | undefined {
   return state.entries.find((entry) => entry.kind === 'permission' && entry.decision === 'pending');
+}
+
+/**
+ * Mark a question as answered locally (in-flight) the instant the human submits, carrying their pick(s).
+ * Verification-gated like {@link markDeciding}: it shows `answering` and only confirms to `answered` on the
+ * daemon's next frame. Resuming the session optimistically (status → running) matches the daemon flow.
+ */
+export function markAnswering(
+  state: SessionState,
+  requestId: string,
+  answers: readonly QuestionAnswerItem[],
+): SessionState {
+  return {
+    ...state,
+    status: 'running',
+    entries: state.entries.map((entry) =>
+      entry.kind === 'question' && entry.requestId === requestId
+        ? { ...entry, answer: 'answering', answers }
+        : entry,
+    ),
+  };
+}
+
+/** The question currently awaiting a human answer, if any. */
+export function pendingQuestion(state: SessionState): TranscriptEntry | undefined {
+  return state.entries.find((entry) => entry.kind === 'question' && entry.answer === 'pending');
 }

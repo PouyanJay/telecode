@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createTranscriptMirror, transcriptEntriesFrom } from './transcript-mirror';
+import { createTranscriptMirror } from './transcript-mirror';
+import { transcriptEntriesFrom } from './transcript-parse';
 
 const logger = pino({ level: 'silent' });
 

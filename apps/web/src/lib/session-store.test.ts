@@ -3,7 +3,7 @@ import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RelayConnection, type RelayConnectionOptions } from './relay-client';
-import { connect, disconnect, launch, sessions } from './session-store';
+import { answer, connect, disconnect, launch, sessions } from './session-store';
 
 /**
  * Phase 2 Task 11 — the launch-correlation + timeout edges deferred from Task 5 (AD-P2-9). The relay
@@ -19,6 +19,7 @@ const deviceId = 'device-1';
 function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
   const subscribed: string[] = [];
+  const answered: { sessionId: string; payload: unknown }[] = [];
   let emit: (envelope: ReturnType<typeof makeEnvelope>) => void = () => undefined;
   let fireReconnect: () => void = () => undefined;
   const create = (options: RelayConnectionOptions): RelayConnection => {
@@ -30,6 +31,7 @@ function makeFakeConnection() {
       subscribe: (id) => subscribed.push(id),
       sendUserMessage: () => undefined,
       decide: () => undefined,
+      answer: (sessionId, payload) => answered.push({ sessionId, payload }),
       control: () => undefined,
       close: () => undefined,
     };
@@ -38,6 +40,29 @@ function makeFakeConnection() {
     create,
     launched,
     subscribed,
+    answered,
+    /** Simulate the daemon raising an adopted-session question on a session. */
+    question(sessionId: string, requestId: string) {
+      emit(
+        makeEnvelope({
+          type: 'agent.question',
+          userId,
+          deviceId,
+          sessionId,
+          payload: {
+            requestId,
+            questions: [
+              {
+                question: 'Which DB?',
+                header: 'DB',
+                multiSelect: false,
+                options: [{ label: 'Postgres' }],
+              },
+            ],
+          },
+        }),
+      );
+    },
     /** Simulate the connection re-authenticating after a dropped socket (browser auto-reconnect). */
     reconnect() {
       fireReconnect();
@@ -134,6 +159,30 @@ describe('session-store launch correlation (Task 11)', () => {
     // The daemon reconnects: the relay signals online → the store resubscribes to resume (backfill).
     fake.presence(true);
     expect(fake.subscribed).toEqual(['sess-1', 'sess-2']);
+  });
+
+  it('marks a question answer in-flight and sends it to the relay (Journey 2)', () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started('sess-q');
+    fake.question('sess-q', 'q1');
+
+    answer('sess-q', { requestId: 'q1', answers: [{ selectedLabels: ['Postgres'] }] });
+
+    // Marked in-flight locally (answering, verification-gated) and forwarded to the relay.
+    const entry = get(sessions)
+      .get('sess-q')
+      ?.entries.find((e) => e.kind === 'question');
+    expect(entry?.kind === 'question' && entry.answer).toBe('answering');
+    expect(fake.answered).toEqual([
+      {
+        sessionId: 'sess-q',
+        payload: { requestId: 'q1', answers: [{ selectedLabels: ['Postgres'] }] },
+      },
+    ]);
   });
 
   it('a late frame for a timed-out launch never mis-resolves a later launch', async () => {
