@@ -25,6 +25,42 @@ a {
   color: var(--text);
 }
 
+/* ── Scrollbars — minimal & auto-hiding ───────────────────────────────────────
+   App-wide: the thumb is invisible at rest and only resolves while the pointer is over (or keyboard
+   focus is within) the scrolling region, so a panel with an inner scroll never carries a permanent,
+   heavy gutter. A hairline-scale thumb (4px visible inside a 10px track) keeps it quiet when shown. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+*:hover,
+*:focus-within {
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border: 3px solid transparent;
+  border-radius: var(--radius-full);
+  background-clip: padding-box;
+}
+*:hover::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
 /* Keyboard skip link — first focusable element, visible only on focus. */
 .skip-link {
   position: absolute;

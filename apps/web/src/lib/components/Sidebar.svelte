@@ -1,12 +1,11 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
   import { page } from '$app/stores';
-  import { BrandLogo, Button, Pill, StatusDot } from '@telecode/ui';
+  import { BrandLogo, Button, Pill } from '@telecode/ui';
 
   import { deviceStatus } from '$lib/devices';
   import { isActive } from '$lib/nav';
   import type { RelayDevice } from '$lib/server/relay-api';
-  import type { SessionCounts } from '$lib/session-groups';
   import type { ConnectionState } from '$lib/session-store';
 
   /**
@@ -19,13 +18,13 @@
     user,
     devices,
     connection,
-    counts,
+    sessionTotal,
     onlaunch,
   }: {
     user: { displayName?: string | null; email?: string | null } | null;
     devices: RelayDevice[];
     connection: ConnectionState;
-    counts: SessionCounts;
+    sessionTotal: number;
     onlaunch: () => void;
   } = $props();
 
@@ -60,7 +59,7 @@
     <a class="navlink" href="/" aria-current={isActive(path, '/') ? 'page' : undefined}>
       <svg class="nav-icon" viewBox="0 0 15 15" fill="none" aria-hidden="true"><path d="M2 4h11M2 7.5h11M2 11h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
       <span class="nav-label">Sessions</span>
-      <span class="nav-count mono">{counts.running + counts.awaiting}</span>
+      <span class="nav-count mono">{sessionTotal}</span>
     </a>
     <a class="navlink" href="/devices" aria-current={isActive(path, '/devices') ? 'page' : undefined}>
       <svg class="nav-icon" viewBox="0 0 15 15" fill="none" aria-hidden="true"><rect x="1.6" y="2.6" width="11.8" height="8" rx="1.3" stroke="currentColor" stroke-width="1.3" /><path d="M5.2 13h4.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
