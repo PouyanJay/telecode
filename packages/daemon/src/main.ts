@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { encodeKey, generateKeyPair } from '@telecode/protocol';
 import { pino } from 'pino';
 
+import { runHookBridge } from './adopt/hook-bridge';
+import { installHooks, readHooksStatus, uninstallHooks } from './adopt/hooks-install';
 import { loadCredentials, saveCredentials } from './credentials';
 import { createDaemon } from './daemon';
 import { runDoctorCli } from './doctor-cli';
@@ -50,6 +52,46 @@ const cliArgs = process.argv.slice(2);
 if (cliArgs.includes('doctor')) {
   const exitCode = await runDoctorCli({ argv: cliArgs, env: process.env });
   process.exit(exitCode);
+}
+
+// `telecode hook`: the adoption bridge Claude Code spawns for each hook event — pipe the hook JSON on stdin
+// → the daemon's Unix socket → the decision on stdout. Fail-closed (a dead daemon yields `{}`). Never
+// starts the daemon. Kept dead-simple since Claude runs it once per tool call.
+if (cliArgs[0] === 'hook') {
+  const code = await runHookBridge({
+    socketPath: join(homedir(), '.telecode', 'run', 'hook.sock'),
+    input: process.stdin,
+    output: process.stdout,
+  });
+  process.exit(code);
+}
+
+// `telecode hooks <install|uninstall|status>`: opt in/out of adopting your own Claude Code sessions by
+// (un)installing telecode's hooks in `~/.claude/settings.json` — transparent, idempotent, reversible.
+if (cliArgs[0] === 'hooks') {
+  const settingsPath = join(homedir(), '.claude', 'settings.json');
+  // The command Claude Code will run: this very bin, plus the `hook` subcommand.
+  const command = `${process.argv[1]} hook`;
+  switch (cliArgs[1]) {
+    case 'install':
+      await installHooks({ settingsPath, command });
+      log.info({ settingsPath }, 'telecode: installed Claude Code hooks — adoption enabled');
+      break;
+    case 'uninstall':
+      await uninstallHooks({ settingsPath });
+      log.info({ settingsPath }, 'telecode: removed Claude Code hooks — adoption disabled');
+      break;
+    case 'status':
+      log.info(
+        { settingsPath, ...(await readHooksStatus({ settingsPath })) },
+        'telecode: Claude Code hooks status',
+      );
+      break;
+    default:
+      log.error('usage: telecode hooks <install|uninstall|status>');
+      process.exit(1);
+  }
+  process.exit(0);
 }
 
 // `--relay-url <wss://…/ws>` (or `TELECODE_RELAY_URL`) points the daemon at a self-hosted relay; the
