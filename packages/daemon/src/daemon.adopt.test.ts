@@ -3,7 +3,17 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { encodeKey, generateKeyPair, makeEnvelope, type Envelope } from '@telecode/protocol';
+import {
+  deriveSharedKey,
+  encodeKey,
+  generateKeyPair,
+  importIdentityPrivateKey,
+  importIdentityPublicKey,
+  makeEnvelope,
+  openPayload,
+  sealPayload,
+  type Envelope,
+} from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createFakeAgentAdapter } from './agent-adapter';
@@ -646,6 +656,61 @@ describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
       // relay — an encrypted string with a non-empty nonce, never the cleartext { requestId, questions }.
       expect(question.nonce).not.toBe('');
       expect(typeof question.payload).toBe('string');
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('opens a sealed adopt.config and replies adopt.state as ciphertext (denylist paths never cleartext)', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-cfg-e2e-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemonKp = await generateKeyPair();
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
+      keyPair: {
+        publicKey: encodeKey(daemonKp.publicKey),
+        privateKey: encodeKey(daemonKp.privateKey),
+      },
+    });
+    await daemon.start();
+    try {
+      // Act as the browser: derive the device shared key and box-seal the policy to the daemon's pubkey.
+      const browserKp = await generateKeyPair();
+      const shared = await deriveSharedKey(
+        await importIdentityPrivateKey(encodeKey(browserKp.privateKey)),
+        await importIdentityPublicKey(encodeKey(daemonKp.publicKey)),
+      );
+      const sealed = await sealPayload(
+        { set: { enabled: false, denylist: ['/Users/me/secret'] } },
+        shared,
+      );
+      relay.send(
+        makeEnvelope({
+          type: 'adopt.config',
+          userId: USER,
+          deviceId: DEVICE,
+          payload: sealed.payload,
+          nonce: sealed.nonce,
+          senderPublicKey: encodeKey(browserKp.publicKey),
+        }),
+      );
+
+      const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+      // Invariant #5: the reply (which names a private repo path) is opaque ciphertext to the relay.
+      expect(state.nonce).not.toBe('');
+      expect(typeof state.payload).toBe('string');
+      // The browser, holding the same shared key, opens it to the policy it set.
+      expect(await openPayload(state, shared)).toEqual({
+        enabled: false,
+        denylist: ['/Users/me/secret'],
+      });
     } finally {
       await daemon.stop();
       await relay.close();
