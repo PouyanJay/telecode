@@ -39,6 +39,11 @@ export const MESSAGE_TYPES = [
   // adopted-session attention signal (daemon -> web): Claude Code's `Notification` (e.g. went idle waiting
   // for input) surfaced as a non-blocking "needs a look" cue. No answer required (Journey 3).
   'agent.notice',
+  // adoption policy (Journey 3), session-less + box-sealed so the relay never sees repo paths:
+  // `adopt.config` (web -> daemon) reads/sets the per-machine enabled + denylist; `adopt.state`
+  // (daemon -> web) reports the current policy back to the requesting browser.
+  'adopt.config',
+  'adopt.state',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).

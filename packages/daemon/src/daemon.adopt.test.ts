@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -651,5 +651,124 @@ describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
       await relay.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('daemon: adoption policy (web-managed config + denylist gating, Journey 3)', () => {
+  let relay: FakeRelay;
+  let daemon: Daemon | undefined;
+  let dir: string;
+  let socketPath: string;
+  let configPath: string;
+
+  beforeEach(async () => {
+    relay = await startFakeRelay(USER, DEVICE);
+    dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-policy-'));
+    socketPath = join(dir, 'run', 'hook.sock');
+    configPath = join(dir, 'adopt-config.json');
+  });
+
+  afterEach(async () => {
+    await daemon?.stop();
+    await relay.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** Start a daemon (cleartext) wired to the policy config file. */
+  async function start(): Promise<void> {
+    daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath },
+    });
+    await daemon.start();
+  }
+
+  function preTool(cwd: string): unknown {
+    return {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd,
+      tool_name: 'Read',
+      tool_input: {},
+    };
+  }
+
+  it('persists a SET adopt.config and replies the new adopt.state', async () => {
+    await start();
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled: false, denylist: ['/Users/me/secret'] } },
+      }),
+    );
+    const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    expect(state.payload).toEqual({ enabled: false, denylist: ['/Users/me/secret'] });
+    // Persisted to disk so it survives a daemon restart.
+    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({
+      enabled: false,
+      denylist: ['/Users/me/secret'],
+    });
+  });
+
+  it('replies the current adopt.state for a GET (no set)', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ enabled: true, denylist: ['/Users/me/secret'] }),
+      'utf8',
+    );
+    await start();
+    relay.send(makeEnvelope({ type: 'adopt.config', userId: USER, deviceId: DEVICE, payload: {} }));
+    const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    expect(state.payload).toEqual({ enabled: true, denylist: ['/Users/me/secret'] });
+  });
+
+  it('does NOT adopt a session whose cwd is on the denylist (telecode stays out)', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ enabled: true, denylist: ['/Users/me/secret'] }),
+      'utf8',
+    );
+    await start();
+
+    // A session in the denied repo → no announce, hook returns {} (Claude Code's own local flow applies).
+    const denied = hookRpc(socketPath, preTool('/Users/me/secret/app'));
+    expect(await denied).toEqual({});
+
+    // A session in an allowed repo IS adopted — and its announce is the FIRST session.adopted frame, proving
+    // the denied one produced none.
+    const allowed = hookRpc(socketPath, preTool('/Users/me/work'));
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
+    ackAdopted(relay, announce);
+    await allowed;
+  });
+
+  it('does NOT adopt anything while adoption is disabled', async () => {
+    await writeFile(configPath, JSON.stringify({ enabled: false, denylist: [] }), 'utf8');
+    await start();
+    const event = hookRpc(socketPath, preTool('/Users/me/work'));
+    expect(await event).toEqual({});
+
+    // Re-enable via the web → a subsequent session adopts (proves the runtime gate honours the live policy).
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled: true, denylist: [] } },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'adopt.state');
+
+    const after = hookRpc(socketPath, preTool('/Users/me/work'));
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
+    ackAdopted(relay, announce);
+    await after;
   });
 });

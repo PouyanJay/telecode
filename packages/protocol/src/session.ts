@@ -102,6 +102,32 @@ export const sessionAdoptedPayloadSchema = z.object({
 });
 export type SessionAdoptedPayload = z.infer<typeof sessionAdoptedPayloadSchema>;
 
+/**
+ * The per-machine adoption policy (Journey 3), managed from the web and applied by the daemon at runtime:
+ *  - `enabled` — the master switch for adopting externally-started Claude Code sessions.
+ *  - `denylist` — project paths to NEVER adopt/mirror (a session whose `cwd` is under one of these is left
+ *    entirely to Claude Code's own local flow). Allow-all by default; the denylist is the privacy carve-out.
+ * Bounded so a compromised peer can't bloat it.
+ */
+export const adoptSettingsSchema = z.object({
+  enabled: z.boolean(),
+  denylist: z.array(z.string().min(1).max(1024)).max(100),
+});
+export type AdoptSettings = z.infer<typeof adoptSettingsSchema>;
+
+/**
+ * Payload for `adopt.config` (web → daemon, Journey 3): the device's adoption policy, **box-sealed to the
+ * daemon's key** so the relay never sees repo paths (invariant #5). `set` present updates + persists the
+ * policy; `set` omitted is a read-only request. Either way the daemon replies {@link adoptStatePayloadSchema}
+ * sealed to the requesting browser. The envelope carries the browser's `sender_public_key` for that reply.
+ */
+export const adoptConfigPayloadSchema = z.object({ set: adoptSettingsSchema.optional() });
+export type AdoptConfigPayload = z.infer<typeof adoptConfigPayloadSchema>;
+
+/** Payload for `adopt.state` (daemon → web, Journey 3): the daemon's current adoption policy, for display. */
+export const adoptStatePayloadSchema = adoptSettingsSchema;
+export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
+
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
   'starting',

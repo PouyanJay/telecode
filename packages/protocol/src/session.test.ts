@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  adoptConfigPayloadSchema,
+  adoptStatePayloadSchema,
   agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
   agentQuestionPayloadSchema,
@@ -238,6 +240,35 @@ describe('questionAnswerPayloadSchema (adopted-session answers)', () => {
     expect(questionAnswerPayloadSchema.safeParse({ requestId: 'r', answers: [] }).success).toBe(
       false,
     );
+  });
+});
+
+describe('adoptConfig / adoptState payload schemas (Journey 3)', () => {
+  it('parses a SET (full config) and a GET (no set)', () => {
+    const set = adoptConfigPayloadSchema.parse({
+      set: { enabled: true, denylist: ['/Users/me/secret-repo'] },
+    });
+    expect(set.set?.enabled).toBe(true);
+    expect(set.set?.denylist).toEqual(['/Users/me/secret-repo']);
+    expect(adoptConfigPayloadSchema.parse({}).set).toBeUndefined();
+  });
+
+  it('rejects a config with a non-boolean enabled or a non-string denylist entry', () => {
+    expect(
+      adoptConfigPayloadSchema.safeParse({ set: { enabled: 'yes', denylist: [] } }).success,
+    ).toBe(false);
+    expect(
+      adoptConfigPayloadSchema.safeParse({ set: { enabled: true, denylist: [42] } }).success,
+    ).toBe(false);
+    expect(
+      adoptConfigPayloadSchema.safeParse({ set: { enabled: true, denylist: [''] } }).success,
+    ).toBe(false);
+  });
+
+  it('parses the daemon state (current enabled + denylist)', () => {
+    const state = adoptStatePayloadSchema.parse({ enabled: false, denylist: [] });
+    expect(state.enabled).toBe(false);
+    expect(state.denylist).toEqual([]);
   });
 });
 

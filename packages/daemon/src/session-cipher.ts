@@ -33,6 +33,16 @@ export interface SessionCipher {
   isEncrypted(sessionId: string): boolean;
   /** Open a sealed launch payload using the browser pubkey on the envelope. Throws if not capable. */
   decryptLaunch(envelope: Envelope): Promise<unknown>;
+  /**
+   * Open a device-scoped payload a browser sealed to this daemon (e.g. `adopt.config`), using the browser
+   * pubkey on the envelope. Same seam as {@link decryptLaunch}, but session-less (Journey 3).
+   */
+  openFromBrowser(envelope: Envelope): Promise<unknown>;
+  /**
+   * Seal a device-scoped payload to a browser's public key (e.g. the `adopt.state` reply), so the relay
+   * forwards ciphertext only. Same seam as {@link keyDelivery}, but for an arbitrary payload (Journey 3).
+   */
+  sealToBrowser(browserPublicKey: string, payload: unknown): Promise<EncryptedEnvelopeFields>;
   /** Mint + store the session's content key (idempotent). */
   establish(sessionId: string): void;
   /** Wrap the session's content key to `browserPublicKey` for a `session.key` message. */
@@ -80,6 +90,17 @@ export function createSessionCipher(privateKeyBase64?: string): SessionCipher {
         throw new Error('launch is missing sender_public_key');
       }
       return openPayload(envelope, await sharedWith(envelope.sender_public_key));
+    },
+
+    async openFromBrowser(envelope): Promise<unknown> {
+      if (envelope.sender_public_key === undefined) {
+        throw new Error('sealed message is missing sender_public_key');
+      }
+      return openPayload(envelope, await sharedWith(envelope.sender_public_key));
+    },
+
+    async sealToBrowser(browserPublicKey, payload): Promise<EncryptedEnvelopeFields> {
+      return sealPayload(payload, await sharedWith(browserPublicKey));
     },
 
     establish(sessionId): void {
