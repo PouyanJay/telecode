@@ -53,6 +53,11 @@
   --border-strong: var(--ink-line-strong);
   --focus-ring: var(--accent-ring);
 
+  /* Scrollbar — minimal & auto-hiding; the thumb resolves only on hover/focus. References semantic
+     tokens (resolved lazily) so it re-themes for free under [data-theme='light']. */
+  --scrollbar-thumb: var(--border-strong);
+  --scrollbar-thumb-hover: var(--text-muted);
+
   --primary: var(--accent);
   --primary-text: var(--text-on-accent);
   --neutral: #eceef1;
