@@ -13,7 +13,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
@@ -24,7 +24,8 @@ import {
   sealEnvelopePayload,
   unwrapContentKey,
 } from '../_helpers/browser-crypto';
-import { connectBrowser, waitForEnvelope } from '../_helpers/ws';
+import { expectSessionStatus } from '../_helpers/db';
+import { connectBrowser } from '../_helpers/ws';
 
 /**
  * Phase 3 exit criterion (plan §3.5 + §8): an encrypted session runs end-to-end across the REAL relay — a
@@ -137,11 +138,20 @@ describe('full-stack E2E session through the real relay', () => {
       ),
     );
 
-    const keyFrame = await waitForEnvelope(browser, (e) => e.type === 'session.key');
+    // Every frame is captured into `received` by the collector above. Poll it for completion rather than
+    // registering serial one-shot listeners: a frame can arrive between two awaits and be missed — now more
+    // likely because the relay broadcasts `session.ended` before persisting (so it no longer trails the DB
+    // write). Once `session.ended` is in, the earlier `session.key`/`agent.message` frames precede it.
+    await vi.waitFor(() => expect(received.some((e) => e.type === 'session.ended')).toBe(true), {
+      timeout: 5000,
+      interval: 25,
+    });
+    const keyFrame = received.find((e) => e.type === 'session.key');
+    if (!keyFrame) throw new Error('expected a session.key frame');
     const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
-    const messageFrame = await waitForEnvelope(browser, (e) => e.type === 'agent.message');
+    const messageFrame = received.find((e) => e.type === 'agent.message');
+    if (!messageFrame) throw new Error('expected an agent.message frame');
     expect(await decryptWithContentKey(messageFrame, contentKey)).toEqual({ text: AGENT_TEXT });
-    await waitForEnvelope(browser, (e) => e.type === 'session.ended');
 
     browser.close();
     return { received, sessionId: keyFrame.session_id, sealedLaunch };
@@ -152,10 +162,7 @@ describe('full-stack E2E session through the real relay', () => {
 
     expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
     // session.ended carried the cleartext status; the relay used it to mark the registry `done`.
-    const row = await admin.query<{ status: string }>('select status from sessions where id = $1', [
-      sessionId,
-    ]);
-    expect(row.rows[0]?.status).toBe('done');
+    await expectSessionStatus(admin, sessionId, 'done');
 
     // The decisive property: every frame the relay forwarded to the browser carried a ciphertext payload
     // (a base64 string, non-empty nonce) and no plaintext (prompt or agent output) appears anywhere. That

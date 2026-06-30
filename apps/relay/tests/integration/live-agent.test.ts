@@ -18,6 +18,7 @@ import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createSessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import { expectSessionStatus } from '../_helpers/db';
 import { connectBrowser } from '../_helpers/ws';
 
 /**
@@ -178,11 +179,7 @@ describe.skipIf(!LIVE)('LIVE: real Claude Agent SDK session through the relay', 
         .map((e) => sessionEndedPayloadSchema.parse(e.payload).status);
       expect(endings).toEqual(['done', 'done']);
 
-      const row = await admin.query<{ status: string }>(
-        'select status from sessions where id = $1',
-        [sessionId],
-      );
-      expect(row.rows[0]?.status).toBe('done');
+      await expectSessionStatus(admin, sessionId, 'done');
 
       browser.close();
     },

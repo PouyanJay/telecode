@@ -1,3 +1,5 @@
+import type { PermissionModeName } from '@telecode/protocol';
+
 /**
  * The seam that isolates the agent runtime from the rest of the daemon. Architecture invariant:
  * the Claude Agent SDK is used behind this one interface (never CLI scraping), so SDK churn touches
@@ -48,6 +50,12 @@ export interface AgentRunOptions {
    * the daemon treats an aborted run as an interrupted turn, not an error.
    */
   readonly signal?: AbortSignal;
+  /**
+   * The session's permission mode (chosen by the operator at launch). The real adapter applies it both to
+   * the SDK `query()` and to the per-tool gate it forces every tool through, so a session can be `plan`-only
+   * or auto-accept edits without weakening the approval gate. Omitted falls back to the conservative `default`.
+   */
+  readonly permissionMode?: PermissionModeName;
 }
 
 export interface AgentRunResult {

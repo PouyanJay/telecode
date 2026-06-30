@@ -163,6 +163,48 @@ describe('session reducer', () => {
     expect(new Set(state.entries.map((e) => e.id)).size).toBe(5); // stable, unique keys
   });
 
+  it('keeps a finished transcript when the daemon backfills empty/offline (no clobber on reconnect)', () => {
+    // A session watched to completion: a full transcript, terminal status `done`.
+    const finished = fold([
+      frame('session.started', {}),
+      frame('agent.message', { text: 'Here is the answer' }),
+      frame('session.ended', { status: 'done' }),
+    ]);
+    expect(finished.entries.length).toBeGreaterThan(0);
+
+    // A reconnect re-subscribes, but the daemon no longer holds the session (it restarted) and backfills
+    // an empty, offline_paused history. That must NOT wipe the transcript we already have — and a finished
+    // session must keep showing DONE, not flip to OFFLINE. (This is the "finished session went blank" bug.)
+    const after = applyEnvelope(
+      finished,
+      frame('session.history', { status: 'offline_paused', entries: [] }),
+    );
+    expect(after.entries).toEqual(finished.entries);
+    expect(after.status).toBe('done');
+  });
+
+  it('lets an in-flight session show offline on an empty backfill, but keeps its transcript', () => {
+    const live = fold([frame('session.started', {}), frame('agent.message', { text: 'working' })]);
+    expect(live.status).toBe('running');
+
+    const after = applyEnvelope(
+      live,
+      frame('session.history', { status: 'offline_paused', entries: [] }),
+    );
+    // Transcript preserved; a non-terminal session honestly reflects that the daemon is offline.
+    expect(after.entries).toEqual(live.entries);
+    expect(after.status).toBe('offline_paused');
+  });
+
+  it('still reports an empty offline backfill when there is no local transcript to protect', () => {
+    const after = applyEnvelope(
+      initialSessionState,
+      frame('session.history', { status: 'offline_paused', entries: [] }),
+    );
+    expect(after.entries).toHaveLength(0);
+    expect(after.status).toBe('offline_paused');
+  });
+
   it('starts from an idle initial state', () => {
     expect(initialSessionState.status).toBe('idle');
     expect(initialSessionState.entries).toHaveLength(0);

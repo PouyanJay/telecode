@@ -366,14 +366,16 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
-    if (sessionRegistry && envelope.session_id) {
-      if (envelope.type === 'session.started') {
-        await sessionRegistry.markRunning({
-          userId: envelope.user_id,
-          sessionId: envelope.session_id,
-        });
-        log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
-      } else if (envelope.type === 'session.ended') {
+    // `session.ended` is terminal: get DONE to the watching browser IMMEDIATELY, then persist. The browser
+    // is the live view and the daemon is the source of truth, so making the operator wait on a DB
+    // round-trip to see the run finish — slow on a cold/auto-pausing DB — is the wrong tradeoff here. (The
+    // ordering for `agent.permission_request` is deliberately the opposite: persist `awaiting_input` first.)
+    if (envelope.type === 'session.ended') {
+      if (envelope.session_id && CACHEABLE_TYPES.has(envelope.type)) {
+        cacheFrame(envelope.session_id, envelope.type, text);
+      }
+      broadcastToBrowsers(channel, text);
+      if (sessionRegistry && envelope.session_id) {
         const status = resolveEndedStatus(envelope);
         await sessionRegistry.markEnded({
           userId: envelope.user_id,
@@ -381,6 +383,16 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           status,
         });
         log.info({ channel, sessionId: envelope.session_id, status }, 'relay: session ended');
+      }
+      return;
+    }
+    if (sessionRegistry && envelope.session_id) {
+      if (envelope.type === 'session.started') {
+        await sessionRegistry.markRunning({
+          userId: envelope.user_id,
+          sessionId: envelope.session_id,
+        });
+        log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
       } else if (envelope.type === 'agent.permission_request') {
         // The run is blocked on a human decision: persist `awaiting_input` BEFORE broadcasting the
         // request, so any browser that reacts to it already observes the paused status.
