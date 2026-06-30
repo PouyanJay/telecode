@@ -26,6 +26,7 @@ export function registerSessionListRoute(
         device_id: session.deviceId,
         title: session.title,
         status: session.status,
+        origin: session.origin,
         created_at: session.createdAt.toISOString(),
         updated_at: session.updatedAt.toISOString(),
         ended_at: session.endedAt?.toISOString() ?? null,
