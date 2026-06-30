@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 
 import { pino, type Logger } from 'pino';
 import WebSocket from 'ws';
@@ -1062,11 +1063,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
     let telecodeSessionId: string;
     try {
-      // TODO(Journey 3): derive a `title` from the transcript's first user prompt so the registry row is
-      // named; for the walking skeleton the row title stays null and the dashboard falls back to the prompt.
+      // Name the registry row from the project directory (e.g. `…/myrepo` → "myrepo") so a session adopted
+      // before any user prompt — esp. a chat-only one adopted on SessionStart — still reads sensibly in the
+      // dashboard. Once the transcript mirrors a user message the UI can prefer that; the cwd title is the
+      // sensible default. Adoption announces once, so this title comes from the first event we see.
+      const title = event.cwd !== undefined ? basename(event.cwd) : '';
       telecodeSessionId = await adoptedSessions.ensureAdopted({
         claudeSessionId: event.session_id,
         ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
+        ...(title !== '' ? { title } : {}),
       });
     } catch (err) {
       log.warn(

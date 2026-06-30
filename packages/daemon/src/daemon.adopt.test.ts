@@ -378,6 +378,23 @@ describe('daemon: adopted sessions end-to-end', () => {
     expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
   });
 
+  it('adopts a session on SessionStart, before any tool, with a cwd-derived title', async () => {
+    // A chat-only session (never calls a tool) is invisible today. SessionStart adopts it eagerly.
+    const start = hookRpc(socketPath, {
+      hook_event_name: 'SessionStart',
+      session_id: CLAUDE_SESSION,
+      cwd: '/Users/me/myrepo',
+      source: 'startup',
+    });
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    const payload = announce.payload as { clientRef: string; title?: string; cwd?: string };
+    expect(payload.clientRef).toBe(CLAUDE_SESSION);
+    expect(payload.title).toBe('myrepo'); // derived from the cwd basename so the row has a sensible name
+    expect(payload.cwd).toBe('/Users/me/myrepo');
+    ackAdopted(relay, announce);
+    expect(await start).toEqual({});
+  });
+
   it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {
     // Adopt the session via a read-only tool, ack it.
     const first = hookRpc(socketPath, {
