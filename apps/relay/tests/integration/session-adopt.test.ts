@@ -4,7 +4,7 @@ import { makeEnvelope } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
@@ -39,15 +39,15 @@ describe('adopted sessions: daemon-initiated registration', () => {
     admin = new Pool({ connectionString: DATABASE_URL });
 
     await admin.query('truncate table users restart identity cascade');
-    const u = await admin.query<{ id: string }>(
+    const userRow = await admin.query<{ id: string }>(
       "insert into users (provider, provider_user_id) values ('dev', 'adopt') returning id",
     );
-    userId = u.rows[0]!.id;
-    const d = await admin.query<{ id: string }>(
+    userId = userRow.rows[0]!.id;
+    const deviceRow = await admin.query<{ id: string }>(
       "insert into devices (user_id, name, device_token_hash) values ($1, 'laptop', 'h') returning id",
       [userId],
     );
-    deviceId = d.rows[0]!.id;
+    deviceId = deviceRow.rows[0]!.id;
 
     const relayLogger = pino(
       { level: 'info' },
@@ -120,13 +120,16 @@ describe('adopted sessions: daemon-initiated registration', () => {
 
   it('drops a session.adopted with an invalid payload (no clientRef)', async () => {
     const daemon = await connectDaemon(relayUrl, userId, deviceId);
+    const before = relayLogs.length;
     daemon.send(
       JSON.stringify(
         makeEnvelope({ type: 'session.adopted', userId, deviceId, payload: { title: 'x' } }),
       ),
     );
-    // Give the relay a beat to process, then assert no row was created.
-    await waitForEnvelope(daemon, () => true, 200).catch(() => undefined);
+    // Deterministic barrier: wait for the relay's validation-failure log, not a wall-clock delay.
+    await vi.waitUntil(() => relayLogs.slice(before).some((l) => l.includes('invalid payload')), {
+      timeout: 2000,
+    });
     const count = await admin.query<{ n: string }>('select count(*)::text as n from sessions');
     expect(count.rows[0]!.n).toBe('0');
     daemon.close();

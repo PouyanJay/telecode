@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+import { z } from 'zod';
+
 /**
  * Install / remove telecode's Claude Code hooks in `~/.claude/settings.json` (the `telecode hooks
  * install|uninstall|status` commands). Adoption is opt-in and reversible: installing adds telecode's
@@ -15,20 +17,26 @@ import { dirname } from 'node:path';
 /** The hook events telecode registers for adoption (Journey 1: PreToolUse gates tools + drives adoption). */
 export const TELECODE_HOOK_EVENTS = ['PreToolUse'] as const;
 
-interface CommandHook {
-  type: 'command';
-  command: string;
-  timeout?: number;
-}
-interface MatcherGroup {
-  matcher?: string;
-  hooks: CommandHook[];
-}
+// `~/.claude/settings.json` is a trust boundary (persisted JSON the user/other tools also edit), so its
+// shape is validated with zod rather than asserted with a cast — a corrupted `hooks` field must degrade to
+// "no telecode hooks", never crash `stripTelecodeHooks`. `passthrough()` preserves the user's other keys.
+const commandHookSchema = z.object({
+  type: z.literal('command'),
+  command: z.string(),
+  timeout: z.number().optional(),
+});
+const matcherGroupSchema = z.object({
+  matcher: z.string().optional(),
+  hooks: z.array(commandHookSchema),
+});
+const claudeSettingsSchema = z
+  .object({ hooks: z.record(z.array(matcherGroupSchema)).optional() })
+  .passthrough();
+
+type CommandHook = z.infer<typeof commandHookSchema>;
+type MatcherGroup = z.infer<typeof matcherGroupSchema>;
 type HooksByEvent = Record<string, MatcherGroup[]>;
-interface ClaudeSettings {
-  hooks?: HooksByEvent;
-  [key: string]: unknown;
-}
+type ClaudeSettings = z.infer<typeof claudeSettingsSchema>;
 
 /**
  * A hook entry is telecode's when its command invokes the `telecode hook` bridge — i.e. it mentions
@@ -42,10 +50,10 @@ export function isTelecodeHookCommand(command: string): boolean {
 async function readSettings(settingsPath: string): Promise<ClaudeSettings> {
   try {
     const raw = await readFile(settingsPath, 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null ? (parsed as ClaudeSettings) : {};
+    const parsed = claudeSettingsSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : {}; // unparseable/corrupt hooks → start fresh, never crash
   } catch {
-    return {}; // missing or unparseable — start fresh (we never clobber valid JSON; see writeSettings)
+    return {}; // missing or invalid JSON — start fresh (we never clobber valid JSON; see writeSettings)
   }
 }
 

@@ -3,10 +3,13 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { type HookEvent } from './hook-event';
 import { createHookSocketServer, type HookSocketServer } from './hook-socket';
+
+const logger = pino({ level: 'silent' });
 
 /**
  * The hook IPC transport (Journey 1, Task 4): a same-uid Unix domain socket the `telecode hook` bridge
@@ -53,7 +56,7 @@ describe('createHookSocketServer', () => {
   async function startWith(handle: (event: HookEvent) => Promise<unknown>): Promise<string> {
     dir = await mkdtemp(join(tmpdir(), 'telecode-hooksock-'));
     const socketPath = join(dir, 'run', 'hook.sock');
-    server = createHookSocketServer({ socketPath, handle });
+    server = createHookSocketServer({ socketPath, handle, logger });
     await server.start();
     return socketPath;
   }

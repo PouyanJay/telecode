@@ -2,7 +2,7 @@ import { chmod, mkdir, rm } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
 import { dirname } from 'node:path';
 
-import { pino, type Logger } from 'pino';
+import { type Logger } from 'pino';
 
 import { hookEventSchema, type HookEvent } from './hook-event';
 
@@ -32,11 +32,12 @@ export interface HookSocketOptions {
    * to Claude Code). May block for as long as a human decision takes — the bridge's hook `timeout` bounds it.
    */
   readonly handle: (event: HookEvent) => Promise<unknown>;
-  readonly logger?: Logger;
+  /** Injected at the composition root (the daemon's child logger) — never created here (TYPESCRIPT.md). */
+  readonly logger: Logger;
 }
 
 export function createHookSocketServer(options: HookSocketOptions): HookSocketServer {
-  const log = options.logger ?? pino({ name: 'hook-socket' });
+  const log = options.logger;
   const { socketPath } = options;
   let server: Server | undefined;
   // Track live connections so stop() can force-close any whose handler is still blocked on a human

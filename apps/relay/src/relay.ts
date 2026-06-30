@@ -431,6 +431,11 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       );
       return;
     }
+    // Any other `session.adopted` (e.g. one already carrying a session_id) is handled entirely above; drop
+    // it rather than letting it fall through to the broadcast at the end of this function.
+    if (envelope.type === 'session.adopted') {
+      return;
+    }
     // `session.ended` is terminal: get DONE to the watching browser IMMEDIATELY, then persist. The browser
     // is the live view and the daemon is the source of truth, so making the operator wait on a DB
     // round-trip to see the run finish — slow on a cold/auto-pausing DB — is the wrong tradeoff here. (The

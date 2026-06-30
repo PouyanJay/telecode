@@ -1,4 +1,4 @@
-import { pino, type Logger } from 'pino';
+import { type Logger } from 'pino';
 
 /**
  * The adopted-session manager: the daemon's map from a Claude Code `session_id` (which the hook events
@@ -28,6 +28,8 @@ export interface AdoptedSessionManager {
   ensureAdopted(input: AdoptInput): Promise<string>;
   /** Feed the relay's `session.adopted` ACK: bind the `clientRef` (Claude id) to the minted telecode id. */
   resolveAck(clientRef: string, telecodeSessionId: string): void;
+  /** Whether a `clientRef` is genuinely awaiting an ACK — so a forged/replayed ACK can be ignored. */
+  isPending(claudeSessionId: string): boolean;
   /** The telecode id for an already-adopted Claude session, or undefined. */
   telecodeIdFor(claudeSessionId: string): string | undefined;
 }
@@ -37,7 +39,8 @@ export interface AdoptedSessionOptions {
   readonly announce: (payload: { clientRef: string; title?: string; cwd?: string }) => void;
   /** How long to wait for the relay's ACK before failing the adoption. Default 15s. */
   readonly ackTimeoutMs?: number;
-  readonly logger?: Logger;
+  /** Injected at the composition root (the daemon's child logger) — never created here (TYPESCRIPT.md). */
+  readonly logger: Logger;
 }
 
 interface Waiter {
@@ -48,7 +51,7 @@ interface Waiter {
 }
 
 export function createAdoptedSessionManager(options: AdoptedSessionOptions): AdoptedSessionManager {
-  const log = options.logger ?? pino({ name: 'adopted-sessions' });
+  const log = options.logger;
   const ackTimeoutMs = options.ackTimeoutMs ?? 15_000;
   // claudeSessionId -> telecode session id (once adopted). The clientRef we announce IS the Claude id.
   const byClaudeId = new Map<string, string>();
@@ -98,6 +101,10 @@ export function createAdoptedSessionManager(options: AdoptedSessionOptions): Ado
       // The clientRef we announced is the Claude session id; bind it even if the waiter already timed out
       // (a late ACK), so a retried hook event for the same session correlates without re-announcing.
       settle(clientRef, telecodeSessionId);
+    },
+
+    isPending(claudeSessionId): boolean {
+      return pending.has(claudeSessionId);
     },
 
     telecodeIdFor(claudeSessionId): string | undefined {

@@ -3,10 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 
+import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runHookBridge } from './hook-bridge';
 import { createHookSocketServer, type HookSocketServer } from './hook-socket';
+
+const logger = pino({ level: 'silent' });
 
 /**
  * The `telecode hook` bridge (Journey 1, Task 7): pipe Claude Code's hook JSON (stdin) → the daemon's Unix
@@ -41,6 +44,7 @@ describe('runHookBridge', () => {
     let seen: unknown;
     server = createHookSocketServer({
       socketPath,
+      logger,
       handle: async (event) => {
         seen = event;
         return { hookSpecificOutput: { permissionDecision: 'allow' } };

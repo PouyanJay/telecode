@@ -14,18 +14,18 @@
   let { row }: { row: SessionRow } = $props();
 
   const display = $derived(SESSION_DISPLAY[row.status]);
-  const awaiting = $derived(row.status === 'awaiting_input');
+  const isAwaiting = $derived(row.status === 'awaiting_input');
   // Sessions telecode adopted from the user's own Claude Code runs (terminal / IDE) are marked, so the
   // operator can tell them from sessions launched here — they're monitored + gated, not telecode-driven.
-  const adopted = $derived(row.origin === 'external');
+  const isAdopted = $derived(row.origin === 'external');
 </script>
 
-<a class="row hairline-b" class:await={awaiting} href="/sessions/{row.id}">
+<a class="row hairline-b" class:await={isAwaiting} href="/sessions/{row.id}">
   <span class="status">
     <StatusDot tone={display.tone} label={display.label} pulse={display.pulse} />
   </span>
   <span class="titlecell">
-    {#if adopted}
+    {#if isAdopted}
       <Pill label="on device" />
     {/if}
     <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>

@@ -70,8 +70,9 @@ if (cliArgs[0] === 'hook') {
 // (un)installing telecode's hooks in `~/.claude/settings.json` — transparent, idempotent, reversible.
 if (cliArgs[0] === 'hooks') {
   const settingsPath = join(homedir(), '.claude', 'settings.json');
-  // The command Claude Code will run: this very bin, plus the `hook` subcommand.
-  const command = `${process.argv[1]} hook`;
+  // The command Claude Code will run: this very bin (quoted in case the install path has spaces), plus
+  // the `hook` subcommand.
+  const command = `"${process.argv[1]}" hook`;
   switch (cliArgs[1]) {
     case 'install':
       await installHooks({ settingsPath, command });
@@ -140,7 +141,7 @@ const sessionStore = createSessionStore({ dir: sessionsRoot, logger: log });
 // Adopt externally-started Claude Code sessions: the daemon listens here for the `telecode hook` bridge.
 // Listening is harmless until the user opts in with `telecode hooks install` (which is what makes Claude
 // Code actually call the bridge). Disable entirely with TELECODE_ADOPT=0.
-const adoptEnabled = process.env.TELECODE_ADOPT !== '0';
+const isAdoptEnabled = process.env.TELECODE_ADOPT !== '0';
 const hookSocketPath = join(telecodeHome, 'run', 'hook.sock');
 
 const daemon = createDaemon({
@@ -155,7 +156,7 @@ const daemon = createDaemon({
   repoManager,
   sessionStore,
   ...(defaultRepoPath ? { defaultRepoPath } : {}),
-  ...(adoptEnabled ? { adopt: { socketPath: hookSocketPath } } : {}),
+  ...(isAdoptEnabled ? { adopt: { socketPath: hookSocketPath } } : {}),
 });
 
 try {

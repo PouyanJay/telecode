@@ -2,9 +2,12 @@ import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createTranscriptMirror, transcriptEntriesFrom } from './transcript-mirror';
+
+const logger = pino({ level: 'silent' });
 
 /**
  * The transcript mirror (Journey 1, Task 6; AD-1): parse the hook-provided JSONL transcript of an adopted
@@ -77,7 +80,7 @@ describe('createTranscriptMirror.sync (incremental tail)', () => {
     dir = await mkdtemp(join(tmpdir(), 'telecode-transcript-'));
     const path = join(dir, 't.jsonl');
     await writeFile(path, `${USER}\n`);
-    const mirror = createTranscriptMirror({ path });
+    const mirror = createTranscriptMirror({ path, logger });
 
     expect(await mirror.sync()).toEqual([{ kind: 'user', text: 'fix the bug' }]);
 
@@ -92,7 +95,7 @@ describe('createTranscriptMirror.sync (incremental tail)', () => {
     dir = await mkdtemp(join(tmpdir(), 'telecode-transcript-'));
     const path = join(dir, 't.jsonl');
     await writeFile(path, `${USER}\n${ASSISTANT_TEXT}`); // second line not yet terminated
-    const mirror = createTranscriptMirror({ path });
+    const mirror = createTranscriptMirror({ path, logger });
 
     expect(await mirror.sync()).toEqual([{ kind: 'user', text: 'fix the bug' }]);
     await appendFile(path, '\n'); // terminate the line
@@ -101,7 +104,7 @@ describe('createTranscriptMirror.sync (incremental tail)', () => {
 
   it('returns nothing for a missing file', async () => {
     dir = await mkdtemp(join(tmpdir(), 'telecode-transcript-'));
-    const mirror = createTranscriptMirror({ path: join(dir, 'missing.jsonl') });
+    const mirror = createTranscriptMirror({ path: join(dir, 'missing.jsonl'), logger });
     expect(await mirror.sync()).toEqual([]);
   });
 });

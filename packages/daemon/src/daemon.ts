@@ -785,11 +785,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         return;
       }
       case 'session.adopted': {
-        // The relay's ACK to our announce: it carries the minted telecode session id (on the envelope) and
-        // echoes our clientRef (the Claude session id), so the manager pairs future hook events to this id.
-        if (!adoptedSessions || envelope.session_id === undefined) return;
-        const ack = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
-        if (ack.success) adoptedSessions.resolveAck(ack.data.clientRef, envelope.session_id);
+        handleAdoptedAck(envelope);
         return;
       }
       default:
@@ -857,11 +853,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // ── Adopted sessions ──────────────────────────────────────────────────────────────────────────────
   // When `options.adopt` is set, the daemon listens on a local Unix socket for the `telecode hook` bridge
   // and brings externally-started Claude Code sessions under telecode's monitoring + approval gate. The
-  // socket transport (T4), the id manager (T5), and the transcript mirror (T6) are wired together here.
+  // socket transport (`hook-socket`), the id manager (`adopted-sessions`), and the transcript mirror
+  // (`transcript-mirror`) are wired together here.
   const transcriptMirrors = new Map<string, TranscriptMirror>();
 
   /** Announce a discovered external session to the relay (cleartext routing metadata, like session.launch). */
   function announceAdopted(payload: { clientRef: string; title?: string; cwd?: string }): void {
+    // A `session_id`-less announce: routing metadata, always cleartext — it can't go through
+    // sendForSession (which needs a source envelope), so the frame is built inline. makeEnvelope
+    // defaults the nonce to '' (cleartext).
     enqueueSend(async () =>
       JSON.stringify(
         makeEnvelope({
@@ -869,10 +869,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
           userId: options.userId,
           deviceId: options.deviceId,
           payload,
-          nonce: '',
         }),
       ),
     );
+  }
+
+  /**
+   * Pair the relay's `session.adopted` ACK (minted telecode id on the envelope, our clientRef echoed in
+   * the payload) to its pending adoption. Ignores a malformed ACK, and — defense against a browser forging
+   * a `session.adopted` that the relay forwards here — only resolves a clientRef we are actually awaiting,
+   * so a forged/replayed ACK can't redirect the claude→telecode id mapping for a session it doesn't own.
+   */
+  function handleAdoptedAck(envelope: Envelope): void {
+    if (!adoptedSessions || envelope.session_id === undefined) return;
+    const ack = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
+    if (!ack.success) {
+      log.warn({ deviceId: options.deviceId }, 'daemon: malformed session.adopted ack — dropping');
+      return;
+    }
+    if (adoptedSessions.isPending(ack.data.clientRef)) {
+      adoptedSessions.resolveAck(ack.data.clientRef, envelope.session_id);
+    } else {
+      log.warn({ deviceId: options.deviceId }, 'daemon: unexpected session.adopted ack — dropping');
+    }
   }
 
   const adoptedSessions: AdoptedSessionManager | undefined = options.adopt
@@ -886,8 +905,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     : undefined;
 
   /**
-   * A synthetic `source` envelope so adopted sessions reuse the session send + gate helpers. Adopted
-   * sessions are cleartext (no per-session content key), so {@link sendForSession} sends plaintext.
+   * A synthetic `source` envelope so adopted sessions reuse the session send + gate helpers. Uses
+   * `type: 'session.adopted'` only as a sentinel source type; each {@link sendForSession} call supplies
+   * the real frame type. (Frames are cleartext on a pre-E2E daemon and E2E-encrypted once a content key
+   * is established — see {@link handleHookEvent}.)
    */
   function adoptedSource(telecodeSessionId: string): Envelope {
     return makeEnvelope({
@@ -903,7 +924,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
   async function mirrorTranscript(
     telecodeSessionId: string,
     transcriptPath: string | undefined,
-    source: Envelope,
   ): Promise<void> {
     if (transcriptPath === undefined) return;
     let mirror = transcriptMirrors.get(telecodeSessionId);
@@ -917,7 +937,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // Push the full transcript so the browser sees every kind — including the user's own prompts, which it
     // never sent for an adopted session. Heavier than per-line streaming but correct for the walking
     // skeleton (a later pass can stream incrementally + dedupe against the gate's permission entries).
-    sendForSession(source, 'session.history', historyPayloadFor(telecodeSessionId));
+    sendForSession(
+      adoptedSource(telecodeSessionId),
+      'session.history',
+      historyPayloadFor(telecodeSessionId),
+    );
   }
 
   /**
@@ -931,6 +955,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (!adoptedSessions) return {};
     let telecodeSessionId: string;
     try {
+      // TODO(Journey 3): derive a `title` from the transcript's first user prompt so the registry row is
+      // named; for the walking skeleton the row title stays null and the dashboard falls back to the prompt.
       telecodeSessionId = await adoptedSessions.ensureAdopted({
         claudeSessionId: event.session_id,
         ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
@@ -948,11 +974,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // plaintext. Idempotent. The key is delivered to the browser on `session.subscribe` (it announces its
     // pubkey then), exactly like a launched session's reconnect. Cleartext only on a pre-E2E daemon (tests).
     if (cipher.enabled) cipher.establish(telecodeSessionId);
-    const source = adoptedSource(telecodeSessionId);
-    await mirrorTranscript(telecodeSessionId, event.transcript_path, source);
+    await mirrorTranscript(telecodeSessionId, event.transcript_path);
 
     if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
-      const decision = await requestPermission(source, {
+      const decision = await requestPermission(adoptedSource(telecodeSessionId), {
         toolName: event.tool_name,
         input: event.tool_input ?? {},
       });

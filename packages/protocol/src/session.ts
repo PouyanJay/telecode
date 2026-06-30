@@ -95,9 +95,10 @@ export type SessionOrigin = z.infer<typeof sessionOriginSchema>;
  * but daemon-initiated. `title`/`cwd` are derived hints for the row (first prompt / working directory).
  */
 export const sessionAdoptedPayloadSchema = z.object({
-  clientRef: z.string().min(1),
-  title: z.string().min(1).optional(),
-  cwd: z.string().min(1).optional(),
+  clientRef: z.string().min(1).max(256),
+  // Bounded so a buggy/compromised daemon can't grow the registry row or the broadcast unboundedly.
+  title: z.string().min(1).max(512).optional(),
+  cwd: z.string().min(1).max(1024).optional(),
 });
 export type SessionAdoptedPayload = z.infer<typeof sessionAdoptedPayloadSchema>;
 

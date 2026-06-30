@@ -1,7 +1,7 @@
 import { open } from 'node:fs/promises';
 
 import { type SessionHistoryEntry } from '@telecode/protocol';
-import { pino, type Logger } from 'pino';
+import { type Logger } from 'pino';
 
 /**
  * The transcript mirror (architecture decision AD-1): the daemon reads the hook-provided `transcript_path`
@@ -92,11 +92,12 @@ export interface TranscriptMirror {
 export interface TranscriptMirrorOptions {
   /** Absolute path to the adopted session's JSONL transcript (from the hook event). */
   readonly path: string;
-  readonly logger?: Logger;
+  /** Injected at the composition root (the daemon's child logger) — never created here (TYPESCRIPT.md). */
+  readonly logger: Logger;
 }
 
 export function createTranscriptMirror(options: TranscriptMirrorOptions): TranscriptMirror {
-  const log = options.logger ?? pino({ name: 'transcript-mirror' });
+  const log = options.logger;
   // Bytes consumed up to and including the last complete line; we never re-emit them.
   let offset = 0;
 
