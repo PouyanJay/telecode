@@ -1,6 +1,9 @@
 import {
+  adoptStatePayloadSchema,
   makeEnvelope,
   parseEnvelope,
+  type AdoptSettings,
+  type AdoptStatePayload,
   type Envelope,
   type MessageType,
   type PermissionDecisionPayload,
@@ -47,6 +50,8 @@ export interface RelayConnectionOptions {
    * relay/daemon treat a reconnect as a reopen (architecture invariant #7).
    */
   readonly onReconnect?: () => void;
+  /** The daemon's current adoption policy (sealed `adopt.state`), surfaced for the Settings UI (Journey 3). */
+  readonly onAdoptState?: (state: AdoptStatePayload) => void;
   /**
    * Seam for building the underlying socket. Production uses a real browser `WebSocket`; tests inject a
    * controllable fake (the web Vitest runs in node, where there is no DOM `WebSocket`).
@@ -67,6 +72,11 @@ export interface RelayConnection {
   answer(sessionId: string, payload: QuestionAnswerPayload): void;
   /** Send an operator control (interrupt / end) for `sessionId`. */
   control(sessionId: string, action: SessionControlAction): void;
+  /**
+   * Read (`set` omitted) or update (`set` provided) the device's adoption policy. Box-sealed to the daemon
+   * so the relay never sees repo paths; the daemon replies `adopt.state` via `onAdoptState` (Journey 3).
+   */
+  sendAdoptConfig(set?: AdoptSettings): void;
   close(): void;
 }
 
@@ -201,6 +211,19 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       await cipher.receiveKey(envelope);
       return;
     }
+    if (envelope.type === 'adopt.state') {
+      // Device-scoped, sealed to THIS browser (Journey 3) — opened with the device key, not a session key.
+      try {
+        const raw = cipher.enabled ? await cipher.openFromDaemon(envelope) : envelope.payload;
+        options.onAdoptState?.(adoptStatePayloadSchema.parse(raw));
+      } catch {
+        // Ignore: most often a state sealed to a DIFFERENT browser (the relay broadcasts it to the channel),
+        // which we can't open — the browser that asked gets one it can, and others re-request on mount. A
+        // genuine schema mismatch (daemon version skew) also lands here; it surfaces as the Settings panel
+        // staying on its loading state rather than a thrown error, which is acceptable for a rare edge.
+      }
+      return;
+    }
     const result = await cipher.tryDecrypt(envelope);
     options.onEvent(result.decrypted ? { ...envelope, payload: result.payload } : envelope);
   }
@@ -244,6 +267,21 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     },
     control(sessionId: string, action: SessionControlAction): void {
       enqueueSend(() => sessionFrame('session.control', sessionId, { action }));
+    },
+    sendAdoptConfig(set?: AdoptSettings): void {
+      enqueueSend(async () => {
+        const payload = set !== undefined ? { set } : {};
+        if (cipher.enabled) {
+          // Seal to the daemon + announce our pubkey so it can seal the adopt.state reply back to us.
+          const sealed = await cipher.sealToDaemon(payload);
+          return buildFrame('adopt.config', {
+            payload: sealed.payload,
+            nonce: sealed.nonce,
+            senderPublicKey: sealed.senderPublicKey,
+          });
+        }
+        return buildFrame('adopt.config', { payload });
+      });
     },
     close(): void {
       intentionallyClosed = true;

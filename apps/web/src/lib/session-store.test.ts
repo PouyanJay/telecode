@@ -1,9 +1,18 @@
-import { makeEnvelope, type SessionLaunchPayload } from '@telecode/protocol';
+import { makeEnvelope, type AdoptSettings, type SessionLaunchPayload } from '@telecode/protocol';
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RelayConnection, type RelayConnectionOptions } from './relay-client';
-import { answer, connect, disconnect, launch, sessions } from './session-store';
+import {
+  adoptState,
+  answer,
+  connect,
+  disconnect,
+  launch,
+  requestAdoptConfig,
+  sessions,
+  setAdoptConfig,
+} from './session-store';
 
 /**
  * Phase 2 Task 11 — the launch-correlation + timeout edges deferred from Task 5 (AD-P2-9). The relay
@@ -20,10 +29,13 @@ function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
   const subscribed: string[] = [];
   const answered: { sessionId: string; payload: unknown }[] = [];
+  const adoptConfigs: (AdoptSettings | undefined)[] = [];
   let emit: (envelope: ReturnType<typeof makeEnvelope>) => void = () => undefined;
+  let emitAdoptState: (state: AdoptSettings) => void = () => undefined;
   let fireReconnect: () => void = () => undefined;
   const create = (options: RelayConnectionOptions): RelayConnection => {
     emit = options.onEvent;
+    emitAdoptState = (state) => options.onAdoptState?.(state);
     fireReconnect = () => options.onReconnect?.();
     options.onStatus('connected');
     return {
@@ -33,6 +45,7 @@ function makeFakeConnection() {
       decide: () => undefined,
       answer: (sessionId, payload) => answered.push({ sessionId, payload }),
       control: () => undefined,
+      sendAdoptConfig: (set) => adoptConfigs.push(set),
       close: () => undefined,
     };
   };
@@ -41,6 +54,11 @@ function makeFakeConnection() {
     launched,
     subscribed,
     answered,
+    adoptConfigs,
+    /** Simulate the daemon's sealed adopt.state reply (after the relay-client opens it). */
+    adoptStateReply(state: AdoptSettings) {
+      emitAdoptState(state);
+    },
     /** Simulate the daemon raising an adopted-session question on a session. */
     question(sessionId: string, requestId: string) {
       emit(
@@ -183,6 +201,27 @@ describe('session-store launch correlation (Task 11)', () => {
         payload: { requestId: 'q1', answers: [{ selectedLabels: ['Postgres'] }] },
       },
     ]);
+  });
+
+  it('reads + writes the adoption policy and surfaces adopt.state (Journey 3)', () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+
+    // A GET (no settings) then a SET are both forwarded to the connection.
+    requestAdoptConfig();
+    setAdoptConfig({ enabled: false, denylist: ['/Users/me/secret'] });
+    expect(fake.adoptConfigs).toEqual([
+      undefined,
+      { enabled: false, denylist: ['/Users/me/secret'] },
+    ]);
+
+    // The daemon's sealed adopt.state reply (opened by the relay-client) lands on the adoptState store.
+    expect(get(adoptState)).toBeNull();
+    fake.adoptStateReply({ enabled: false, denylist: ['/Users/me/secret'] });
+    expect(get(adoptState)).toEqual({ enabled: false, denylist: ['/Users/me/secret'] });
   });
 
   it('a late frame for a timed-out launch never mis-resolves a later launch', async () => {

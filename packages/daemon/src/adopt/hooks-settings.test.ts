@@ -52,9 +52,10 @@ describe('hooks installer', () => {
     const group = settings.hooks.PreToolUse[0]!;
     expect(group.matcher).toBe('*');
     expect(group.hooks[0]).toMatchObject({ type: 'command', command: COMMAND, timeout: 3600 });
+    // All four lifecycle events telecode adopts on (Journey 1–3): gate/question + adopt/end + attention.
     expect(await readHooksStatus({ settingsPath })).toEqual({
       installed: true,
-      events: ['PreToolUse'],
+      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification'],
     });
   });
 

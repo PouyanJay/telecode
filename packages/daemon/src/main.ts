@@ -145,6 +145,8 @@ const sessionStore = createSessionStore({ dir: sessionsRoot, logger: log });
 // Code actually call the bridge). Disable entirely with TELECODE_ADOPT=0.
 const isAdoptEnabled = process.env.TELECODE_ADOPT !== '0';
 const hookSocketPath = join(telecodeHome, 'run', 'hook.sock');
+// The per-machine adoption policy (enabled + denylist), managed from the web and applied at runtime (Journey 3).
+const adoptConfigPath = join(telecodeHome, 'adopt-config.json');
 
 const daemon = createDaemon({
   relayUrl: relayWsUrl,
@@ -158,7 +160,7 @@ const daemon = createDaemon({
   repoManager,
   sessionStore,
   ...(defaultRepoPath ? { defaultRepoPath } : {}),
-  ...(isAdoptEnabled ? { adopt: { socketPath: hookSocketPath } } : {}),
+  ...(isAdoptEnabled ? { adopt: { socketPath: hookSocketPath, configPath: adoptConfigPath } } : {}),
 });
 
 try {

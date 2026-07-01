@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 
 import { pino, type Logger } from 'pino';
 import WebSocket from 'ws';
 
 import {
+  adoptConfigPayloadSchema,
   echoPayloadSchema,
   makeEnvelope,
   parseEnvelope,
@@ -15,6 +17,7 @@ import {
   sessionLaunchPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
+  type AdoptSettings,
   type AgentQuestionItem,
   type Envelope,
   type MessageType,
@@ -28,8 +31,10 @@ import {
   type SessionStatusName,
 } from '@telecode/protocol';
 
+import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { type HookEvent } from './adopt/hook-event';
+import { isAdoptionAllowed } from './adopt/is-adoption-allowed';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
 import { preToolUseOutput } from './adopt/pretooluse-output';
 import { buildQuestionDenyReason } from './adopt/question-deny-reason';
@@ -103,7 +108,16 @@ export interface DaemonOptions {
    * (`origin='external'`), mirrors its transcript from the hook-provided `transcript_path`, and routes its
    * consequential tool calls through telecode's existing approval gate. Omitted (default) → no adoption.
    */
-  readonly adopt?: { readonly socketPath: string; readonly ackTimeoutMs?: number };
+  readonly adopt?: {
+    readonly socketPath: string;
+    readonly ackTimeoutMs?: number;
+    /**
+     * Path to the per-machine adoption policy (`~/.telecode/adopt-config.json`). Loaded on start and
+     * rewritten when the web sets it (sealed `adopt.config`). Omitted → the adopt-all default, held in
+     * memory only (a web change applies for the session but isn't persisted).
+     */
+    readonly configPath?: string;
+  };
   readonly logger?: Logger;
 }
 
@@ -124,6 +138,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // E2E key management (Phase 3): holds the daemon private key + per-session content keys. Cleartext when
   // no keypair is configured (existing tests / pre-E2E daemons).
   const cipher = createSessionCipher(options.keyPair?.privateKey);
+  // The per-machine adoption policy (Journey 3): enabled + denylist, managed from the web (sealed
+  // `adopt.config`) and loaded on start. Default = adopt-all; the runtime gate in handleHookEvent applies it.
+  let adoptConfig: AdoptSettings = DEFAULT_ADOPT_SETTINGS;
   let socket: WebSocket | null = null;
   // Reconnect state (Phase 4 Task 2): the daemon dials *out*, so a dropped link is its own to recover —
   // it redials with exponential backoff + jitter, keeping all in-memory session state, until stop().
@@ -873,6 +890,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
         handleAdoptedAck(envelope);
         return;
       }
+      case 'adopt.config': {
+        await handleAdoptConfig(envelope);
+        return;
+      }
       default:
         log.debug({ type: envelope.type }, 'daemon: ignoring message');
     }
@@ -979,6 +1000,61 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
   }
 
+  /**
+   * Handle a sealed `adopt.config` (web → daemon, Journey 3): open it under the device shared key, optionally
+   * persist + apply a new policy, then reply the current policy as `adopt.state` sealed back to the requesting
+   * browser. The relay only ever sees ciphertext, so the denylist's repo paths never leave the machine in the
+   * clear (invariant #5). Cleartext on a pre-E2E daemon (no keypair).
+   */
+  async function handleAdoptConfig(envelope: Envelope): Promise<void> {
+    let payload: unknown;
+    try {
+      payload = cipher.enabled ? await cipher.openFromBrowser(envelope) : envelope.payload;
+    } catch (err) {
+      log.warn(
+        { err, deviceId: options.deviceId },
+        'daemon: could not open adopt.config — dropping',
+      );
+      return;
+    }
+    const parsed = adoptConfigPayloadSchema.safeParse(payload);
+    if (!parsed.success) {
+      log.warn({ deviceId: options.deviceId }, 'daemon: dropped adopt.config with invalid payload');
+      return;
+    }
+    if (parsed.data.set) {
+      adoptConfig = parsed.data.set;
+      if (options.adopt?.configPath) await saveAdoptConfig(options.adopt.configPath, adoptConfig);
+      // Log the shape, never the denylist paths (they can name private repos — keep them out of log sinks).
+      log.info(
+        {
+          deviceId: options.deviceId,
+          enabled: adoptConfig.enabled,
+          denylistCount: adoptConfig.denylist.length,
+        },
+        'daemon: adoption policy updated',
+      );
+    }
+    // Reply the current policy, sealed to the requesting browser so repo paths never reach the relay.
+    const browserPublicKey = envelope.sender_public_key;
+    const state = adoptConfig;
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        cipher.enabled && browserPublicKey !== undefined
+          ? await cipher.sealToBrowser(browserPublicKey, state)
+          : { payload: state, nonce: '' };
+      return JSON.stringify(
+        makeEnvelope({
+          type: 'adopt.state',
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
   const adoptedSessions: AdoptedSessionManager | undefined = options.adopt
     ? createAdoptedSessionManager({
         announce: announceAdopted,
@@ -1036,15 +1112,82 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * FAIL-CLOSED (AD-2): any failure returns `ask` / `{}`, so Claude Code falls back to its own local prompt
    * — never an auto-allow of a consequential tool because adoption hit a snag.
    */
+  /**
+   * SessionEnd (Journey 3): the Claude Code process exited. End the adopted session if we are tracking it —
+   * never force-adopt an unknown session just to end it (no phantom row). Until now adopted sessions never
+   * received a `session.ended` and lingered as running forever. A final transcript mirror captures any
+   * trailing lines before the terminal frame. Idempotent (a re-fired SessionEnd won't re-end).
+   */
+  async function handleSessionEndHook(event: HookEvent): Promise<unknown> {
+    const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
+    if (knownId !== undefined) {
+      await mirrorTranscript(knownId, event.transcript_path);
+      const status = recordFor(knownId).status;
+      if (status !== 'done' && status !== 'error') {
+        if (cipher.enabled) cipher.establish(knownId); // idempotent; session.ended must encrypt under E2E
+        setStatus(knownId, 'done');
+        sendForSession(adoptedSource(knownId), 'session.ended', { status: 'done' });
+        log.info(
+          { deviceId: options.deviceId, sessionId: knownId },
+          'daemon: adopted session ended',
+        );
+      }
+    }
+    return {};
+  }
+
+  /**
+   * Notification (Journey 3): a non-blocking attention cue (e.g. the session went idle waiting for input).
+   * Surface it only for a session we already track — never force-adopt on a stray notification. The
+   * `awaiting_input` guard is about gate STATE (a permission-prompt notification is redundant while a gate
+   * shows), not rate-limiting — several idle notices are fine; the web clears each on the next frame.
+   */
+  function handleNotificationHook(event: HookEvent): unknown {
+    const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
+    if (
+      knownId !== undefined &&
+      event.message !== undefined &&
+      event.message.length > 0 &&
+      recordFor(knownId).status !== 'awaiting_input'
+    ) {
+      if (cipher.enabled) cipher.establish(knownId); // idempotent; the notice must encrypt under E2E
+      sendForSession(adoptedSource(knownId), 'agent.notice', { message: event.message });
+      log.info(
+        { deviceId: options.deviceId, sessionId: knownId },
+        'daemon: adopted session notice',
+      );
+    }
+    return {};
+  }
+
   async function handleHookEvent(event: HookEvent): Promise<unknown> {
     if (!adoptedSessions) return {};
+    // Lifecycle events act only on a session we already track (never force-adopt to handle them).
+    if (event.hook_event_name === 'SessionEnd') return handleSessionEndHook(event);
+    if (event.hook_event_name === 'Notification') return handleNotificationHook(event);
+
+    // Adoption policy gate (Journey 3): for a session we are NOT already tracking, apply the per-machine
+    // policy — if adoption is disabled or this project is on the denylist, telecode stays out entirely and
+    // the session runs via Claude Code's own local flow. `{}` = no hook opinion. (An already-adopted session
+    // keeps flowing — a mid-session policy change never strands an in-flight gate.)
+    if (
+      adoptedSessions.telecodeIdFor(event.session_id) === undefined &&
+      !isAdoptionAllowed(adoptConfig, event.cwd)
+    ) {
+      return {};
+    }
+
     let telecodeSessionId: string;
     try {
-      // TODO(Journey 3): derive a `title` from the transcript's first user prompt so the registry row is
-      // named; for the walking skeleton the row title stays null and the dashboard falls back to the prompt.
+      // Name the registry row from the project directory (e.g. `…/myrepo` → "myrepo") so a session adopted
+      // before any user prompt — esp. a chat-only one adopted on SessionStart — still reads sensibly in the
+      // dashboard. Once the transcript mirrors a user message the UI can prefer that; the cwd title is the
+      // sensible default. Adoption announces once, so this title comes from the first event we see.
+      const title = event.cwd !== undefined ? basename(event.cwd) : '';
       telecodeSessionId = await adoptedSessions.ensureAdopted({
         claudeSessionId: event.session_id,
         ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
+        ...(title !== '' ? { title } : {}),
       });
     } catch (err) {
       log.warn(
@@ -1102,6 +1245,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
   return {
     async start(): Promise<void> {
       await restorePersistedSessions();
+      // Load the per-machine adoption policy (Journey 3) before listening for hook events, so the runtime
+      // gate applies the user's saved denylist/enabled from the first event. No path → the adopt-all default.
+      if (options.adopt?.configPath !== undefined) {
+        adoptConfig = await loadAdoptConfig(options.adopt.configPath);
+      }
       await new Promise<void>((resolve, reject) => {
         let settled = false;
         const onReady = (): void => {

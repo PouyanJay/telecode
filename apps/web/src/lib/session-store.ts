@@ -1,6 +1,7 @@
 import {
   devicePresencePayloadSchema,
   sessionStartedPayloadSchema,
+  type AdoptSettings,
   type Envelope,
   type PermissionDecisionPayload,
   type QuestionAnswerPayload,
@@ -44,6 +45,9 @@ const LAUNCH_TIMEOUT_MS = 15_000;
 
 const sessionMap = writable<SessionMap>(new Map());
 const connState = writable<ConnectionState>('idle');
+// The daemon's current adoption policy (Journey 3), updated from sealed `adopt.state` frames. Null until the
+// Settings page requests it (or the daemon replies). Device-scoped, not per-session.
+const adoptStateStore = writable<AdoptSettings | null>(null);
 
 let connection: RelayConnection | null = null;
 // Launches awaiting their relay-minted id, matched by the `clientRef` the daemon echoes on
@@ -55,6 +59,8 @@ const pendingLaunches: PendingLaunch[] = [];
 export const sessions: Readable<SessionMap> = { subscribe: sessionMap.subscribe };
 /** The connection's honest state (idle / connecting / connected / error) for the top-bar indicator. */
 export const connectionState: Readable<ConnectionState> = { subscribe: connState.subscribe };
+/** The daemon's current adoption policy for the Settings UI; null until first received (Journey 3). */
+export const adoptState: Readable<AdoptSettings | null> = { subscribe: adoptStateStore.subscribe };
 
 function handleEvent(envelope: Envelope): void {
   // Device presence (Phase 4 Task 3) is channel-wide, not per-session: the daemon behind this channel
@@ -99,6 +105,7 @@ export function connect(
     onStatus: (status) => connState.set(status),
     onEvent: handleEvent,
     onReconnect: reattachSessions,
+    onAdoptState: (state) => adoptStateStore.set(state),
   });
 }
 
@@ -232,6 +239,16 @@ export function sendControl(sessionId: string, action: SessionControlAction): vo
   connection?.control(sessionId, action);
 }
 
+/** Ask the daemon for its current adoption policy (Journey 3); the reply lands on {@link adoptState}. */
+export function requestAdoptConfig(): void {
+  connection?.sendAdoptConfig();
+}
+
+/** Update the daemon's adoption policy (sealed); the daemon persists it and echoes {@link adoptState}. */
+export function setAdoptConfig(settings: AdoptSettings): void {
+  connection?.sendAdoptConfig(settings);
+}
+
 /** Close the connection and reject any in-flight launches (only on full teardown, e.g. sign-out). */
 export function disconnect(): void {
   for (const pending of pendingLaunches.splice(0)) {
@@ -243,4 +260,5 @@ export function disconnect(): void {
   // Full teardown (sign-out): drop watched-session state. A later reconnect re-fetches the list from the
   // registry and backfills transcripts, so nothing stale should linger across a disconnect.
   sessionMap.set(new Map());
+  adoptStateStore.set(null);
 }

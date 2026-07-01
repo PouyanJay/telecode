@@ -1,5 +1,6 @@
 import {
   agentMessagePayloadSchema,
+  agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
   agentQuestionPayloadSchema,
   agentToolUsePayloadSchema,
@@ -64,6 +65,12 @@ export interface SessionState {
   readonly entries: readonly TranscriptEntry[];
   /** Monotonic counter for stable entry keys (keeps `{#each}` keyed without Math.random). */
   readonly seq: number;
+  /**
+   * A transient "needs attention" cue from an adopted session's `Notification` (e.g. it went idle waiting
+   * for input). Holds Claude Code's notification text while it stands; cleared the moment any other frame
+   * arrives (the session moved on). Non-blocking — distinct from the `awaiting_input` gate (Journey 3).
+   */
+  readonly notice: string | null;
 }
 
 export const initialSessionState: SessionState = {
@@ -71,11 +78,12 @@ export const initialSessionState: SessionState = {
   status: 'idle',
   entries: [],
   seq: 0,
+  notice: null,
 };
 
 /** Reset to a fresh transcript when launching a new session (the relay assigns the next id). */
 export function startingState(): SessionState {
-  return { sessionId: null, status: 'starting', entries: [], seq: 0 };
+  return { sessionId: null, status: 'starting', entries: [], seq: 0, notice: null };
 }
 
 /**
@@ -131,9 +139,18 @@ function closeOpenGates(entries: readonly TranscriptEntry[]): readonly Transcrip
 /** Fold one inbound relay frame into the session state. Unknown/invalid frames are ignored. */
 export function applyEnvelope(state: SessionState, envelope: Envelope): SessionState {
   const entries = confirmInFlightActions(state.entries);
-  const base = entries === state.entries ? state : { ...state, entries };
+  // A notice is a one-shot cue; any frame other than `agent.notice` means the session moved on → clear it.
+  const notice = envelope.type === 'agent.notice' ? state.notice : null;
+  const base =
+    entries === state.entries && notice === state.notice ? state : { ...state, entries, notice };
 
   switch (envelope.type) {
+    case 'agent.notice': {
+      const parsed = agentNoticePayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return base;
+      return { ...base, notice: parsed.data.message };
+    }
+
     case 'session.started':
       return {
         ...base,
@@ -286,6 +303,7 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
         status: parsed.data.status,
         entries,
         seq: entries.length,
+        notice: null, // a backfilled reopen carries no live notice
       };
     }
 

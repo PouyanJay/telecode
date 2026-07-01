@@ -3,6 +3,7 @@
 
   import Composer from '$lib/components/Composer.svelte';
   import SessionHeader from '$lib/components/SessionHeader.svelte';
+  import SessionNotice from '$lib/components/SessionNotice.svelte';
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, pendingPermission, type SessionState } from '$lib/session';
@@ -25,6 +26,11 @@
 
   const known = $derived($liveSessions.has(sessionId));
   const session: SessionState = $derived($liveSessions.get(sessionId) ?? initialSessionState);
+
+  // The adopted-session "needs attention" notice is transient and dismissible; track the message the user
+  // dismissed so it stays hidden until a NEW notice (different text) arrives.
+  let dismissedNotice = $state<string | null>(null);
+  const showNotice = $derived(session.notice !== null && session.notice !== dismissedNotice);
 
   const display = $derived(SESSION_DISPLAY[session.status]);
   const isBusy = $derived(
@@ -95,6 +101,12 @@
 
   <div class="body">
     <div class="stream-col">
+      {#if known && showNotice && session.notice}
+        <SessionNotice
+          message={session.notice}
+          ondismiss={() => (dismissedNotice = session.notice)}
+        />
+      {/if}
       {#if !known}
         <div class="placeholder">
           <p class="eyebrow">{$connectionState === 'error' ? 'OFFLINE' : 'RECONNECTING…'}</p>

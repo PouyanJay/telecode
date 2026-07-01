@@ -102,6 +102,36 @@ export const sessionAdoptedPayloadSchema = z.object({
 });
 export type SessionAdoptedPayload = z.infer<typeof sessionAdoptedPayloadSchema>;
 
+/**
+ * The per-machine adoption policy (Journey 3), managed from the web and applied by the daemon at runtime:
+ *  - `enabled` — the master switch for adopting externally-started Claude Code sessions.
+ *  - `denylist` — project paths to NEVER adopt/mirror (a session whose `cwd` is under one of these is left
+ *    entirely to Claude Code's own local flow). Allow-all by default; the denylist is the privacy carve-out.
+ * Bounded so a compromised peer can't bloat it.
+ */
+export const adoptSettingsSchema = z.object({
+  enabled: z.boolean(),
+  denylist: z.array(z.string().min(1).max(1024)).max(100),
+});
+export type AdoptSettings = z.infer<typeof adoptSettingsSchema>;
+
+/**
+ * Payload for `adopt.config` (web → daemon, Journey 3): the device's adoption policy, **box-sealed to the
+ * daemon's key** so the relay never sees repo paths (invariant #5). `set` present updates + persists the
+ * policy; `set` omitted is a read-only request. Either way the daemon replies {@link adoptStatePayloadSchema}
+ * sealed to the requesting browser. The envelope carries the browser's `sender_public_key` for that reply.
+ */
+export const adoptConfigPayloadSchema = z.object({ set: adoptSettingsSchema.optional() });
+export type AdoptConfigPayload = z.infer<typeof adoptConfigPayloadSchema>;
+
+/**
+ * Payload for `adopt.state` (daemon → web, Journey 3): the daemon's current adoption policy, for display.
+ * Intentionally the same shape as {@link adoptSettingsSchema} — the state the daemon reports is exactly the
+ * settings it holds; aliased rather than re-declared so the two can never drift.
+ */
+export const adoptStatePayloadSchema = adoptSettingsSchema;
+export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
+
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
   'starting',
@@ -126,6 +156,15 @@ export type DevicePresencePayload = z.infer<typeof devicePresencePayloadSchema>;
 /** Payload for `agent.message` (daemon → web): a chunk of streamed agent text. */
 export const agentMessagePayloadSchema = z.object({ text: z.string() });
 export type AgentMessagePayload = z.infer<typeof agentMessagePayloadSchema>;
+
+/**
+ * Payload for `agent.notice` (daemon → web, Journey 3): a non-blocking attention signal for an adopted
+ * session, carrying Claude Code's own `Notification` text (e.g. "Claude is waiting for your input" when a
+ * session goes idle). Unlike `agent.permission_request` / `agent.question` it requires no answer — it just
+ * tells the dashboard the session needs a look. Transient (not cached for reopen).
+ */
+export const agentNoticePayloadSchema = z.object({ message: z.string().min(1).max(2000) });
+export type AgentNoticePayload = z.infer<typeof agentNoticePayloadSchema>;
 
 /** Payload for `agent.tool_use` (daemon → web): a tool the agent ran (informational stream). */
 export const agentToolUsePayloadSchema = z.object({

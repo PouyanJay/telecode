@@ -1,9 +1,21 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { encodeKey, generateKeyPair, makeEnvelope, type Envelope } from '@telecode/protocol';
+import {
+  agentNoticePayloadSchema,
+  deriveSharedKey,
+  encodeKey,
+  generateKeyPair,
+  importIdentityPrivateKey,
+  importIdentityPublicKey,
+  makeEnvelope,
+  openPayload,
+  sealPayload,
+  sessionAdoptedPayloadSchema,
+  type Envelope,
+} from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createFakeAgentAdapter } from './agent-adapter';
@@ -42,6 +54,12 @@ function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
     });
     client.on('error', reject);
   });
+}
+
+/** Assert a deny-feedback reason carries every expected fragment (keeps the loop out of the test body). */
+function assertReasonContainsAll(reason: string | undefined, expected: readonly string[]): void {
+  expect(expected.length).toBeGreaterThan(0); // a misconfigured variant must fail loudly, not vacuously
+  for (const fragment of expected) expect(reason).toContain(fragment);
 }
 
 /** Reply to the daemon's `session.adopted` announce with the relay-minted id (pairs the Claude session). */
@@ -344,10 +362,7 @@ describe('daemon: adopted sessions end-to-end', () => {
       hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string };
     };
     expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
-    expect(variant.expected.length).toBeGreaterThan(0); // guard: a misconfigured variant must fail loudly
-    for (const fragment of variant.expected) {
-      expect(out.hookSpecificOutput.permissionDecisionReason).toContain(fragment);
-    }
+    assertReasonContainsAll(out.hookSpecificOutput.permissionDecisionReason, variant.expected);
   });
 
   it('releases a pending question when the session is interrupted (fails closed, no deadlock)', async () => {
@@ -376,6 +391,146 @@ describe('daemon: adopted sessions end-to-end', () => {
 
     // Fail-closed: the hook returns `ask` (defer to the local picker) rather than hanging forever.
     expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
+  });
+
+  it('adopts a session on SessionStart, before any tool, with a cwd-derived title', async () => {
+    // A chat-only session (never calls a tool) is invisible today. SessionStart adopts it eagerly.
+    const start = hookRpc(socketPath, {
+      hook_event_name: 'SessionStart',
+      session_id: CLAUDE_SESSION,
+      cwd: '/Users/me/myrepo',
+      source: 'startup',
+    });
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    const payload = sessionAdoptedPayloadSchema.parse(announce.payload);
+    expect(payload.clientRef).toBe(CLAUDE_SESSION);
+    expect(payload.title).toBe('myrepo'); // derived from the cwd basename so the row has a sensible name
+    expect(payload.cwd).toBe('/Users/me/myrepo');
+    ackAdopted(relay, announce);
+    expect(await start).toEqual({});
+  });
+
+  it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {
+    // Adopt the session via a read-only tool, ack it.
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // The Claude Code process exits → the SessionEnd hook fires. The daemon must end the adopted session
+    // (today it lingers as running forever). Non-PreToolUse events return an empty hook output.
+    const ended = hookRpc(socketPath, {
+      hook_event_name: 'SessionEnd',
+      session_id: CLAUDE_SESSION,
+      reason: 'other',
+    });
+
+    const endFrame = await relay.waitForFrame((e) => e.type === 'session.ended');
+    expect(endFrame.session_id).toBe(TELECODE_SESSION);
+    expect(endFrame.status).toBe('done'); // cleartext routing status on the envelope
+    expect(await ended).toEqual({});
+  });
+
+  it('emits agent.notice on a Notification for an adopted session (idle/needs attention)', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // The session goes idle → Claude Code fires a Notification. The daemon surfaces it as a non-blocking
+    // attention signal (no answer required). Notification events return an empty hook output.
+    const notif = hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'Claude is waiting for your input',
+    });
+    const notice = await relay.waitForFrame((e) => e.type === 'agent.notice');
+    expect(notice.session_id).toBe(TELECODE_SESSION);
+    expect(agentNoticePayloadSchema.parse(notice.payload).message).toBe(
+      'Claude is waiting for your input',
+    );
+    expect(await notif).toEqual({});
+  });
+
+  it('skips the notice while a gate is already showing, but emits once the session resumes', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // A consequential tool parks the session at awaiting_input.
+    const bash = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Bash',
+      tool_input: { command: 'ls' },
+    });
+    const request = await relay.waitForFrame((e) => e.type === 'agent.permission_request');
+    const requestId = (request.payload as { requestId: string }).requestId;
+
+    // A Notification arriving WHILE the gate shows is redundant → skipped (not emitted as a notice).
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'redundant-permission-prompt',
+    });
+
+    // Resolve the gate; the session resumes (running).
+    relay.send(
+      makeEnvelope({
+        type: 'permission.decision',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: { requestId, behavior: 'allow' },
+      }),
+    );
+    await bash;
+
+    // A Notification after the gate clears DOES emit — and it is the FIRST agent.notice (proving the one
+    // sent during the gate was skipped, not merely delayed).
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'now-idle',
+    });
+    const notice = await relay.waitForFrame((e) => e.type === 'agent.notice');
+    expect(agentNoticePayloadSchema.parse(notice.payload).message).toBe('now-idle');
+  });
+
+  it('ignores SessionEnd for a session it never adopted (no phantom row/end)', async () => {
+    // No prior adoption for this Claude session → SessionEnd must be a no-op (return {}, never force-adopt).
+    const ended = hookRpc(socketPath, {
+      hook_event_name: 'SessionEnd',
+      session_id: 'claude-never-adopted',
+      reason: 'other',
+    });
+    expect(await ended).toEqual({});
+
+    // Prove no phantom announce: a subsequent REAL adoption is the FIRST session.adopted frame (had the
+    // unknown SessionEnd wrongly announced, waitForFrame would surface that stale clientRef first).
+    const adopt = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
+    ackAdopted(relay, announce);
+    await adopt;
   });
 });
 
@@ -511,5 +666,179 @@ describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
       await relay.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('opens a sealed adopt.config and replies adopt.state as ciphertext (denylist paths never cleartext)', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-cfg-e2e-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemonKp = await generateKeyPair();
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
+      keyPair: {
+        publicKey: encodeKey(daemonKp.publicKey),
+        privateKey: encodeKey(daemonKp.privateKey),
+      },
+    });
+    await daemon.start();
+    try {
+      // Act as the browser: derive the device shared key and box-seal the policy to the daemon's pubkey.
+      const browserKp = await generateKeyPair();
+      const shared = await deriveSharedKey(
+        await importIdentityPrivateKey(encodeKey(browserKp.privateKey)),
+        await importIdentityPublicKey(encodeKey(daemonKp.publicKey)),
+      );
+      const sealed = await sealPayload(
+        { set: { enabled: false, denylist: ['/Users/me/secret'] } },
+        shared,
+      );
+      relay.send(
+        makeEnvelope({
+          type: 'adopt.config',
+          userId: USER,
+          deviceId: DEVICE,
+          payload: sealed.payload,
+          nonce: sealed.nonce,
+          senderPublicKey: encodeKey(browserKp.publicKey),
+        }),
+      );
+
+      const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+      // Invariant #5: the reply (which names a private repo path) is opaque ciphertext to the relay.
+      expect(state.nonce).not.toBe('');
+      expect(typeof state.payload).toBe('string');
+      // The browser, holding the same shared key, opens it to the policy it set.
+      expect(await openPayload(state, shared)).toEqual({
+        enabled: false,
+        denylist: ['/Users/me/secret'],
+      });
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('daemon: adoption policy (web-managed config + denylist gating, Journey 3)', () => {
+  let relay: FakeRelay;
+  let daemon: Daemon | undefined;
+  let dir: string;
+  let socketPath: string;
+  let configPath: string;
+
+  beforeEach(async () => {
+    relay = await startFakeRelay(USER, DEVICE);
+    dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-policy-'));
+    socketPath = join(dir, 'run', 'hook.sock');
+    configPath = join(dir, 'adopt-config.json');
+  });
+
+  afterEach(async () => {
+    await daemon?.stop();
+    await relay.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** Start a daemon (cleartext) wired to the policy config file. */
+  async function start(): Promise<void> {
+    daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath },
+    });
+    await daemon.start();
+  }
+
+  function preTool(cwd: string): unknown {
+    return {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd,
+      tool_name: 'Read',
+      tool_input: {},
+    };
+  }
+
+  it('persists a SET adopt.config and replies the new adopt.state', async () => {
+    await start();
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled: false, denylist: ['/Users/me/secret'] } },
+      }),
+    );
+    const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    expect(state.payload).toEqual({ enabled: false, denylist: ['/Users/me/secret'] });
+    // Persisted to disk so it survives a daemon restart.
+    expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({
+      enabled: false,
+      denylist: ['/Users/me/secret'],
+    });
+  });
+
+  it('replies the current adopt.state for a GET (no set)', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ enabled: true, denylist: ['/Users/me/secret'] }),
+      'utf8',
+    );
+    await start();
+    relay.send(makeEnvelope({ type: 'adopt.config', userId: USER, deviceId: DEVICE, payload: {} }));
+    const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    expect(state.payload).toEqual({ enabled: true, denylist: ['/Users/me/secret'] });
+  });
+
+  it('does NOT adopt a session whose cwd is on the denylist (telecode stays out)', async () => {
+    await writeFile(
+      configPath,
+      JSON.stringify({ enabled: true, denylist: ['/Users/me/secret'] }),
+      'utf8',
+    );
+    await start();
+
+    // A session in the denied repo → no announce, hook returns {} (Claude Code's own local flow applies).
+    const denied = hookRpc(socketPath, preTool('/Users/me/secret/app'));
+    expect(await denied).toEqual({});
+
+    // A session in an allowed repo IS adopted — and its announce is the FIRST session.adopted frame, proving
+    // the denied one produced none.
+    const allowed = hookRpc(socketPath, preTool('/Users/me/work'));
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
+    ackAdopted(relay, announce);
+    await allowed;
+  });
+
+  it('does NOT adopt anything while adoption is disabled', async () => {
+    await writeFile(configPath, JSON.stringify({ enabled: false, denylist: [] }), 'utf8');
+    await start();
+    const event = hookRpc(socketPath, preTool('/Users/me/work'));
+    expect(await event).toEqual({});
+
+    // Re-enable via the web → a subsequent session adopts (proves the runtime gate honours the live policy).
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled: true, denylist: [] } },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'adopt.state');
+
+    const after = hookRpc(socketPath, preTool('/Users/me/work'));
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
+    ackAdopted(relay, announce);
+    await after;
   });
 });

@@ -135,7 +135,11 @@ export interface RelayOptions {
  */
 export const WS_CLOSE_CODE_CONNECTION_CAP = 4029;
 
-/** The daemon→browser frame types worth caching for an instant reopen (the session's recent history). */
+/**
+ * The daemon→browser frame types worth caching for an instant reopen (the session's recent history).
+ * `agent.notice` is deliberately excluded — it is a transient "needs attention" cue the web clears on the
+ * next frame, so replaying a stale one on reopen would be misleading.
+ */
 const CACHEABLE_TYPES = new Set<string>([
   'session.started',
   'agent.message',
@@ -480,6 +484,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         });
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session awaiting input');
         // Ping the user (web push) that a session needs them — fire-and-forget, routing metadata only.
+        pushAwaitingInput(envelope.user_id, envelope.session_id);
+      } else if (envelope.type === 'agent.notice') {
+        // A non-blocking attention cue (an adopted session went idle). Ping the user, but DON'T change the
+        // persisted status — a notice is not a gate. The frame still broadcasts to live browsers below.
         pushAwaitingInput(envelope.user_id, envelope.session_id);
       }
     }

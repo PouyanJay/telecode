@@ -20,6 +20,10 @@ function deps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
       privateKey: 'sk',
     }),
     probeRelay: async () => ({ ok: true }),
+    adoptionHooks: async () => ({
+      installed: true,
+      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification'],
+    }),
     ...overrides,
   };
 }
@@ -52,6 +56,30 @@ describe('runDoctor', () => {
     const report = await runDoctor(deps({ loadCredentials: async () => null }));
     expect(find(report, 'Device pairing')?.status).toBe('warn');
     // A warning must not sink the overall result — a fresh install can still pass.
+    expect(report.ok).toBe(true);
+  });
+
+  it('passes the adoption check when the hooks are installed (listing the events)', async () => {
+    const check = find(await runDoctor(deps()), 'Adopted sessions');
+    expect(check?.status).toBe('pass');
+    expect(check?.detail).toContain('SessionEnd');
+  });
+
+  it('warns (does not fail) the adoption check when hooks are not installed', async () => {
+    const report = await runDoctor(
+      deps({ adoptionHooks: async () => ({ installed: false, events: [] }) }),
+    );
+    const check = find(report, 'Adopted sessions');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('telecode hooks install');
+    expect(report.ok).toBe(true); // advisory — never sinks the run
+  });
+
+  it('warns (does not fail) the adoption check when TELECODE_ADOPT=0', async () => {
+    const report = await runDoctor(deps({ env: { ANTHROPIC_API_KEY: 'sk', TELECODE_ADOPT: '0' } }));
+    const check = find(report, 'Adopted sessions');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('TELECODE_ADOPT=0');
     expect(report.ok).toBe(true);
   });
 

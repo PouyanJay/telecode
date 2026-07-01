@@ -1,3 +1,7 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+import { readHooksStatus } from './adopt/hooks-status';
 import { loadCredentials } from './credentials';
 import { formatDoctorReport, runDoctor, type DoctorDeps } from './doctor';
 import { resolveRelayUrl } from './relay-url';
@@ -40,12 +44,14 @@ export async function runDoctorCli(options: DoctorCliOptions): Promise<number> {
     relay = { error: err instanceof Error ? err.message : 'could not resolve relay URL' };
   }
 
+  const settingsPath = join(homedir(), '.claude', 'settings.json');
   const report = await runDoctor({
     nodeVersion: process.versions.node,
     env: options.env,
     relay,
     loadCredentials: () => loadCredentials(),
     probeRelay,
+    adoptionHooks: () => readHooksStatus({ settingsPath }),
   });
 
   write(`${formatDoctorReport(report)}\n`);
