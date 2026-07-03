@@ -90,7 +90,8 @@ export const sessions = pgTable(
      * `parent_session_id` points back at the adopted (`external`) row — recording the adopted → launched
      * migration so the dashboard can link them. Null for every ordinary (unchained) session. Self-FK; a
      * self-reference needs the {@link AnyPgColumn} return annotation on the thunk. `set null` on delete so a
-     * removed parent never orphan-deletes its telecode-owned continuation.
+     * removed parent never orphan-deletes its telecode-owned continuation. Added in `0006_session_parent_id`;
+     * to reverse: drop the `sessions_parent_session_id_idx` index, the self-FK, then the column.
      */
     parentSessionId: uuid('parent_session_id').references((): AnyPgColumn => sessions.id, {
       onDelete: 'set null',

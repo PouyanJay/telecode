@@ -22,7 +22,7 @@ const SOLICITATION_CUES = [
   /\bhow would you like\b/i,
 ];
 
-/** Remove fenced code blocks (```...```) so a `?` inside a code sample is not read as a question. */
+/** Prevents a `?` inside a fenced code block from being read as a question by the detector. */
 function stripCodeBlocks(text: string): string {
   return text.replace(/```[\s\S]*?```/g, ' ').replace(/```[\s\S]*$/g, ' ');
 }
@@ -33,8 +33,6 @@ export function isFreeFormQuestion(lastAssistantMessage: string | undefined): bo
   if (text.length === 0 || text.length > MAX_QUESTION_LENGTH) return false;
   const prose = stripCodeBlocks(text).trim();
   if (prose.length === 0) return false;
-  // The strongest signal: the prose ends on a question mark (allowing trailing quotes/brackets/emphasis).
   if (/\?["'”’)\]*_`]*\s*$/.test(prose)) return true;
-  // Otherwise, a clear solicitation phrase asking the user to decide.
   return SOLICITATION_CUES.some((cue) => cue.test(prose));
 }

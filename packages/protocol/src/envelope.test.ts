@@ -128,11 +128,12 @@ describe('envelope E2E routing-metadata fields (Phase 3)', () => {
     expect(safeParseEnvelope({ ...validWire, type: 'session.adopted' }).success).toBe(true);
   });
 
-  it('recognizes the free-form handover message types (Journey 4)', () => {
-    for (const type of ['agent.handover', 'handover.answer', 'session.chained'] as const) {
+  it.each(['agent.handover', 'handover.answer', 'session.chained'] as const)(
+    'recognizes %s as a valid message type (Journey 4)',
+    (type) => {
       expect(safeParseEnvelope({ ...validWire, type }).success).toBe(true);
-    }
-  });
+    },
+  );
 });
 
 describe('makeEnvelope routing-metadata fields', () => {

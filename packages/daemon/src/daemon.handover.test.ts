@@ -278,10 +278,11 @@ describe('daemon: free-form handover & resume', () => {
     // context — carrying the exact question and the user's answer so the fresh conversation continues.
     await vi.waitFor(() => expect(runCalls).toHaveLength(2));
     expect(runCalls[0]).toMatchObject({ resume: CLAUDE_SESSION, forkSession: true });
-    expect(runCalls[1]?.resume).toBeUndefined();
-    expect(runCalls[1]?.forkSession).toBeUndefined();
-    expect(runCalls[1]?.prompt).toContain('Which database should we use for the app?');
-    expect(runCalls[1]?.prompt).toContain('Use Postgres.');
+    // vi.waitFor guaranteed length 2, so runCalls[1] exists — assert non-null so a regression can't slip past.
+    expect(runCalls[1]!.resume).toBeUndefined();
+    expect(runCalls[1]!.forkSession).toBeUndefined();
+    expect(runCalls[1]!.prompt).toContain('Which database should we use for the app?');
+    expect(runCalls[1]!.prompt).toContain('Use Postgres.');
   });
 
   it('does not offer a handover on a non-question Stop (only the free-form question offers)', async () => {

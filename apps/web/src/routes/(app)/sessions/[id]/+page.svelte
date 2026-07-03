@@ -44,9 +44,11 @@
   const connected = $derived($connectionState === 'connected');
   const isTerminal = $derived(session.status === 'done' || session.status === 'error');
   const showControls = $derived(known && session.status !== 'idle');
-  // The session's first prompt names it (in the header + browser tab); fall back to the short id.
+  // The session's first prompt names it (in the header + browser tab); fall back to a short id prefix.
+  const SESSION_ID_DISPLAY_LENGTH = 12;
   const sessionTitle = $derived(
-    session.entries.find((e) => e.kind === 'user')?.text ?? sessionId.slice(0, 12),
+    session.entries.find((e) => e.kind === 'user')?.text ??
+      sessionId.slice(0, SESSION_ID_DISPLAY_LENGTH),
   );
 
   // A forked handover continuation links back to the adopted session it continues (Journey 4): live from

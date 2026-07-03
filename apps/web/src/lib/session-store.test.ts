@@ -232,26 +232,32 @@ describe('session-store launch correlation (Task 11)', () => {
   });
 
   it('takes over a handover and links parent ↔ child on session.chained (Journey 4)', () => {
+    // Real relay-minted UUIDs — session.chained's parentSessionId is validated as a UUID on the wire.
+    const parentId = '11111111-1111-1111-1111-111111111111';
+    const childId = '22222222-2222-2222-2222-222222222222';
     const fake = makeFakeConnection();
     connect(
       { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
       fake.create,
     );
-    fake.started('sess-parent');
-    fake.handover('sess-parent', 'h1');
+    fake.started(parentId);
+    fake.handover(parentId, 'h1');
 
-    answerHandover('sess-parent', { requestId: 'h1', answerText: 'Use Postgres.' });
+    answerHandover(parentId, { requestId: 'h1', answerText: 'Use Postgres.' });
     // Marked in-flight locally (submitting) and forwarded to the relay.
     expect(fake.handovers).toEqual([
-      { sessionId: 'sess-parent', payload: { requestId: 'h1', answerText: 'Use Postgres.' } },
+      { sessionId: parentId, payload: { requestId: 'h1', answerText: 'Use Postgres.' } },
     ]);
 
     // The daemon registers the forked continuation → parent ↔ child linked across sessions.
-    fake.chained('sess-child', 'sess-parent');
+    fake.chained(childId, parentId);
     const map = get(sessions);
-    const parentEntry = map.get('sess-parent')?.entries.find((e) => e.kind === 'handover');
-    expect(parentEntry?.kind === 'handover' && parentEntry.childSessionId).toBe('sess-child');
-    expect(map.get('sess-child')?.parentSessionId).toBe('sess-parent');
+    const parentEntry = map.get(parentId)?.entries.find((e) => e.kind === 'handover');
+    expect(parentEntry?.kind).toBe('handover');
+    if (parentEntry?.kind === 'handover') {
+      expect(parentEntry.childSessionId).toBe(childId);
+    }
+    expect(map.get(childId)?.parentSessionId).toBe(parentId);
   });
 
   it('reads + writes the adoption policy and surfaces adopt.state (Journey 3)', () => {

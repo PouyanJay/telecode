@@ -525,24 +525,36 @@ describe('handoverAnswerPayloadSchema (the user takes over remotely)', () => {
 });
 
 describe('sessionChainedPayloadSchema (forked continuation registration)', () => {
+  // parentSessionId is a relay-minted session id — validated as a UUID on the wire.
+  const PARENT = '11111111-1111-1111-1111-111111111111';
+
   it('parses a child registration linked to its parent', () => {
     const parsed = sessionChainedPayloadSchema.parse({
       clientRef: 'fork-1',
-      parentSessionId: 'parent-sess',
+      parentSessionId: PARENT,
       title: 'Continue: database choice',
       cwd: '/repo',
     });
-    expect(parsed.parentSessionId).toBe('parent-sess');
+    expect(parsed.parentSessionId).toBe(PARENT);
     expect(parsed.clientRef).toBe('fork-1');
   });
 
+  it('rejects a parentSessionId that is not a UUID', () => {
+    expect(
+      sessionChainedPayloadSchema.safeParse({ clientRef: 'fork-1', parentSessionId: 'p' }).success,
+    ).toBe(false);
+  });
+
   it('requires both the correlation ref and the parent link (title/cwd optional)', () => {
-    const parsed = sessionChainedPayloadSchema.parse({ clientRef: 'fork-1', parentSessionId: 'p' });
+    const parsed = sessionChainedPayloadSchema.parse({
+      clientRef: 'fork-1',
+      parentSessionId: PARENT,
+    });
     expect(parsed.title).toBeUndefined();
     expect(sessionChainedPayloadSchema.safeParse({ clientRef: 'fork-1' }).success).toBe(false);
-    expect(sessionChainedPayloadSchema.safeParse({ parentSessionId: 'p' }).success).toBe(false);
+    expect(sessionChainedPayloadSchema.safeParse({ parentSessionId: PARENT }).success).toBe(false);
     expect(
-      sessionChainedPayloadSchema.safeParse({ clientRef: '', parentSessionId: 'p' }).success,
+      sessionChainedPayloadSchema.safeParse({ clientRef: '', parentSessionId: PARENT }).success,
     ).toBe(false);
   });
 });

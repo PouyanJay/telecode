@@ -321,7 +321,9 @@ export type HandoverAnswerPayload = z.infer<typeof handoverAnswerPayloadSchema>;
  */
 export const sessionChainedPayloadSchema = z.object({
   clientRef: z.string().min(1).max(256),
-  parentSessionId: z.string().min(1).max(256),
+  // A relay-minted telecode session id (the adopted parent) — validated as a UUID at the boundary so a
+  // malformed value is rejected on parse rather than failing later against the `uuid` DB column.
+  parentSessionId: z.string().uuid(),
   title: z.string().min(1).max(512).optional(),
   cwd: z.string().min(1).max(1024).optional(),
 });

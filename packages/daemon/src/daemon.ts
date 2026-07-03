@@ -68,6 +68,9 @@ import { type WorktreeManager } from './sessions/worktree-manager';
  * human-in-the-loop gate: the daemon forwards it as `agent.permission_request` and blocks `canUseTool`
  * until the matching `permission.decision` returns from the browser.
  */
+/** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
+const HANDOVER_TITLE_PREVIEW_CHARS = 60;
+
 export interface DaemonOptions {
   readonly relayUrl: string;
   readonly userId: string;
@@ -518,25 +521,35 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
   }
 
+  /** Optional per-turn configuration for {@link runTurn}. Ordinary launches/follow-ups leave most unset. */
+  interface TurnOptions {
+    /** Continue a prior agent conversation (from an earlier run's returned conversation id). */
+    readonly resume?: string;
+    /** The session's worktree cwd; omitted runs in the daemon cwd. */
+    readonly cwd?: string;
+    /** Fork the resumed conversation into a new one (free-form handover — a new id + its own transcript). */
+    readonly forkSession?: boolean;
+    /**
+     * Journey 4: when `resume` is set and the resume run fails — e.g. the SDK can't pick up an
+     * *externally-created* conversation (transcript gone, version skew) — the turn re-runs as a FRESH launch
+     * (no resume/fork) seeded with this prompt, so a free-form handover still continues instead of dropping
+     * the user's answer. Only used for the handover continuation; ordinary turns leave it unset.
+     */
+    readonly resumeFallbackPrompt?: string;
+  }
+
   /**
    * Run one agent turn (the initial prompt or a follow-up) and stream its activity up, then end the
-   * turn with `session.ended`. `resume` continues a prior agent conversation. The returned conversation
-   * id is stored so the next `user.message` follow-up resumes this same session. One turn at a time per
-   * session — a follow-up that races an in-flight turn is dropped (the UI also blocks it).
-   *
-   * `resumeFallbackPrompt` (Journey 4): when `resume` is set and the resume run fails — e.g. the SDK can't
-   * pick up an *externally-created* conversation (transcript gone, version skew) — the turn re-runs as a
-   * FRESH launch (no resume/fork) seeded with this prompt, so a free-form handover still continues instead
-   * of dropping the user's answer. Only used for the handover continuation; ordinary turns leave it unset.
+   * turn with `session.ended`. The returned conversation id is stored so the next `user.message` follow-up
+   * resumes this same session. One turn at a time per session — a follow-up that races an in-flight turn is
+   * dropped (the UI also blocks it). {@link TurnOptions} carries the optional per-turn configuration.
    */
   async function runTurn(
     envelope: Envelope,
     prompt: string,
-    resume?: string,
-    cwd?: string,
-    forkSession?: boolean,
-    resumeFallbackPrompt?: string,
+    turn: TurnOptions = {},
   ): Promise<void> {
+    const { resume, cwd, forkSession, resumeFallbackPrompt } = turn;
     const sessionId = envelope.session_id;
     if (sessionId !== undefined && activeRuns.has(sessionId)) {
       log.warn({ deviceId: options.deviceId, sessionId }, 'daemon: turn already running; dropped');
@@ -726,7 +739,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       'session.started',
       launch.data.clientRef !== undefined ? { clientRef: launch.data.clientRef } : {},
     );
-    await runTurn(envelope, launch.data.prompt, undefined, cwd);
+    await runTurn(envelope, launch.data.prompt, { ...(cwd !== undefined ? { cwd } : {}) });
   }
 
   /** Run a follow-up turn for an existing session by resuming its agent conversation. */
@@ -758,7 +771,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     setStatus(sessionId, 'running');
     // Reuse the session's worktree cwd (set on launch) so the follow-up turn runs in the same place.
     const cwd = sessionId !== undefined ? sessionCwds.get(sessionId) : undefined;
-    await runTurn(envelope, message.data.text, resume, cwd);
+    await runTurn(envelope, message.data.text, { resume, ...(cwd !== undefined ? { cwd } : {}) });
   }
 
   async function handleFrame(raw: Buffer, onReady: () => void): Promise<void> {
@@ -929,43 +942,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         return;
       }
       case 'handover.answer': {
-        // The user chose to take over an adopted session's free-form question (Journey 4). This is an
-        // action trigger, not a gate resolution: launch a forked telecode-owned continuation that resumes
-        // the adopted conversation with the answer as its next turn, and mark the parent handed-off.
-        const answer = handoverAnswerPayloadSchema.safeParse(await readSessionPayload(envelope));
-        if (!answer.success) {
-          log.warn(
-            { deviceId: options.deviceId },
-            'daemon: dropped handover.answer with invalid payload',
-          );
-          return;
-        }
-        const handover = pendingHandovers.get(answer.data.requestId);
-        if (!handover) {
-          // Already handled (a duplicate/late answer, or a daemon restart). Reconcile with the authoritative
-          // session state — like the permission/question races — so the browser's "taking over…" doesn't hang.
-          log.info(
-            { deviceId: options.deviceId, requestId: answer.data.requestId },
-            'daemon: handover.answer for a settled offer — reconciling with session state',
-          );
-          sendForSession(envelope, 'session.history', historyPayloadFor(envelope.session_id));
-          return;
-        }
-        pendingHandovers.delete(answer.data.requestId);
-        // Record the answer on the parent's handover entry so a later backfill shows it resolved.
-        const parentId = handover.telecodeSessionId;
-        const entry = sessionRecords
-          .get(parentId)
-          ?.transcript.find(
-            (e): e is Extract<SessionHistoryEntry, { kind: 'handover' }> =>
-              e.kind === 'handover' && e.requestId === answer.data.requestId,
-          );
-        if (entry) entry.answerText = answer.data.answerText;
-        log.info(
-          { deviceId: options.deviceId, sessionId: parentId, requestId: answer.data.requestId },
-          'daemon: handover accepted — launching continuation',
-        );
-        void launchHandoverContinuation(adoptedSource(parentId), handover, answer.data.answerText);
+        await handleHandoverAnswer(envelope);
         return;
       }
       case 'session.control': {
@@ -1258,6 +1235,60 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
+   * Handle a `handover.answer` (Journey 4): the user chose to take over an adopted session's free-form
+   * question. This is an action trigger, not a gate resolution — it launches a forked telecode-owned
+   * continuation (see {@link launchHandoverContinuation}) and marks the parent handed-off. A duplicate/late
+   * answer (already-settled offer) reconciles with the authoritative session state so the browser's
+   * "taking over…" doesn't hang.
+   */
+  async function handleHandoverAnswer(envelope: Envelope): Promise<void> {
+    const answer = handoverAnswerPayloadSchema.safeParse(await readSessionPayload(envelope));
+    if (!answer.success) {
+      log.warn(
+        { deviceId: options.deviceId },
+        'daemon: dropped handover.answer with invalid payload',
+      );
+      return;
+    }
+    const handover = pendingHandovers.get(answer.data.requestId);
+    if (!handover) {
+      log.info(
+        { deviceId: options.deviceId, requestId: answer.data.requestId },
+        'daemon: handover.answer for a settled offer — reconciling with session state',
+      );
+      sendForSession(envelope, 'session.history', historyPayloadFor(envelope.session_id));
+      return;
+    }
+    pendingHandovers.delete(answer.data.requestId);
+    // Record the answer on the parent's handover entry so a later backfill shows it resolved.
+    const parentId = handover.telecodeSessionId;
+    const entry = sessionRecords
+      .get(parentId)
+      ?.transcript.find(
+        (e): e is Extract<SessionHistoryEntry, { kind: 'handover' }> =>
+          e.kind === 'handover' && e.requestId === answer.data.requestId,
+      );
+    if (entry) entry.answerText = answer.data.answerText;
+    log.info(
+      { deviceId: options.deviceId, sessionId: parentId, requestId: answer.data.requestId },
+      'daemon: handover accepted — launching continuation',
+    );
+    // Fire-and-forget: the launch runs a long agent turn, so it must not block the inbound frame chain. Its
+    // own paths are exception-safe, but the `.catch` guards against a synchronous throw so an error can never
+    // vanish silently (a detached `void` promise is not covered by the inbound chain's catch).
+    void launchHandoverContinuation(
+      adoptedSource(parentId),
+      handover,
+      answer.data.answerText,
+    ).catch((err: unknown) =>
+      log.error(
+        { err, deviceId: options.deviceId, sessionId: parentId },
+        'daemon: handover continuation failed',
+      ),
+    );
+  }
+
+  /**
    * Take over an adopted session's free-form question (Journey 4): launch a forked, telecode-OWNED
    * continuation that resumes the adopted conversation (`resume` + `forkSession`, from the spike) with the
    * user's answer as its next turn, and mark the parent adopted row handed-off (read-only, linked). The fork
@@ -1277,7 +1308,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
   ): Promise<void> {
     const parentId = handover.telecodeSessionId;
     const clientRef = randomUUID();
-    const title = `Continue: ${handover.question.slice(0, 60)}`;
+    const title = `Continue: ${handover.question.slice(0, HANDOVER_TITLE_PREVIEW_CHARS)}`;
     let childId: string;
     try {
       childId = await registerChained({
@@ -1314,28 +1345,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // Run the forked continuation: resume the adopted conversation by its Claude id, fork it, seed the answer.
     // If the resume fails (an externally-created conversation the SDK can't pick up), fall back to a fresh
     // launch seeded with the handover context so the answer still lands (AD-7 fallback).
-    const fallbackPrompt = buildHandoverFallbackPrompt(
+    const resumeFallbackPrompt = buildHandoverFallbackPrompt(
       handover.summary,
       handover.question,
       answerText,
     );
-    await runTurn(
-      childSource,
-      answerText,
-      handover.externalSessionId,
-      handover.cwd,
-      true,
-      fallbackPrompt,
-    );
+    await runTurn(childSource, answerText, {
+      resume: handover.externalSessionId,
+      ...(handover.cwd !== undefined ? { cwd: handover.cwd } : {}),
+      forkSession: true,
+      resumeFallbackPrompt,
+    });
   }
 
-  /**
-   * Handle one hook event from the bridge (the T4 socket calls this). Adopt the session (announce + await
-   * the relay's minted id), mirror its transcript, and for a `PreToolUse` route the tool through telecode's
-   * existing gate: a read-only tool auto-allows; a consequential one blocks on the browser's decision.
-   * FAIL-CLOSED (AD-2): any failure returns `ask` / `{}`, so Claude Code falls back to its own local prompt
-   * — never an auto-allow of a consequential tool because adoption hit a snag.
-   */
   /**
    * SessionEnd (Journey 3): the Claude Code process exited. End the adopted session if we are tracking it —
    * never force-adopt an unknown session just to end it (no phantom row). Until now adopted sessions never
@@ -1407,7 +1429,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (cipher.enabled) cipher.establish(knownId); // idempotent; the mirror + offer must encrypt under E2E
     // Pull the turn's latest transcript lines in before summarizing, so the handover summary reflects the
     // most recent context (a `Stop` fires after the last turn, which no `PreToolUse` may have mirrored yet).
-    await mirrorTranscript(knownId, event.transcript_path);
+    // Fail-closed: an unreadable transcript skips the offer (the session simply stays running locally).
+    try {
+      await mirrorTranscript(knownId, event.transcript_path);
+    } catch (err) {
+      log.warn(
+        { err, deviceId: options.deviceId, sessionId: knownId },
+        'daemon: transcript mirror failed in Stop hook — skipping the handover offer',
+      );
+      return {};
+    }
     // Deterministic "what the session was doing" summary from the mirrored transcript — no extra model call.
     const summary = buildHandoverSummary(recordFor(knownId).transcript);
     const requestId = randomUUID();
@@ -1428,6 +1459,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return {};
   }
 
+  /**
+   * Handle one hook event from the bridge (the socket calls this). Lifecycle events (SessionEnd /
+   * Notification / Stop) act only on a session we already track. Otherwise adopt the session (announce +
+   * await the relay's minted id), mirror its transcript, and for a `PreToolUse` route the tool through
+   * telecode's existing gate: a read-only tool auto-allows; a consequential one blocks on the browser's
+   * decision. FAIL-CLOSED (AD-2): any failure returns `ask` / `{}`, so Claude Code falls back to its own
+   * local prompt — never an auto-allow of a consequential tool because adoption hit a snag.
+   */
   async function handleHookEvent(event: HookEvent): Promise<unknown> {
     if (!adoptedSessions) return {};
     // Lifecycle events act only on a session we already track (never force-adopt to handle them).
@@ -1559,6 +1598,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
         resolve(null);
       }
       pendingQuestions.clear();
+      // Handover offers (Journey 4) are non-blocking — no hook is parked on them, so there is nothing to
+      // resolve; just discard the context. Pending chain registrations can't be ACKed on a closed socket;
+      // their timers are already `unref`'d, so clearing is for symmetry/tidiness.
+      pendingHandovers.clear();
+      pendingChainRegistrations.clear();
       await hookSocket?.stop();
       socket?.close();
       socket = null;
