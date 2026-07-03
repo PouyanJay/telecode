@@ -29,6 +29,10 @@ export const MESSAGE_TYPES = [
   // adopted sessions (daemon -> relay -> web): the daemon announces an externally-started Claude Code
   // session it discovered via the hooks bridge, so the relay mints a registry row (origin='external').
   'session.adopted',
+  // free-form handover (daemon -> relay -> web): the daemon registers a telecode-OWNED continuation that
+  // resumes an adopted conversation the user chose to take over remotely (origin='launched'), linked to the
+  // adopted row via `parent_session_id`. Symmetric with `session.adopted`, but the child is launched. (J4.)
+  'session.chained',
   // agent stream (daemon -> web)
   'agent.message',
   'agent.tool_use',
@@ -39,6 +43,10 @@ export const MESSAGE_TYPES = [
   // adopted-session attention signal (daemon -> web): Claude Code's `Notification` (e.g. went idle waiting
   // for input) surfaced as a non-blocking "needs a look" cue. No answer required (Journey 3).
   'agent.notice',
+  // free-form handover offer (daemon -> web, Journey 4): an adopted session ended its turn asking a
+  // free-form question (no tool call, so no gate). Non-blocking — carries the exact question + a handover
+  // summary so the browser can offer to take the conversation over by resuming it under telecode's control.
+  'agent.handover',
   // adoption policy (Journey 3), session-less + box-sealed so the relay never sees repo paths:
   // `adopt.config` (web -> daemon) reads/sets the per-machine enabled + denylist; `adopt.state`
   // (daemon -> web) reports the current policy back to the requesting browser.
@@ -48,6 +56,9 @@ export const MESSAGE_TYPES = [
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).
   'question.answer',
+  // the human's answer to an `agent.handover` (web -> daemon, Journey 4): triggers the daemon to launch a
+  // forked telecode-owned continuation that resumes the adopted conversation with this answer as its turn.
+  'handover.answer',
   'user.message',
   // per-session controls (web -> daemon): end / interrupt / pause / resume
   'session.control',

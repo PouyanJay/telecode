@@ -3,6 +3,7 @@ import {
   sessionStartedPayloadSchema,
   type AdoptSettings,
   type Envelope,
+  type HandoverAnswerPayload,
   type PermissionDecisionPayload,
   type QuestionAnswerPayload,
   type SessionControlAction,
@@ -11,7 +12,7 @@ import {
 import { get, writable, type Readable } from 'svelte/store';
 
 import { createRelayConnection, type ConnectionStatus, type RelayConnection } from './relay-client';
-import { appendUserMessage, markAnswering, markDeciding } from './session';
+import { appendUserMessage, markAnswering, markDeciding, markHandoverSubmitting } from './session';
 import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
 /**
@@ -232,6 +233,25 @@ export function answer(sessionId: string, payload: QuestionAnswerPayload): void 
     return next;
   });
   conn.answer(sessionId, payload);
+}
+
+/**
+ * Take over an adopted session's free-form question (Journey 4); mark the offer in-flight locally
+ * (confirmed on the daemon's next frame, like {@link answer}). The daemon forks-and-resumes the adopted
+ * conversation with this answer as its next turn — migrating it to a telecode-owned continuation.
+ */
+export function answerHandover(sessionId: string, payload: HandoverAnswerPayload): void {
+  const conn = connection;
+  // Guard before the optimistic mark: a dropped send would otherwise strand the card spinning forever.
+  if (!conn) return;
+  sessionMap.update((map) => {
+    const current = map.get(sessionId);
+    if (!current) return map;
+    const next = new Map(map);
+    next.set(sessionId, markHandoverSubmitting(current, payload.requestId, payload.answerText));
+    return next;
+  });
+  conn.answerHandover(sessionId, payload);
 }
 
 /** Send an operator control (interrupt / end); the daemon reports the resulting status. */

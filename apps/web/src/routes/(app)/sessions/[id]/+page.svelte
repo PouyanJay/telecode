@@ -10,6 +10,7 @@
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
     answer,
+    answerHandover,
     connectionState,
     decide,
     sendControl,
@@ -79,6 +80,10 @@
   function onAnswer(requestId: string, answers: QuestionAnswerItem[]): void {
     answer(sessionId, { requestId, answers });
   }
+
+  function onHandover(requestId: string, answerText: string): void {
+    answerHandover(sessionId, { requestId, answerText });
+  }
 </script>
 
 <svelte:head>
@@ -127,6 +132,7 @@
           onapprove={() => onDecide('allow')}
           onreject={() => onDecide('deny')}
           onanswer={onAnswer}
+          onhandover={onHandover}
         />
       {/if}
 

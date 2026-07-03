@@ -41,6 +41,13 @@ export interface AgentRunOptions {
    */
   readonly resume?: string;
   /**
+   * Fork the resumed conversation instead of continuing it in place (Journey 4 free-form handover). With
+   * `resume` set, `forkSession: true` makes the SDK branch a NEW conversation (new id, own transcript) that
+   * inherits the resumed context — so telecode can take over an adopted session by resuming its `session_id`
+   * without writing into the still-live external process's transcript. Ignored without `resume`.
+   */
+  readonly forkSession?: boolean;
+  /**
    * Working directory the agent runs in — the session's git worktree (Phase 2). Omitted falls back to
    * the daemon's own cwd. The daemon derives this path; it is never taken from an untrusted client.
    */
@@ -75,8 +82,8 @@ export interface AgentAdapter {
 export interface FakeAgentAdapterOptions {
   /** The conversation id every run reports (so the daemon can thread `resume` across turns). */
   readonly sessionId?: string;
-  /** Invoked once per `run` with the turn's prompt + the `resume` id it was called with. */
-  readonly onRun?: (call: { prompt: string; resume?: string }) => void;
+  /** Invoked once per `run` with the turn's prompt + the `resume` id / `forkSession` flag it was called with. */
+  readonly onRun?: (call: { prompt: string; resume?: string; forkSession?: boolean }) => void;
 }
 
 /**
@@ -92,9 +99,13 @@ export function createFakeAgentAdapter(
   return {
     async run(
       prompt: string,
-      { canUseTool, onEvent, resume }: AgentRunOptions,
+      { canUseTool, onEvent, resume, forkSession }: AgentRunOptions,
     ): Promise<AgentRunResult> {
-      options.onRun?.({ prompt, ...(resume !== undefined ? { resume } : {}) });
+      options.onRun?.({
+        prompt,
+        ...(resume !== undefined ? { resume } : {}),
+        ...(forkSession !== undefined ? { forkSession } : {}),
+      });
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
       const denied: string[] = [];

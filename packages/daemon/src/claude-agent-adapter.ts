@@ -47,7 +47,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
   return {
     async run(
       prompt: string,
-      { canUseTool, onEvent, resume, cwd, signal, permissionMode }: AgentRunOptions,
+      { canUseTool, onEvent, resume, forkSession, cwd, signal, permissionMode }: AgentRunOptions,
     ): Promise<AgentRunResult> {
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
@@ -115,6 +115,9 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           // Run in the session's worktree so parallel agents never clobber each other's files.
           ...(cwd ? { cwd } : {}),
           ...(resume ? { resume } : {}),
+          // Fork the resumed conversation (free-form handover): a new SDK session id + its own transcript,
+          // so taking over an adopted session never writes into the still-live external process's transcript.
+          ...(resume && forkSession ? { forkSession: true } : {}),
           ...(options.model ? { model: options.model } : {}),
           ...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
         },

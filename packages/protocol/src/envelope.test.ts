@@ -127,6 +127,12 @@ describe('envelope E2E routing-metadata fields (Phase 3)', () => {
   it('recognizes session.adopted as a valid message type (adopted sessions)', () => {
     expect(safeParseEnvelope({ ...validWire, type: 'session.adopted' }).success).toBe(true);
   });
+
+  it('recognizes the free-form handover message types (Journey 4)', () => {
+    for (const type of ['agent.handover', 'handover.answer', 'session.chained'] as const) {
+      expect(safeParseEnvelope({ ...validWire, type }).success).toBe(true);
+    }
+  });
 });
 
 describe('makeEnvelope routing-metadata fields', () => {

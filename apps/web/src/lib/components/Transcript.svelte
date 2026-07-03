@@ -3,6 +3,7 @@
 
   import type { TranscriptEntry } from '$lib/session';
 
+  import HandoverCard from './HandoverCard.svelte';
   import MessageBody from './MessageBody.svelte';
   import PermissionGate from './PermissionGate.svelte';
   import QuestionGate from './QuestionGate.svelte';
@@ -19,11 +20,13 @@
     onapprove,
     onreject,
     onanswer,
+    onhandover,
   }: {
     entries: readonly TranscriptEntry[];
     onapprove: (requestId: string) => void;
     onreject: (requestId: string) => void;
     onanswer: (requestId: string, answers: QuestionAnswerItem[]) => void;
+    onhandover: (requestId: string, answerText: string) => void;
   } = $props();
 
   let listEl = $state<HTMLDivElement>();
@@ -70,8 +73,10 @@
           onapprove={() => onapprove(entry.requestId)}
           onreject={() => onreject(entry.requestId)}
         />
-      {:else}
+      {:else if entry.kind === 'question'}
         <QuestionGate {entry} onanswer={(answers) => onanswer(entry.requestId, answers)} />
+      {:else}
+        <HandoverCard {entry} onanswer={(answerText) => onhandover(entry.requestId, answerText)} />
       {/if}
     </div>
   {/each}

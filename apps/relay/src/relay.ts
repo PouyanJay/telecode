@@ -8,6 +8,7 @@ import {
   makeEnvelope,
   parseEnvelope,
   sessionAdoptedPayloadSchema,
+  sessionChainedPayloadSchema,
   sessionEndedPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
@@ -146,6 +147,9 @@ const CACHEABLE_TYPES = new Set<string>([
   'agent.tool_use',
   'agent.permission_request',
   'agent.question',
+  // A free-form handover offer (Journey 4) is a standing, actionable offer — cache it so a browser that
+  // reopens before answering still sees the "continue here" card (unlike the transient `agent.notice`).
+  'agent.handover',
   'session.ended',
   'session.key',
 ]);
@@ -444,6 +448,68 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     if (envelope.type === 'session.adopted') {
       return;
     }
+    // Free-form handover (Journey 4): the user took over an adopted session's free-form question, so the
+    // daemon launches a telecode-OWNED continuation that resumes the conversation and announces it here (no
+    // id yet). Mint a `launched` row linked to the adopted parent via `parentSessionId`, ACK the daemon with
+    // the minted id (so it can drive the child's turns), and broadcast it to the browsers — the mirror of
+    // `session.adopted`, but launched. Routing metadata only; the relay never reads the agent payload.
+    if (
+      envelope.type === 'session.chained' &&
+      sessionRegistry &&
+      envelope.session_id === undefined
+    ) {
+      const parsed = sessionChainedPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) {
+        log.warn({ channel }, 'relay: dropped session.chained with invalid payload');
+        return;
+      }
+      const { clientRef, parentSessionId, title, cwd } = parsed.data;
+      const sessionId = await sessionRegistry.createSession({
+        userId: envelope.user_id,
+        deviceId: envelope.device_id,
+        origin: 'launched',
+        parentSessionId,
+        ...(title !== undefined ? { title } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
+      });
+      log.info(
+        { channel, sessionId, parentSessionId },
+        'relay: session chained (handover continuation)',
+      );
+      daemons.get(channel)?.send(
+        JSON.stringify(
+          makeEnvelope({
+            type: 'session.chained',
+            userId: envelope.user_id,
+            deviceId: envelope.device_id,
+            sessionId,
+            payload: { clientRef, parentSessionId },
+          }),
+        ),
+      );
+      broadcastToBrowsers(
+        channel,
+        JSON.stringify(
+          makeEnvelope({
+            type: 'session.chained',
+            userId: envelope.user_id,
+            deviceId: envelope.device_id,
+            sessionId,
+            payload: {
+              clientRef,
+              parentSessionId,
+              ...(title !== undefined ? { title } : {}),
+              ...(cwd !== undefined ? { cwd } : {}),
+            },
+          }),
+        ),
+      );
+      return;
+    }
+    // A `session.chained` already carrying an id is handled above; drop stragglers rather than broadcasting.
+    if (envelope.type === 'session.chained') {
+      return;
+    }
     // `session.ended` is terminal: get DONE to the watching browser IMMEDIATELY, then persist. The browser
     // is the live view and the daemon is the source of truth, so making the operator wait on a DB
     // round-trip to see the run finish — slow on a cold/auto-pausing DB — is the wrong tradeoff here. (The
@@ -473,11 +539,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session running');
       } else if (
         envelope.type === 'agent.permission_request' ||
-        envelope.type === 'agent.question'
+        envelope.type === 'agent.question' ||
+        envelope.type === 'agent.handover'
       ) {
-        // The run is blocked on a human decision or a question (an adopted session's AskUserQuestion):
-        // persist `awaiting_input` BEFORE broadcasting it, so any browser that reacts already observes the
-        // paused status. Both pause the session the same way — type-only, payload-blind under E2E.
+        // The session needs the human: a permission decision, an `AskUserQuestion`, or a free-form handover
+        // offer (an adopted session ended its turn asking a free-form question, Journey 4). All pause the
+        // session on `awaiting_input` — persist it BEFORE broadcasting, so any browser that reacts already
+        // observes the paused status. Type-only, payload-blind under E2E. (`agent.handover` never blocks the
+        // daemon's hook; it just marks the session as needing a look until the user takes it over or not.)
         await sessionRegistry.markAwaitingInput({
           userId: envelope.user_id,
           sessionId: envelope.session_id,

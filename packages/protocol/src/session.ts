@@ -284,6 +284,50 @@ export const questionAnswerPayloadSchema = z.object({
 export type QuestionAnswerPayload = z.infer<typeof questionAnswerPayloadSchema>;
 
 /**
+ * Payload for `agent.handover` (daemon → web, Journey 4 / Tier 4): an adopted session ended its turn asking
+ * a **free-form** question — prose, no tool call — so there is no `PreToolUse` gate to answer through.
+ * Rather than a dead "answer at your device" wall, telecode offers to take the conversation over: this
+ * message is a NON-blocking offer carrying the exact `question` (Claude Code's `Stop` hook
+ * `last_assistant_message`) and a deterministic `summary` of recent context. The human's reply
+ * ({@link handoverAnswerPayloadSchema}) launches a telecode-owned continuation that **resumes** the same
+ * conversation. `requestId` correlates the offer with its answer. `summary` may be empty (little context).
+ * Bounds keep a long transcript from bloating the encrypted frame.
+ */
+export const agentHandoverPayloadSchema = z.object({
+  requestId: z.string().min(1),
+  question: z.string().min(1).max(8000),
+  summary: z.string().max(8000),
+});
+export type AgentHandoverPayload = z.infer<typeof agentHandoverPayloadSchema>;
+
+/**
+ * Payload for `handover.answer` (web → daemon, Journey 4): the human's free-text answer to a pending
+ * {@link agentHandoverPayloadSchema}. It triggers the daemon to launch a forked, telecode-owned session
+ * that resumes the adopted conversation (`resume` + `forkSession`) with `answerText` as the next turn.
+ * Unlike `question.answer` this is an **action trigger**, not deny-feedback. `requestId` ties it to the offer.
+ */
+export const handoverAnswerPayloadSchema = z.object({
+  requestId: z.string().min(1),
+  answerText: z.string().min(1).max(8000),
+});
+export type HandoverAnswerPayload = z.infer<typeof handoverAnswerPayloadSchema>;
+
+/**
+ * Payload for `session.chained` (daemon → relay → browser, Journey 4): the daemon registers the forked
+ * continuation that resumes an adopted conversation, so the relay mints a registry row (`origin: 'launched'`)
+ * linked to the adopted parent via `parentSessionId`. Symmetric with {@link sessionAdoptedPayloadSchema} —
+ * `clientRef` is the daemon's correlation token, echoed back with the minted telecode `session_id` — but the
+ * child is a telecode-owned launched session, and `parentSessionId` records the adopted → launched migration.
+ */
+export const sessionChainedPayloadSchema = z.object({
+  clientRef: z.string().min(1).max(256),
+  parentSessionId: z.string().min(1).max(256),
+  title: z.string().min(1).max(512).optional(),
+  cwd: z.string().min(1).max(1024).optional(),
+});
+export type SessionChainedPayload = z.infer<typeof sessionChainedPayloadSchema>;
+
+/**
  * Payload for `user.message` (web → daemon): a follow-up instruction the human sends to steer an
  * already-launched session. The daemon resumes the same agent conversation for the next turn (the
  * session id is on the envelope).
@@ -336,6 +380,16 @@ export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
     requestId: z.string().min(1),
     questions: z.array(agentQuestionItemSchema).min(1),
     answers: z.array(questionAnswerItemSchema).optional(),
+  }),
+  // A free-form handover offer (Journey 4). Carries the exact question + summary so a replay can render the
+  // "continue here" card; `answerText` is present once the human took it over (resolved) and absent while
+  // the offer is still open — the same decided-vs-pending distinction as `permission` / `question` entries.
+  z.object({
+    kind: z.literal('handover'),
+    requestId: z.string().min(1),
+    question: z.string().min(1),
+    summary: z.string(),
+    answerText: z.string().min(1).optional(),
   }),
 ]);
 export type SessionHistoryEntry = z.infer<typeof sessionHistoryEntrySchema>;
