@@ -432,4 +432,32 @@ describe('session reducer: free-form handover (Journey 4)', () => {
     // Still pending (not submitting/submitted) → nothing to link, same state reference back.
     expect(linkHandoverChild(state, 'child-sess-1')).toBe(state);
   });
+
+  it('backfills all three decision kinds (permission + question + handover) in one adopted transcript', () => {
+    const state = applyEnvelope(
+      startingState(),
+      frame('session.history', {
+        status: 'awaiting_input',
+        entries: [
+          { kind: 'user', text: 'help me set up the db' },
+          { kind: 'permission', requestId: 'p1', toolName: 'Bash', input: {}, decision: 'allow' },
+          {
+            kind: 'question',
+            requestId: 'q1',
+            questions: [DB_QUESTION],
+            answers: [{ selectedLabels: ['Postgres'] }],
+          },
+          { kind: 'handover', requestId: 'h1', question: 'Which region?', summary: '' },
+        ],
+      }),
+    );
+    const kinds = state.entries.map((e) => e.kind);
+    expect(kinds).toEqual(['user', 'permission', 'question', 'handover']);
+    const permission = state.entries[1];
+    const question = state.entries[2];
+    const handover = state.entries[3];
+    expect(permission?.kind === 'permission' && permission.decision).toBe('approved');
+    expect(question?.kind === 'question' && question.answer).toBe('answered');
+    expect(handover?.kind === 'handover' && handover.state).toBe('pending');
+  });
 });

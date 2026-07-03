@@ -373,6 +373,46 @@ describe('daemon: free-form handover & resume', () => {
     expect(typeof offer.payload).toBe('string');
   });
 
+  it('does not offer a handover while a permission gate is already pending', async () => {
+    await start(createFakeAgentAdapter([]));
+    await adopt(relay, socketPath);
+
+    // A consequential tool blocks on the approval gate → the session is awaiting_input.
+    const gate = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Bash',
+      tool_input: { command: 'ls' },
+      tool_use_id: 't1',
+    });
+    gate.catch(() => undefined);
+    const request = await relay.waitForFrame((e) => e.type === 'agent.permission_request');
+    const requestId = (request.payload as { requestId: string }).requestId;
+
+    // While a gate is showing, a free-form Stop must NOT stack a handover offer on top of it.
+    await hookRpc(socketPath, stopEvent('Should I proceed with plan A?'));
+
+    // Resolve the gate → running again → a later question offers, and the FIRST handover frame carries
+    // THAT question — proving the Stop-during-gate above produced no offer.
+    relay.send(
+      makeEnvelope({
+        type: 'permission.decision',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: PARENT_SESSION,
+        payload: { requestId, behavior: 'allow' },
+      }),
+    );
+    await gate;
+    await hookRpc(socketPath, stopEvent('Which region should we deploy to?'));
+
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    expect((offer.payload as { question: string }).question).toBe(
+      'Which region should we deploy to?',
+    );
+  });
+
   it('does not offer for a denylisted cwd, honoring a mid-session policy change', async () => {
     await start(createFakeAgentAdapter([]));
     await adopt(relay, socketPath);
