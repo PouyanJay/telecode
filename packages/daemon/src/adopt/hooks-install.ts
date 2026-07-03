@@ -14,9 +14,15 @@ import { stripTelecodeHooks } from './strip-telecode-hooks';
  *  - `SessionStart` — adopt a session before its first tool, incl. chat-only ones (Journey 3).
  *  - `SessionEnd` — end the adopted session when the Claude Code process exits (Journey 3).
  *  - `Notification` — surface "needs attention / went idle" cues (Journey 3).
- * (`Stop` is reserved for the free-form handover detector in a later journey.)
+ *  - `Stop` — detect a free-form question at turn end and offer to take it over (Journey 4).
  */
-const TELECODE_HOOK_EVENTS = ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification'] as const;
+const TELECODE_HOOK_EVENTS = [
+  'PreToolUse',
+  'SessionStart',
+  'SessionEnd',
+  'Notification',
+  'Stop',
+] as const;
 
 export interface InstallHooksOptions {
   readonly settingsPath: string;

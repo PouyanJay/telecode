@@ -52,10 +52,11 @@ describe('hooks installer', () => {
     const group = settings.hooks.PreToolUse[0]!;
     expect(group.matcher).toBe('*');
     expect(group.hooks[0]).toMatchObject({ type: 'command', command: COMMAND, timeout: 3600 });
-    // All four lifecycle events telecode adopts on (Journey 1–3): gate/question + adopt/end + attention.
+    // All five lifecycle events telecode adopts on (Journey 1–4): gate/question + adopt/end + attention +
+    // the free-form handover detector (Stop).
     expect(await readHooksStatus({ settingsPath })).toEqual({
       installed: true,
-      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification'],
+      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification', 'Stop'],
     });
   });
 
@@ -78,14 +79,20 @@ describe('hooks installer', () => {
     await installHooks({ settingsPath, command: COMMAND });
     const settings = (await read()) as {
       model?: string;
-      hooks: { PreToolUse: { hooks: { command: string }[] }[]; Stop?: unknown[] };
+      hooks: {
+        PreToolUse: { hooks: { command: string }[] }[];
+        Stop: { hooks: { command: string }[] }[];
+      };
     };
 
     expect(settings.model).toBe('claude-opus');
-    const commands = settings.hooks.PreToolUse.flatMap((g) => g.hooks.map((h) => h.command));
-    expect(commands).toContain('my-linter');
-    expect(commands).toContain(COMMAND);
-    expect(settings.hooks.Stop).toBeDefined();
+    const preCommands = settings.hooks.PreToolUse.flatMap((g) => g.hooks.map((h) => h.command));
+    expect(preCommands).toContain('my-linter');
+    expect(preCommands).toContain(COMMAND);
+    // telecode now installs a Stop hook too (Journey 4) — the user's own Stop hook is preserved alongside it.
+    const stopCommands = settings.hooks.Stop.flatMap((g) => g.hooks.map((h) => h.command));
+    expect(stopCommands).toContain('notify-me');
+    expect(stopCommands).toContain(COMMAND);
   });
 
   it('uninstall removes telecode hooks but keeps the user’s (and prunes empties)', async () => {

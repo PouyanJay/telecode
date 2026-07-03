@@ -10,6 +10,7 @@
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
     answer,
+    answerHandover,
     connectionState,
     decide,
     sendControl,
@@ -43,9 +44,19 @@
   const connected = $derived($connectionState === 'connected');
   const isTerminal = $derived(session.status === 'done' || session.status === 'error');
   const showControls = $derived(known && session.status !== 'idle');
-  // The session's first prompt names it (in the header + browser tab); fall back to the short id.
+  // The session's first prompt names it (in the header + browser tab); fall back to a short id prefix.
+  const SESSION_ID_DISPLAY_LENGTH = 12;
   const sessionTitle = $derived(
-    session.entries.find((e) => e.kind === 'user')?.text ?? sessionId.slice(0, 12),
+    session.entries.find((e) => e.kind === 'user')?.text ??
+      sessionId.slice(0, SESSION_ID_DISPLAY_LENGTH),
+  );
+
+  // A forked handover continuation links back to the adopted session it continues (Journey 4): live from
+  // the daemon's session.chained, or from the persisted registry on a cold reload.
+  const parentSessionId = $derived(
+    session.parentSessionId ??
+      data.sessions.find((s) => s.id === sessionId)?.parentSessionId ??
+      null,
   );
 
   function onControl(action: SessionControlAction): void {
@@ -79,6 +90,10 @@
   function onAnswer(requestId: string, answers: QuestionAnswerItem[]): void {
     answer(sessionId, { requestId, answers });
   }
+
+  function onHandover(requestId: string, answerText: string): void {
+    answerHandover(sessionId, { requestId, answerText });
+  }
 </script>
 
 <svelte:head>
@@ -101,6 +116,11 @@
 
   <div class="body">
     <div class="stream-col">
+      {#if parentSessionId}
+        <a class="continued-from" href={`/sessions/${parentSessionId}`}>
+          ← Continued from an adopted session
+        </a>
+      {/if}
       {#if known && showNotice && session.notice}
         <SessionNotice
           message={session.notice}
@@ -124,9 +144,11 @@
       {:else}
         <Transcript
           entries={session.entries}
+          offline={session.status === 'offline_paused'}
           onapprove={() => onDecide('allow')}
           onreject={() => onDecide('deny')}
           onanswer={onAnswer}
+          onhandover={onHandover}
         />
       {/if}
 
@@ -166,6 +188,22 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+  }
+  .continued-from {
+    align-self: flex-start;
+    margin: var(--space-3) var(--space-4) 0;
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+  }
+  .continued-from:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+  .continued-from:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus-ring);
   }
   .placeholder {
     flex: 1;

@@ -3,6 +3,7 @@
 
   import type { TranscriptEntry } from '$lib/session';
 
+  import HandoverCard from './HandoverCard.svelte';
   import MessageBody from './MessageBody.svelte';
   import PermissionGate from './PermissionGate.svelte';
   import QuestionGate from './QuestionGate.svelte';
@@ -16,14 +17,19 @@
    */
   let {
     entries,
+    offline = false,
     onapprove,
     onreject,
     onanswer,
+    onhandover,
   }: {
     entries: readonly TranscriptEntry[];
+    /** The device is offline — degrades a pending free-form handover to its "answer at your device" state. */
+    offline?: boolean;
     onapprove: (requestId: string) => void;
     onreject: (requestId: string) => void;
     onanswer: (requestId: string, answers: QuestionAnswerItem[]) => void;
+    onhandover: (requestId: string, answerText: string) => void;
   } = $props();
 
   let listEl = $state<HTMLDivElement>();
@@ -70,8 +76,14 @@
           onapprove={() => onapprove(entry.requestId)}
           onreject={() => onreject(entry.requestId)}
         />
-      {:else}
+      {:else if entry.kind === 'question'}
         <QuestionGate {entry} onanswer={(answers) => onanswer(entry.requestId, answers)} />
+      {:else}
+        <HandoverCard
+          {entry}
+          {offline}
+          onanswer={(answerText) => onhandover(entry.requestId, answerText)}
+        />
       {/if}
     </div>
   {/each}

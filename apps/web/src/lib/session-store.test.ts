@@ -6,6 +6,7 @@ import { type RelayConnection, type RelayConnectionOptions } from './relay-clien
 import {
   adoptState,
   answer,
+  answerHandover,
   connect,
   disconnect,
   launch,
@@ -29,6 +30,7 @@ function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
   const subscribed: string[] = [];
   const answered: { sessionId: string; payload: unknown }[] = [];
+  const handovers: { sessionId: string; payload: unknown }[] = [];
   const adoptConfigs: (AdoptSettings | undefined)[] = [];
   let emit: (envelope: ReturnType<typeof makeEnvelope>) => void = () => undefined;
   let emitAdoptState: (state: AdoptSettings) => void = () => undefined;
@@ -44,6 +46,7 @@ function makeFakeConnection() {
       sendUserMessage: () => undefined,
       decide: () => undefined,
       answer: (sessionId, payload) => answered.push({ sessionId, payload }),
+      answerHandover: (sessionId, payload) => handovers.push({ sessionId, payload }),
       control: () => undefined,
       sendAdoptConfig: (set) => adoptConfigs.push(set),
       close: () => undefined,
@@ -54,6 +57,7 @@ function makeFakeConnection() {
     launched,
     subscribed,
     answered,
+    handovers,
     adoptConfigs,
     /** Simulate the daemon's sealed adopt.state reply (after the relay-client opens it). */
     adoptStateReply(state: AdoptSettings) {
@@ -78,6 +82,30 @@ function makeFakeConnection() {
               },
             ],
           },
+        }),
+      );
+    },
+    /** Simulate the daemon offering a free-form handover on an adopted session (Journey 4). */
+    handover(sessionId: string, requestId: string) {
+      emit(
+        makeEnvelope({
+          type: 'agent.handover',
+          userId,
+          deviceId,
+          sessionId,
+          payload: { requestId, question: 'Which database?', summary: 'scaffolding an API' },
+        }),
+      );
+    },
+    /** Simulate the daemon registering a forked continuation linked to its parent (Journey 4). */
+    chained(childSessionId: string, parentSessionId: string) {
+      emit(
+        makeEnvelope({
+          type: 'session.chained',
+          userId,
+          deviceId,
+          sessionId: childSessionId,
+          payload: { clientRef: 'fork-1', parentSessionId },
         }),
       );
     },
@@ -201,6 +229,35 @@ describe('session-store launch correlation (Task 11)', () => {
         payload: { requestId: 'q1', answers: [{ selectedLabels: ['Postgres'] }] },
       },
     ]);
+  });
+
+  it('takes over a handover and links parent ↔ child on session.chained (Journey 4)', () => {
+    // Real relay-minted UUIDs — session.chained's parentSessionId is validated as a UUID on the wire.
+    const parentId = '11111111-1111-1111-1111-111111111111';
+    const childId = '22222222-2222-2222-2222-222222222222';
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started(parentId);
+    fake.handover(parentId, 'h1');
+
+    answerHandover(parentId, { requestId: 'h1', answerText: 'Use Postgres.' });
+    // Marked in-flight locally (submitting) and forwarded to the relay.
+    expect(fake.handovers).toEqual([
+      { sessionId: parentId, payload: { requestId: 'h1', answerText: 'Use Postgres.' } },
+    ]);
+
+    // The daemon registers the forked continuation → parent ↔ child linked across sessions.
+    fake.chained(childId, parentId);
+    const map = get(sessions);
+    const parentEntry = map.get(parentId)?.entries.find((e) => e.kind === 'handover');
+    expect(parentEntry?.kind).toBe('handover');
+    if (parentEntry?.kind === 'handover') {
+      expect(parentEntry.childSessionId).toBe(childId);
+    }
+    expect(map.get(childId)?.parentSessionId).toBe(parentId);
   });
 
   it('reads + writes the adoption policy and surfaces adopt.state (Journey 3)', () => {

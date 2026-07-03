@@ -8,6 +8,9 @@ import {
   initialSessionState,
   markAnswering,
   markDeciding,
+  linkHandoverChild,
+  markHandoverSubmitting,
+  pendingHandover,
   pendingPermission,
   pendingQuestion,
   startingState,
@@ -343,5 +346,118 @@ describe('session reducer: adopted-session notice (Journey 3)', () => {
 describe('session status coverage', () => {
   it.each(SESSION_STATUSES)('has a display mapping for %s', (status) => {
     expect(SESSION_DISPLAY[status]).toBeDefined();
+  });
+});
+
+describe('session reducer: free-form handover (Journey 4)', () => {
+  const HANDOVER = {
+    requestId: 'h1',
+    question: 'Which database should we use?',
+    summary: 'scaffolding an API',
+  };
+
+  it('surfaces an agent.handover as awaiting_input with a pending, actionable offer', () => {
+    const state = fold([frame('session.started', {}), frame('agent.handover', HANDOVER)]);
+    expect(state.status).toBe('awaiting_input');
+    const pending = pendingHandover(state);
+    expect(pending?.kind).toBe('handover');
+    if (pending?.kind === 'handover') {
+      expect(pending.requestId).toBe('h1');
+      expect(pending.question).toContain('database');
+      expect(pending.summary).toBe('scaffolding an API');
+    }
+  });
+
+  it('marks a take-over in-flight (submitting) and confirms it on the next frame', () => {
+    let state = fold([frame('session.started', {}), frame('agent.handover', HANDOVER)]);
+    state = markHandoverSubmitting(state, 'h1', 'Use Postgres.');
+    const submitting = state.entries.find((e) => e.kind === 'handover');
+    expect(submitting?.kind === 'handover' && submitting.state).toBe('submitting');
+    expect(submitting?.kind === 'handover' && submitting.answerText).toBe('Use Postgres.');
+    expect(pendingHandover(state)).toBeUndefined();
+
+    // The daemon's next frame (the parent ending — the conversation migrated) confirms the take-over.
+    state = applyEnvelope(state, frame('session.ended', { status: 'done' }));
+    const submitted = state.entries.find((e) => e.kind === 'handover');
+    expect(submitted?.kind === 'handover' && submitted.state).toBe('submitted');
+    expect(state.status).toBe('done');
+  });
+
+  it('closes a still-pending handover when the session ends (no dead, clickable card)', () => {
+    let state = fold([frame('session.started', {}), frame('agent.handover', HANDOVER)]);
+    state = applyEnvelope(state, frame('session.ended', { status: 'done' }));
+    const closed = state.entries.find((e) => e.kind === 'handover');
+    expect(closed?.kind === 'handover' && closed.state).toBe('closed');
+    expect(pendingHandover(state)).toBeUndefined();
+  });
+
+  it('backfills an answered handover as submitted, an unanswered one as pending', () => {
+    const state = applyEnvelope(
+      startingState(),
+      frame('session.history', {
+        status: 'done',
+        entries: [
+          {
+            kind: 'handover',
+            requestId: 'h1',
+            question: 'Which DB?',
+            summary: '',
+            answerText: 'Postgres',
+          },
+          { kind: 'handover', requestId: 'h2', question: 'Which region?', summary: '' },
+        ],
+      }),
+    );
+    const [a, b] = state.entries;
+    expect(a?.kind === 'handover' && a.state).toBe('submitted');
+    expect(a?.kind === 'handover' && a.answerText).toBe('Postgres');
+    expect(b?.kind === 'handover' && b.state).toBe('pending');
+  });
+
+  it('ignores an agent.handover with an invalid payload', () => {
+    const state = applyEnvelope(startingState(), frame('agent.handover', { requestId: 'h1' }));
+    expect(state.entries).toHaveLength(0);
+  });
+
+  it('links the taken-over handover to its forked continuation (childSessionId)', () => {
+    let state = fold([frame('session.started', {}), frame('agent.handover', HANDOVER)]);
+    state = markHandoverSubmitting(state, 'h1', 'Use Postgres.');
+    state = linkHandoverChild(state, 'child-sess-1');
+    const linked = state.entries.find((e) => e.kind === 'handover');
+    expect(linked?.kind === 'handover' && linked.childSessionId).toBe('child-sess-1');
+  });
+
+  it('does not link when there is no taken-over handover to link', () => {
+    const state = fold([frame('session.started', {}), frame('agent.handover', HANDOVER)]);
+    // Still pending (not submitting/submitted) → nothing to link, same state reference back.
+    expect(linkHandoverChild(state, 'child-sess-1')).toBe(state);
+  });
+
+  it('backfills all three decision kinds (permission + question + handover) in one adopted transcript', () => {
+    const state = applyEnvelope(
+      startingState(),
+      frame('session.history', {
+        status: 'awaiting_input',
+        entries: [
+          { kind: 'user', text: 'help me set up the db' },
+          { kind: 'permission', requestId: 'p1', toolName: 'Bash', input: {}, decision: 'allow' },
+          {
+            kind: 'question',
+            requestId: 'q1',
+            questions: [DB_QUESTION],
+            answers: [{ selectedLabels: ['Postgres'] }],
+          },
+          { kind: 'handover', requestId: 'h1', question: 'Which region?', summary: '' },
+        ],
+      }),
+    );
+    const kinds = state.entries.map((e) => e.kind);
+    expect(kinds).toEqual(['user', 'permission', 'question', 'handover']);
+    const permission = state.entries[1];
+    const question = state.entries[2];
+    const handover = state.entries[3];
+    expect(permission?.kind === 'permission' && permission.decision).toBe('approved');
+    expect(question?.kind === 'question' && question.answer).toBe('answered');
+    expect(handover?.kind === 'handover' && handover.state).toBe('pending');
   });
 });

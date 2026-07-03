@@ -16,6 +16,11 @@ export interface SessionSummary {
   readonly status: SessionStatusName;
   /** `launched` (started from telecode) or `external` (a user's own Claude Code session telecode adopted). */
   readonly origin: SessionOrigin;
+  /**
+   * The adopted session this one continues (free-form handover, Journey 4), or `null` for an unchained
+   * session. Set on a forked continuation so the dashboard can link parent ↔ child.
+   */
+  readonly parentSessionId: string | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly endedAt: Date | null;
@@ -39,6 +44,8 @@ export interface SessionRegistry {
     origin?: SessionOrigin;
     title?: string;
     cwd?: string;
+    /** Link to the adopted session this one continues (free-form handover, Journey 4). */
+    parentSessionId?: string;
   }): Promise<string>;
   /** List the user's sessions, newest first (RLS-scoped). Powers the dashboard list + reconnect. */
   listByUser(userId: string): Promise<SessionSummary[]>;
@@ -66,7 +73,14 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
   }
 
   return {
-    async createSession({ userId, deviceId, origin, title, cwd }): Promise<string> {
+    async createSession({
+      userId,
+      deviceId,
+      origin,
+      title,
+      cwd,
+      parentSessionId,
+    }): Promise<string> {
       const sessionOrigin: SessionOrigin = origin ?? 'launched';
       // An adopted session is already running on the user's machine; a launched one is just starting.
       const status: SessionStatusName = sessionOrigin === 'external' ? 'running' : 'starting';
@@ -80,6 +94,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             status,
             ...(title !== undefined ? { title } : {}),
             ...(cwd !== undefined ? { cwd } : {}),
+            ...(parentSessionId !== undefined ? { parentSessionId } : {}),
           })
           .returning({ id: sessions.id });
         if (!row) {
@@ -98,6 +113,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             title: sessions.title,
             status: sessions.status,
             origin: sessions.origin,
+            parentSessionId: sessions.parentSessionId,
             createdAt: sessions.createdAt,
             updatedAt: sessions.updatedAt,
             endedAt: sessions.endedAt,

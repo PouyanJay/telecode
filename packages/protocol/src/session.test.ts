@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
   adoptConfigPayloadSchema,
   adoptStatePayloadSchema,
+  agentHandoverPayloadSchema,
   agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
   agentQuestionPayloadSchema,
+  handoverAnswerPayloadSchema,
   permissionDecisionPayloadSchema,
   questionAnswerPayloadSchema,
   sessionAdoptedPayloadSchema,
+  sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
   sessionHistoryPayloadSchema,
   sessionKeyPayloadSchema,
@@ -463,6 +466,124 @@ describe('sessionAdoptedPayloadSchema (adopted sessions)', () => {
   it('rejects an announce without a clientRef (the daemon↔id correlation)', () => {
     expect(sessionAdoptedPayloadSchema.safeParse({ title: 'x' }).success).toBe(false);
     expect(sessionAdoptedPayloadSchema.safeParse({ clientRef: '' }).success).toBe(false);
+  });
+});
+
+/**
+ * The free-form handover messages (Journey 4 / Tier 4). When an adopted session ends its turn asking a
+ * free-form question, telecode offers to take it over by resuming the conversation under its own control.
+ * `agent.handover` (daemon → web) is a NON-blocking offer carrying the exact question + a handover summary;
+ * `handover.answer` (web → daemon) carries the user's answer, which triggers a forked telecode-owned
+ * continuation; `session.chained` (daemon → relay → browser) registers that continuation linked to the
+ * adopted row via `parentSessionId`.
+ */
+describe('agentHandoverPayloadSchema (free-form handover offer)', () => {
+  it('parses an offer carrying the exact question and a summary', () => {
+    const parsed = agentHandoverPayloadSchema.parse({
+      requestId: 'h1',
+      question: 'Which database should we use for the app?',
+      summary: 'The session was scaffolding a new API and asked about storage.',
+    });
+    expect(parsed.requestId).toBe('h1');
+    expect(parsed.question).toContain('database');
+  });
+
+  it('accepts an empty summary (deterministic extraction may find little context)', () => {
+    expect(
+      agentHandoverPayloadSchema.parse({ requestId: 'h1', question: 'Ready?', summary: '' })
+        .summary,
+    ).toBe('');
+  });
+
+  it('rejects a missing correlation id or an empty question', () => {
+    expect(
+      agentHandoverPayloadSchema.safeParse({ requestId: '', question: 'q', summary: '' }).success,
+    ).toBe(false);
+    expect(
+      agentHandoverPayloadSchema.safeParse({ requestId: 'h1', question: '', summary: '' }).success,
+    ).toBe(false);
+  });
+});
+
+describe('handoverAnswerPayloadSchema (the user takes over remotely)', () => {
+  it('parses the free-text answer that seeds the resumed turn', () => {
+    const parsed = handoverAnswerPayloadSchema.parse({
+      requestId: 'h1',
+      answerText: 'Use Postgres.',
+    });
+    expect(parsed.answerText).toBe('Use Postgres.');
+  });
+
+  it('rejects an empty answer or a missing correlation id', () => {
+    expect(handoverAnswerPayloadSchema.safeParse({ requestId: 'h1', answerText: '' }).success).toBe(
+      false,
+    );
+    expect(handoverAnswerPayloadSchema.safeParse({ requestId: '', answerText: 'x' }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe('sessionChainedPayloadSchema (forked continuation registration)', () => {
+  // parentSessionId is a relay-minted session id — validated as a UUID on the wire.
+  const PARENT = '11111111-1111-1111-1111-111111111111';
+
+  it('parses a child registration linked to its parent', () => {
+    const parsed = sessionChainedPayloadSchema.parse({
+      clientRef: 'fork-1',
+      parentSessionId: PARENT,
+      title: 'Continue: database choice',
+      cwd: '/repo',
+    });
+    expect(parsed.parentSessionId).toBe(PARENT);
+    expect(parsed.clientRef).toBe('fork-1');
+  });
+
+  it('rejects a parentSessionId that is not a UUID', () => {
+    expect(
+      sessionChainedPayloadSchema.safeParse({ clientRef: 'fork-1', parentSessionId: 'p' }).success,
+    ).toBe(false);
+  });
+
+  it('requires both the correlation ref and the parent link (title/cwd optional)', () => {
+    const parsed = sessionChainedPayloadSchema.parse({
+      clientRef: 'fork-1',
+      parentSessionId: PARENT,
+    });
+    expect(parsed.title).toBeUndefined();
+    expect(sessionChainedPayloadSchema.safeParse({ clientRef: 'fork-1' }).success).toBe(false);
+    expect(sessionChainedPayloadSchema.safeParse({ parentSessionId: PARENT }).success).toBe(false);
+    expect(
+      sessionChainedPayloadSchema.safeParse({ clientRef: '', parentSessionId: PARENT }).success,
+    ).toBe(false);
+  });
+});
+
+describe('sessionHistoryPayloadSchema — handover entry (Journey 4)', () => {
+  it('backfills a pending handover offer (question + summary, no answer yet)', () => {
+    const parsed = sessionHistoryPayloadSchema.parse({
+      status: 'awaiting_input',
+      entries: [
+        { kind: 'handover', requestId: 'h1', question: 'Which DB?', summary: 'scaffolding an API' },
+      ],
+    });
+    expect(parsed.entries[0]).toMatchObject({ kind: 'handover', requestId: 'h1' });
+  });
+
+  it('backfills an answered handover (carries the answerText for the resolved state)', () => {
+    const parsed = sessionHistoryPayloadSchema.parse({
+      status: 'done',
+      entries: [
+        {
+          kind: 'handover',
+          requestId: 'h1',
+          question: 'Which DB?',
+          summary: '',
+          answerText: 'Postgres',
+        },
+      ],
+    });
+    expect(parsed.entries[0]).toMatchObject({ answerText: 'Postgres' });
   });
 });
 

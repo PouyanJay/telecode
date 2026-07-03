@@ -43,6 +43,13 @@
       "when": 1782840201170,
       "tag": "0005_session_origin",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1783042491278,
+      "tag": "0006_session_parent_id",
+      "breakpoints": true
     }
   ]
 }

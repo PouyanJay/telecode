@@ -1,5 +1,13 @@
 import { SESSION_ORIGINS, SESSION_STATUSES } from '@telecode/protocol';
-import { index, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
+import {
+  type AnyPgColumn,
+  index,
+  pgTable,
+  text,
+  timestamp,
+  unique,
+  uuid,
+} from 'drizzle-orm/pg-core';
 
 /**
  * The relay's persisted registries (the control plane owns DB access — see SUPABASE.md). Drizzle owns
@@ -76,6 +84,18 @@ export const sessions = pgTable(
      * to `launched` so every pre-existing row and every browser-initiated launch is unchanged.
      */
     origin: text('origin', { enum: SESSION_ORIGINS }).default('launched').notNull(),
+    /**
+     * The adopted session this one continues, for a free-form handover (Journey 4). When the user takes
+     * over an adopted session's free-form question, telecode launches a forked continuation whose
+     * `parent_session_id` points back at the adopted (`external`) row — recording the adopted → launched
+     * migration so the dashboard can link them. Null for every ordinary (unchained) session. Self-FK; a
+     * self-reference needs the {@link AnyPgColumn} return annotation on the thunk. `set null` on delete so a
+     * removed parent never orphan-deletes its telecode-owned continuation. Added in `0006_session_parent_id`;
+     * to reverse: drop the `sessions_parent_session_id_idx` index, the self-FK, then the column.
+     */
+    parentSessionId: uuid('parent_session_id').references((): AnyPgColumn => sessions.id, {
+      onDelete: 'set null',
+    }),
     /** Working directory the session runs in (single cwd in Phase 1; worktrees in Phase 2). */
     cwd: text('cwd'),
     permissionMode: text('permission_mode'),
@@ -86,6 +106,7 @@ export const sessions = pgTable(
   (t) => ({
     userIdx: index('sessions_user_id_idx').on(t.userId),
     deviceIdx: index('sessions_device_id_idx').on(t.deviceId),
+    parentIdx: index('sessions_parent_session_id_idx').on(t.parentSessionId),
   }),
 );
 

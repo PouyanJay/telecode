@@ -6,6 +6,7 @@ import {
   type AdoptStatePayload,
   type Envelope,
   type MessageType,
+  type HandoverAnswerPayload,
   type PermissionDecisionPayload,
   type QuestionAnswerPayload,
   type SessionControlAction,
@@ -70,6 +71,11 @@ export interface RelayConnection {
   decide(sessionId: string, decision: PermissionDecisionPayload): void;
   /** Send the human's answer to a pending `agent.question` on `sessionId` (adopted-session questions). */
   answer(sessionId: string, payload: QuestionAnswerPayload): void;
+  /**
+   * Take over a pending `agent.handover` on `sessionId` (Journey 4): the daemon forks-and-resumes the
+   * adopted conversation with this answer, migrating it to a telecode-owned continuation.
+   */
+  answerHandover(sessionId: string, payload: HandoverAnswerPayload): void;
   /** Send an operator control (interrupt / end) for `sessionId`. */
   control(sessionId: string, action: SessionControlAction): void;
   /**
@@ -264,6 +270,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     },
     answer(sessionId: string, payload: QuestionAnswerPayload): void {
       enqueueSend(() => sessionFrame('question.answer', sessionId, payload));
+    },
+    answerHandover(sessionId: string, payload: HandoverAnswerPayload): void {
+      enqueueSend(() => sessionFrame('handover.answer', sessionId, payload));
     },
     control(sessionId: string, action: SessionControlAction): void {
       enqueueSend(() => sessionFrame('session.control', sessionId, { action }));

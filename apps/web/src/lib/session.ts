@@ -1,4 +1,5 @@
 import {
+  agentHandoverPayloadSchema,
   agentMessagePayloadSchema,
   agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
@@ -32,6 +33,14 @@ export type DecisionState = 'pending' | 'approving' | 'rejecting' | 'approved' |
  */
 export type AnswerState = 'pending' | 'answering' | 'answered' | 'closed';
 
+/**
+ * Lifecycle of a free-form handover offer (Journey 4): `pending` shows the actionable "continue here" card;
+ * `submitting` is the verification-gated in-flight state after the user takes it over; `submitted` is
+ * confirmed (a forked continuation was launched — the parent session then ends); `closed` is an offer the
+ * session ended before the user took it up (the card disappears, honestly not taken over).
+ */
+export type HandoverState = 'pending' | 'submitting' | 'submitted' | 'closed';
+
 export type TranscriptEntry =
   | { readonly kind: 'user'; readonly id: string; readonly text: string }
   | { readonly kind: 'message'; readonly id: string; readonly text: string }
@@ -57,6 +66,20 @@ export type TranscriptEntry =
       readonly answer: AnswerState;
       /** The human's pick(s), one per question — present once answering/answered. */
       readonly answers?: readonly QuestionAnswerItem[];
+    }
+  | {
+      readonly kind: 'handover';
+      readonly id: string;
+      readonly requestId: string;
+      /** The exact free-form question the adopted session ended its turn on. */
+      readonly question: string;
+      /** Deterministic handover summary of recent context (may be empty). */
+      readonly summary: string;
+      readonly state: HandoverState;
+      /** The user's free-text answer — present once they took it over (submitting/submitted). */
+      readonly answerText?: string;
+      /** The forked continuation this handover launched — present once the daemon registered it (link target). */
+      readonly childSessionId?: string;
     };
 
 export interface SessionState {
@@ -71,6 +94,11 @@ export interface SessionState {
    * arrives (the session moved on). Non-blocking — distinct from the `awaiting_input` gate (Journey 3).
    */
   readonly notice: string | null;
+  /**
+   * The adopted session this one continues (free-form handover, Journey 4), or null when unchained. Set
+   * from the daemon's `session.chained` for a forked continuation, so the child can link back to its parent.
+   */
+  readonly parentSessionId: string | null;
 }
 
 export const initialSessionState: SessionState = {
@@ -79,11 +107,19 @@ export const initialSessionState: SessionState = {
   entries: [],
   seq: 0,
   notice: null,
+  parentSessionId: null,
 };
 
 /** Reset to a fresh transcript when launching a new session (the relay assigns the next id). */
 export function startingState(): SessionState {
-  return { sessionId: null, status: 'starting', entries: [], seq: 0, notice: null };
+  return {
+    sessionId: null,
+    status: 'starting',
+    entries: [],
+    seq: 0,
+    notice: null,
+    parentSessionId: null,
+  };
 }
 
 /**
@@ -109,6 +145,10 @@ function confirmInFlightActions(entries: readonly TranscriptEntry[]): readonly T
       changed = true;
       return { ...entry, answer: 'answered' as const };
     }
+    if (entry.kind === 'handover' && entry.state === 'submitting') {
+      changed = true;
+      return { ...entry, state: 'submitted' as const };
+    }
     return entry;
   });
   return changed ? next : entries;
@@ -130,6 +170,12 @@ function closeOpenGates(entries: readonly TranscriptEntry[]): readonly Transcrip
     if (entry.kind === 'question' && (entry.answer === 'pending' || entry.answer === 'answering')) {
       changed = true;
       return { ...entry, answer: 'closed' as const };
+    }
+    // A handover the user never took over (the session ended some other way) closes — the card disappears.
+    // A `submitting` one was already confirmed to `submitted` by confirmInFlightActions before this runs.
+    if (entry.kind === 'handover' && entry.state === 'pending') {
+      changed = true;
+      return { ...entry, state: 'closed' as const };
     }
     return entry;
   });
@@ -228,6 +274,29 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
       };
     }
 
+    case 'agent.handover': {
+      // A free-form handover offer (Journey 4): an adopted session ended its turn asking a free-form
+      // question. Park at awaiting_input and surface the actionable "continue here" card.
+      const parsed = agentHandoverPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return base;
+      return {
+        ...base,
+        status: 'awaiting_input',
+        entries: [
+          ...base.entries,
+          {
+            kind: 'handover',
+            id: `e${base.seq}`,
+            requestId: parsed.data.requestId,
+            question: parsed.data.question,
+            summary: parsed.data.summary,
+            state: 'pending',
+          },
+        ],
+        seq: base.seq + 1,
+      };
+    }
+
     case 'session.ended': {
       const parsed = sessionEndedPayloadSchema.safeParse(envelope.payload);
       return {
@@ -290,6 +359,18 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
               answer: entry.answers !== undefined ? 'answered' : 'pending',
               ...(entry.answers !== undefined ? { answers: entry.answers } : {}),
             };
+          case 'handover':
+            // A backfilled handover replays as submitted (taken over) when it carries the user's answerText,
+            // or still-open (pending, actionable) otherwise — the same decided-vs-pending split.
+            return {
+              kind: 'handover',
+              id,
+              requestId: entry.requestId,
+              question: entry.question,
+              summary: entry.summary,
+              state: entry.answerText !== undefined ? 'submitted' : 'pending',
+              ...(entry.answerText !== undefined ? { answerText: entry.answerText } : {}),
+            };
           default: {
             // Exhaustiveness: a new history-entry kind must be handled here (parse already rejects
             // unknown kinds at runtime, so this is unreachable).
@@ -304,6 +385,7 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
         entries,
         seq: entries.length,
         notice: null, // a backfilled reopen carries no live notice
+        parentSessionId: base.parentSessionId,
       };
     }
 
@@ -366,4 +448,53 @@ export function markAnswering(
 /** The question currently awaiting a human answer, if any. */
 export function pendingQuestion(state: SessionState): TranscriptEntry | undefined {
   return state.entries.find((entry) => entry.kind === 'question' && entry.answer === 'pending');
+}
+
+/**
+ * Mark a free-form handover as being taken over locally (in-flight) the instant the user submits their
+ * answer, carrying it. Verification-gated like {@link markAnswering}: it shows `submitting` and confirms to
+ * `submitted` on the daemon's next frame (the parent session then ends — the conversation migrates to the
+ * forked continuation). Status is left at `awaiting_input` until that terminal frame — the parent is being
+ * superseded, not resumed, so it should not optimistically read as `running`.
+ */
+export function markHandoverSubmitting(
+  state: SessionState,
+  requestId: string,
+  answerText: string,
+): SessionState {
+  return {
+    ...state,
+    entries: state.entries.map((entry) =>
+      entry.kind === 'handover' && entry.requestId === requestId
+        ? { ...entry, state: 'submitting', answerText }
+        : entry,
+    ),
+  };
+}
+
+/** The free-form handover currently awaiting the user, if any. */
+export function pendingHandover(state: SessionState): TranscriptEntry | undefined {
+  return state.entries.find((entry) => entry.kind === 'handover' && entry.state === 'pending');
+}
+
+/**
+ * Link a handover to the forked continuation the daemon just registered (its `session.chained`), so the
+ * card can offer a "view the continuation" link. Sets `childSessionId` on the most recent taken-over
+ * handover (submitting/submitted) that doesn't already have one — a handover leads to exactly one child.
+ */
+export function linkHandoverChild(state: SessionState, childSessionId: string): SessionState {
+  let linked = false;
+  const entries = [...state.entries].reverse().map((entry) => {
+    if (
+      !linked &&
+      entry.kind === 'handover' &&
+      entry.childSessionId === undefined &&
+      (entry.state === 'submitting' || entry.state === 'submitted')
+    ) {
+      linked = true;
+      return { ...entry, childSessionId };
+    }
+    return entry;
+  });
+  return linked ? { ...state, entries: entries.reverse() } : state;
 }

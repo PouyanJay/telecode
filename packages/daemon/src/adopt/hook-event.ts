@@ -29,5 +29,16 @@ export const hookEventSchema = z.object({
   reason: z.string().optional(),
   /** Notification: the human-readable notification text (idle / needs-permission prompts). */
   message: z.string().optional(),
+  /**
+   * Stop (Journey 4): the assistant's final text for the just-ended turn, handed to us directly — so a
+   * free-form question (prose, no tool call) needs no transcript parse to detect. The free-form handover
+   * detector reads this verbatim.
+   */
+  last_assistant_message: z.string().optional(),
+  /**
+   * Stop: true when the stop is itself firing from within a Stop hook that continued the session — the
+   * re-entrancy guard, so the handover detector never loops on its own continuation.
+   */
+  stop_hook_active: z.boolean().optional(),
 });
 export type HookEvent = z.infer<typeof hookEventSchema>;
