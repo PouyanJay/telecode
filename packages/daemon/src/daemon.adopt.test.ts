@@ -715,6 +715,8 @@ describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
       expect(await openPayload(state, shared)).toEqual({
         enabled: false,
         denylist: ['/Users/me/secret'],
+        hooksInstalled: false,
+        events: [],
       });
     } finally {
       await daemon.stop();
@@ -756,6 +758,24 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     await daemon.start();
   }
 
+  /** Start a daemon wired for FRICTIONLESS setup: a settings path + hook command → auto-install on start. */
+  async function startWithHooks(settingsPath: string): Promise<void> {
+    daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: {
+        socketPath,
+        ackTimeoutMs: 2000,
+        configPath,
+        settingsPath,
+        hookCommand: '"telecode" hook',
+      },
+    });
+    await daemon.start();
+  }
+
   function preTool(cwd: string): unknown {
     return {
       hook_event_name: 'PreToolUse',
@@ -777,7 +797,14 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
       }),
     );
     const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
-    expect(state.payload).toEqual({ enabled: false, denylist: ['/Users/me/secret'] });
+    // No settings path configured here → hooks unmanaged (hooksInstalled:false); auto-install is covered
+    // by the dedicated frictionless-setup describe block below.
+    expect(state.payload).toEqual({
+      enabled: false,
+      denylist: ['/Users/me/secret'],
+      hooksInstalled: false,
+      events: [],
+    });
     // Persisted to disk so it survives a daemon restart.
     expect(JSON.parse(await readFile(configPath, 'utf8'))).toEqual({
       enabled: false,
@@ -794,7 +821,75 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     await start();
     relay.send(makeEnvelope({ type: 'adopt.config', userId: USER, deviceId: DEVICE, payload: {} }));
     const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
-    expect(state.payload).toEqual({ enabled: true, denylist: ['/Users/me/secret'] });
+    expect(state.payload).toEqual({
+      enabled: true,
+      denylist: ['/Users/me/secret'],
+      hooksInstalled: false,
+      events: [],
+    });
+  });
+
+  it('auto-installs the Claude Code hooks on start (frictionless — no manual step) and reports it', async () => {
+    const settingsPath = join(dir, 'claude-settings.json');
+    // Fresh machine: no config file (adopt-all default: enabled) → the daemon should install the hooks itself.
+    await startWithHooks(settingsPath);
+
+    // The hooks are now in ~/.claude/settings.json — the user ran nothing.
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+      hooks: Record<string, { hooks: { command: string }[] }[]>;
+    };
+    expect(Object.keys(settings.hooks).sort()).toEqual([
+      'Notification',
+      'PreToolUse',
+      'SessionEnd',
+      'SessionStart',
+      'Stop',
+    ]);
+
+    // And adopt.state reports the setup status so the web can render "active".
+    relay.send(makeEnvelope({ type: 'adopt.config', userId: USER, deviceId: DEVICE, payload: {} }));
+    const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    const payload = state.payload as {
+      enabled: boolean;
+      hooksInstalled: boolean;
+      events: string[];
+    };
+    expect(payload.enabled).toBe(true);
+    expect(payload.hooksInstalled).toBe(true);
+    expect(payload.events).toContain('Stop');
+    expect(payload.events).toHaveLength(5);
+  });
+
+  it('the enabled toggle drives install/uninstall: disabling removes the hooks, enabling restores them', async () => {
+    const settingsPath = join(dir, 'claude-settings.json');
+    await startWithHooks(settingsPath); // starts installed (adopt-all default)
+
+    // Disable adoption from the web → telecode backs out of ~/.claude entirely.
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled: false, denylist: [] } },
+      }),
+    );
+    const off = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    expect((off.payload as { hooksInstalled: boolean }).hooksInstalled).toBe(false);
+    expect('hooks' in JSON.parse(await readFile(settingsPath, 'utf8'))).toBe(false);
+
+    // Re-enable → the hooks are reinstalled, no manual step.
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled: true, denylist: [] } },
+      }),
+    );
+    const on = await relay.waitForFrame(
+      (e) => e.type === 'adopt.state' && (e.payload as { hooksInstalled: boolean }).hooksInstalled,
+    );
+    expect((on.payload as { events: string[] }).events).toHaveLength(5);
   });
 
   it('does NOT adopt a session whose cwd is on the denylist (telecode stays out)', async () => {

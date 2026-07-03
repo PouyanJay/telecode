@@ -1,4 +1,9 @@
-import { makeEnvelope, type AdoptSettings, type SessionLaunchPayload } from '@telecode/protocol';
+import {
+  makeEnvelope,
+  type AdoptSettings,
+  type AdoptStatePayload,
+  type SessionLaunchPayload,
+} from '@telecode/protocol';
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -33,7 +38,7 @@ function makeFakeConnection() {
   const handovers: { sessionId: string; payload: unknown }[] = [];
   const adoptConfigs: (AdoptSettings | undefined)[] = [];
   let emit: (envelope: ReturnType<typeof makeEnvelope>) => void = () => undefined;
-  let emitAdoptState: (state: AdoptSettings) => void = () => undefined;
+  let emitAdoptState: (state: AdoptStatePayload) => void = () => undefined;
   let fireReconnect: () => void = () => undefined;
   const create = (options: RelayConnectionOptions): RelayConnection => {
     emit = options.onEvent;
@@ -60,7 +65,7 @@ function makeFakeConnection() {
     handovers,
     adoptConfigs,
     /** Simulate the daemon's sealed adopt.state reply (after the relay-client opens it). */
-    adoptStateReply(state: AdoptSettings) {
+    adoptStateReply(state: AdoptStatePayload) {
       emitAdoptState(state);
     },
     /** Simulate the daemon raising an adopted-session question on a session. */
@@ -275,10 +280,21 @@ describe('session-store launch correlation (Task 11)', () => {
       { enabled: false, denylist: ['/Users/me/secret'] },
     ]);
 
-    // The daemon's sealed adopt.state reply (opened by the relay-client) lands on the adoptState store.
+    // The daemon's sealed adopt.state reply (opened by the relay-client) lands on the adoptState store —
+    // now carrying the setup status (hook-install state) the UI renders.
     expect(get(adoptState)).toBeNull();
-    fake.adoptStateReply({ enabled: false, denylist: ['/Users/me/secret'] });
-    expect(get(adoptState)).toEqual({ enabled: false, denylist: ['/Users/me/secret'] });
+    fake.adoptStateReply({
+      enabled: false,
+      denylist: ['/Users/me/secret'],
+      hooksInstalled: false,
+      events: [],
+    });
+    expect(get(adoptState)).toEqual({
+      enabled: false,
+      denylist: ['/Users/me/secret'],
+      hooksInstalled: false,
+      events: [],
+    });
   });
 
   it('a late frame for a timed-out launch never mis-resolves a later launch', async () => {

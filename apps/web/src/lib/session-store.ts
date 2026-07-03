@@ -3,6 +3,7 @@ import {
   sessionChainedPayloadSchema,
   sessionStartedPayloadSchema,
   type AdoptSettings,
+  type AdoptStatePayload,
   type Envelope,
   type HandoverAnswerPayload,
   type PermissionDecisionPayload,
@@ -56,7 +57,7 @@ const sessionMap = writable<SessionMap>(new Map());
 const connState = writable<ConnectionState>('idle');
 // The daemon's current adoption policy (Journey 3), updated from sealed `adopt.state` frames. Null until the
 // Settings page requests it (or the daemon replies). Device-scoped, not per-session.
-const adoptStateStore = writable<AdoptSettings | null>(null);
+const adoptStateStore = writable<AdoptStatePayload | null>(null);
 
 let connection: RelayConnection | null = null;
 // Launches awaiting their relay-minted id, matched by the `clientRef` the daemon echoes on
@@ -69,7 +70,9 @@ export const sessions: Readable<SessionMap> = { subscribe: sessionMap.subscribe 
 /** The connection's honest state (idle / connecting / connected / error) for the top-bar indicator. */
 export const connectionState: Readable<ConnectionState> = { subscribe: connState.subscribe };
 /** The daemon's current adoption policy for the Settings UI; null until first received (Journey 3). */
-export const adoptState: Readable<AdoptSettings | null> = { subscribe: adoptStateStore.subscribe };
+export const adoptState: Readable<AdoptStatePayload | null> = {
+  subscribe: adoptStateStore.subscribe,
+};
 
 function handleEvent(envelope: Envelope): void {
   // Device presence (Phase 4 Task 3) is channel-wide, not per-session: the daemon behind this channel

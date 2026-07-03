@@ -125,11 +125,18 @@ export const adoptConfigPayloadSchema = z.object({ set: adoptSettingsSchema.opti
 export type AdoptConfigPayload = z.infer<typeof adoptConfigPayloadSchema>;
 
 /**
- * Payload for `adopt.state` (daemon → web, Journey 3): the daemon's current adoption policy, for display.
- * Intentionally the same shape as {@link adoptSettingsSchema} — the state the daemon reports is exactly the
- * settings it holds; aliased rather than re-declared so the two can never drift.
+ * Payload for `adopt.state` (daemon → web): the current adoption policy PLUS the setup status, so the web
+ * can represent frictionless setup honestly. It extends {@link adoptSettingsSchema} with:
+ *  - `hooksInstalled` — whether telecode's Claude Code hooks are actually installed in `~/.claude/settings.json`
+ *    (the daemon auto-installs them on start when adoption is enabled). This is what tells the UI "active"
+ *    vs "setting up / not wired up" — distinct from `enabled` (the user's intent).
+ *  - `events` — which hook events are installed (e.g. PreToolUse, SessionStart, …, Stop), for display.
+ * Box-sealed to the browser like the policy itself (invariant #5), so hook paths/denylist never reach the relay.
  */
-export const adoptStatePayloadSchema = adoptSettingsSchema;
+export const adoptStatePayloadSchema = adoptSettingsSchema.extend({
+  hooksInstalled: z.boolean(),
+  events: z.array(z.string().min(1).max(64)).max(20).default([]),
+});
 export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
 
 /** Session lifecycle states; mirrors the `sessions.status` column. */

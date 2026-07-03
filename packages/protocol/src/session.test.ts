@@ -268,10 +268,28 @@ describe('adoptConfig / adoptState payload schemas (Journey 3)', () => {
     ).toBe(false);
   });
 
-  it('parses the daemon state (current enabled + denylist)', () => {
-    const state = adoptStatePayloadSchema.parse({ enabled: false, denylist: [] });
-    expect(state.enabled).toBe(false);
-    expect(state.denylist).toEqual([]);
+  it('parses the daemon state (enabled + denylist + hook install status)', () => {
+    const state = adoptStatePayloadSchema.parse({
+      enabled: true,
+      denylist: ['/secret'],
+      hooksInstalled: true,
+      events: ['PreToolUse', 'Stop'],
+    });
+    expect(state.enabled).toBe(true);
+    expect(state.denylist).toEqual(['/secret']);
+    expect(state.hooksInstalled).toBe(true);
+    expect(state.events).toEqual(['PreToolUse', 'Stop']);
+  });
+
+  it('defaults events to [] and requires hooksInstalled (the setup status the web renders)', () => {
+    const state = adoptStatePayloadSchema.parse({
+      enabled: true,
+      denylist: [],
+      hooksInstalled: false,
+    });
+    expect(state.events).toEqual([]);
+    // hooksInstalled is required — the web must always know whether adoption is actually wired up.
+    expect(adoptStatePayloadSchema.safeParse({ enabled: true, denylist: [] }).success).toBe(false);
   });
 });
 
