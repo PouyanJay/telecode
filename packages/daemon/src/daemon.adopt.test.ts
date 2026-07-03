@@ -860,6 +860,49 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     expect(payload.events).toHaveLength(5);
   });
 
+  it('is idempotent across a restart — re-installing on start never duplicates the hooks', async () => {
+    const settingsPath = join(dir, 'claude-settings.json');
+    await startWithHooks(settingsPath);
+    await daemon?.stop();
+    daemon = undefined;
+    // A second daemon (same settings + config) starts and re-installs — still exactly one telecode hook/event.
+    await startWithHooks(settingsPath);
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+      hooks: Record<string, { hooks: { command: string }[] }[]>;
+    };
+    for (const groups of Object.values(settings.hooks)) {
+      const telecodeCommands = groups
+        .flatMap((g) => g.hooks.map((h) => h.command))
+        .filter((c) => /telecode\b.*\bhook\b/.test(c));
+      expect(telecodeCommands).toHaveLength(1);
+    }
+  });
+
+  it('a disabled policy persists across a restart — the daemon never silently re-installs', async () => {
+    const settingsPath = join(dir, 'claude-settings.json');
+    await startWithHooks(settingsPath); // installed by default
+    // Disable + persist to the config file.
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled: false, denylist: [] } },
+      }),
+    );
+    await relay.waitForFrame(
+      (e) => e.type === 'adopt.state' && !(e.payload as { hooksInstalled: boolean }).hooksInstalled,
+    );
+    await daemon?.stop();
+    daemon = undefined;
+
+    // Restart: the persisted enabled:false is respected — hooks stay uninstalled (the user's choice wins).
+    await startWithHooks(settingsPath);
+    relay.send(makeEnvelope({ type: 'adopt.config', userId: USER, deviceId: DEVICE, payload: {} }));
+    const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    expect(state.payload).toMatchObject({ enabled: false, hooksInstalled: false });
+  });
+
   it('the enabled toggle drives install/uninstall: disabling removes the hooks, enabling restores them', async () => {
     const settingsPath = join(dir, 'claude-settings.json');
     await startWithHooks(settingsPath); // starts installed (adopt-all default)
