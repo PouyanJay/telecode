@@ -16,8 +16,17 @@
 
   let {
     entry,
+    offline = false,
     onanswer,
-  }: { entry: HandoverEntry; onanswer: (answerText: string) => void } = $props();
+  }: {
+    entry: HandoverEntry;
+    /**
+     * The device (daemon) is offline, so telecode can't fork-and-resume right now. A pending offer then
+     * degrades to the honest "answer at your device" fallback instead of an actionable form that would fail.
+     */
+    offline?: boolean;
+    onanswer: (answerText: string) => void;
+  } = $props();
 
   let draft = $state('');
   let error = $state('');
@@ -49,7 +58,12 @@
     <p class="summary">{entry.summary}</p>
   {/if}
 
-  {#if isPending}
+  {#if isPending && offline}
+    <p class="offline" role="status">
+      This device is offline, so telecode can’t take over yet. Answer at your device, or wait for it to
+      reconnect to continue here.
+    </p>
+  {:else if isPending}
     <form class="form" onsubmit={submit}>
       <textarea
         class="answer"
@@ -216,6 +230,12 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-muted);
+  }
+  .offline {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    max-width: 60ch;
   }
   .spinner {
     width: 12px;

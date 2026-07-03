@@ -129,6 +129,7 @@
       {:else}
         <Transcript
           entries={session.entries}
+          offline={session.status === 'offline_paused'}
           onapprove={() => onDecide('allow')}
           onreject={() => onDecide('deny')}
           onanswer={onAnswer}

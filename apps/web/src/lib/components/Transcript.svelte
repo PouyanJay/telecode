@@ -17,12 +17,15 @@
    */
   let {
     entries,
+    offline = false,
     onapprove,
     onreject,
     onanswer,
     onhandover,
   }: {
     entries: readonly TranscriptEntry[];
+    /** The device is offline — degrades a pending free-form handover to its "answer at your device" state. */
+    offline?: boolean;
     onapprove: (requestId: string) => void;
     onreject: (requestId: string) => void;
     onanswer: (requestId: string, answers: QuestionAnswerItem[]) => void;
@@ -76,7 +79,11 @@
       {:else if entry.kind === 'question'}
         <QuestionGate {entry} onanswer={(answers) => onanswer(entry.requestId, answers)} />
       {:else}
-        <HandoverCard {entry} onanswer={(answerText) => onhandover(entry.requestId, answerText)} />
+        <HandoverCard
+          {entry}
+          {offline}
+          onanswer={(answerText) => onhandover(entry.requestId, answerText)}
+        />
       {/if}
     </div>
   {/each}
