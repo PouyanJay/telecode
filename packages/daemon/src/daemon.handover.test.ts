@@ -102,9 +102,34 @@ describe('daemon: free-form handover & resume', () => {
       userId: USER,
       deviceId: DEVICE,
       agentAdapter,
-      adopt: { socketPath, ackTimeoutMs: 2000 },
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
     });
     await daemon.start();
+  }
+
+  /** A Stop hook event for the adopted session with a given last assistant message. */
+  function stopEvent(lastAssistantMessage: string, extra: Record<string, unknown> = {}): unknown {
+    return {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      last_assistant_message: lastAssistantMessage,
+      ...extra,
+    };
+  }
+
+  /** Set the daemon's adoption policy (cleartext, pre-E2E daemon) and wait for the adopt.state confirmation. */
+  async function setAdoptConfig(enabled: boolean, denylist: string[]): Promise<void> {
+    const onState = relay.waitForFrame((e) => e.type === 'adopt.state');
+    relay.send(
+      makeEnvelope({
+        type: 'adopt.config',
+        userId: USER,
+        deviceId: DEVICE,
+        payload: { set: { enabled, denylist } },
+      }),
+    );
+    await onState;
   }
 
   it('offers a handover on a free-form Stop, then forks-and-resumes the conversation on the answer', async () => {
@@ -250,5 +275,53 @@ describe('daemon: free-form handover & resume', () => {
     expect(runCalls[1]?.forkSession).toBeUndefined();
     expect(runCalls[1]?.prompt).toContain('Which database should we use for the app?');
     expect(runCalls[1]?.prompt).toContain('Use Postgres.');
+  });
+
+  it('does not offer a handover on a non-question Stop (only the free-form question offers)', async () => {
+    await start(createFakeAgentAdapter([]));
+    await adopt(relay, socketPath);
+
+    // A non-question turn end must NOT offer. A later free-form question then must — and the FIRST (only)
+    // handover frame carrying the question text proves the non-question Stop produced no offer (otherwise
+    // it would arrive first, or park the session at awaiting_input and suppress this one).
+    await hookRpc(socketPath, stopEvent('All done — the refactor is complete and tests pass.'));
+    await hookRpc(socketPath, stopEvent('Which database should we use for the app?'));
+
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    expect((offer.payload as { question: string }).question).toBe(
+      'Which database should we use for the app?',
+    );
+  });
+
+  it('does not offer on a re-entrant Stop (stop_hook_active guard)', async () => {
+    await start(createFakeAgentAdapter([]));
+    await adopt(relay, socketPath);
+
+    await hookRpc(socketPath, stopEvent('Should I keep going?', { stop_hook_active: true }));
+    await hookRpc(socketPath, stopEvent('Which region should we deploy to?'));
+
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    expect((offer.payload as { question: string }).question).toBe(
+      'Which region should we deploy to?',
+    );
+  });
+
+  it('does not offer for a denylisted cwd, honoring a mid-session policy change', async () => {
+    await start(createFakeAgentAdapter([]));
+    await adopt(relay, socketPath);
+
+    // The user denylists /repo AFTER adoption — a handover (which launches a new session) must be gated.
+    await setAdoptConfig(true, ['/repo']);
+    await hookRpc(socketPath, stopEvent('Which database should we use?'));
+
+    // Re-allow, then a question offers — the FIRST handover carries THIS question, proving the denylisted
+    // Stop above produced no offer.
+    await setAdoptConfig(true, []);
+    await hookRpc(socketPath, stopEvent('Which region should we deploy to?'));
+
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    expect((offer.payload as { question: string }).question).toBe(
+      'Which region should we deploy to?',
+    );
   });
 });

@@ -1395,6 +1395,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
     if (knownId === undefined) return {};
     if (event.stop_hook_active === true) return {};
+    // Honor the CURRENT adoption policy: offering a handover launches a NEW telecode-owned session, so a repo
+    // the user has since denylisted (or adoption turned off) must not get an offer — even though the session
+    // was tracked before that change. Denied → stay out; the session keeps running via Claude Code locally.
+    if (!isAdoptionAllowed(adoptConfig, event.cwd)) return {};
     if (!isFreeFormQuestion(event.last_assistant_message)) return {};
     // Don't stack a second offer while a gate/offer is already showing for this session.
     if (recordFor(knownId).status === 'awaiting_input') return {};
