@@ -37,6 +37,7 @@ import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adop
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { type HookEvent } from './adopt/hook-event';
 import { buildHandoverFallbackPrompt } from './adopt/handover-fallback-prompt';
+import { buildHandoverSummary } from './adopt/handover-summary';
 import { isAdoptionAllowed } from './adopt/is-adoption-allowed';
 import { isFreeFormQuestion } from './adopt/free-form-question';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
@@ -1391,7 +1392,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * the hook returns `{}` immediately (the idle external process is never held). Acts only on a tracked
    * session; skips the re-entrancy case (`stop_hook_active`) and never offers twice (already awaiting input).
    */
-  function handleStopHook(event: HookEvent): unknown {
+  async function handleStopHook(event: HookEvent): Promise<unknown> {
     const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
     if (knownId === undefined) return {};
     if (event.stop_hook_active === true) return {};
@@ -1403,8 +1404,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // Don't stack a second offer while a gate/offer is already showing for this session.
     if (recordFor(knownId).status === 'awaiting_input') return {};
     const question = (event.last_assistant_message ?? '').trim();
-    // Deterministic handover summary is built in Journey 4 T4; the skeleton offers with an empty summary.
-    const summary = '';
+    if (cipher.enabled) cipher.establish(knownId); // idempotent; the mirror + offer must encrypt under E2E
+    // Pull the turn's latest transcript lines in before summarizing, so the handover summary reflects the
+    // most recent context (a `Stop` fires after the last turn, which no `PreToolUse` may have mirrored yet).
+    await mirrorTranscript(knownId, event.transcript_path);
+    // Deterministic "what the session was doing" summary from the mirrored transcript — no extra model call.
+    const summary = buildHandoverSummary(recordFor(knownId).transcript);
     const requestId = randomUUID();
     pendingHandovers.set(requestId, {
       telecodeSessionId: knownId,
@@ -1415,7 +1420,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
     record(knownId, { kind: 'handover', requestId, question, summary });
     setStatus(knownId, 'awaiting_input');
-    if (cipher.enabled) cipher.establish(knownId); // idempotent; the offer must encrypt under E2E
     sendForSession(adoptedSource(knownId), 'agent.handover', { requestId, question, summary });
     log.info(
       { deviceId: options.deviceId, sessionId: knownId, requestId },

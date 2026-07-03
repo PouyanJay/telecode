@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -304,6 +304,49 @@ describe('daemon: free-form handover & resume', () => {
     expect((offer.payload as { question: string }).question).toBe(
       'Which region should we deploy to?',
     );
+  });
+
+  it('carries a deterministic summary of recent context from the transcript', async () => {
+    await start(createFakeAgentAdapter([]));
+    // A transcript with prior context the summary should extract (Claude JSONL record shapes).
+    const transcriptPath = join(dir, 'transcript.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${[
+        JSON.stringify({
+          type: 'user',
+          message: { role: 'user', content: 'Add a REST API for orders.' },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'I scaffolded the routes.' }],
+          },
+        }),
+      ].join('\n')}\n`,
+    );
+
+    // Adopt via a PreToolUse carrying the transcript path (so the daemon mirrors the prior context).
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    await hookRpc(
+      socketPath,
+      stopEvent('Which database should we use?', { transcript_path: transcriptPath }),
+    );
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    const { summary } = offer.payload as { summary: string };
+    expect(summary).toContain('User: Add a REST API for orders.');
+    expect(summary).toContain('Assistant: I scaffolded the routes.');
   });
 
   it('does not offer for a denylisted cwd, honoring a mid-session policy change', async () => {
