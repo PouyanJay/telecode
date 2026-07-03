@@ -8,6 +8,7 @@
   import { Button, Panel, Switch } from '@telecode/ui';
   import type { PermissionModeName } from '@telecode/protocol';
 
+  import { resolveAdoptSetupState } from '$lib/adopt-setup-state';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import PermissionModeField from '$lib/components/PermissionModeField.svelte';
   import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
@@ -154,11 +155,7 @@
               : 'Connect this device to manage adoption.'}
           </p>
         {:else}
-          {@const setupState = !$adoptState.enabled
-            ? 'off'
-            : $adoptState.hooksInstalled
-              ? 'active'
-              : 'attention'}
+          {@const setupState = resolveAdoptSetupState($adoptState)}
           <div class="status" data-state={setupState} role="status">
             <span class="status-dot" aria-hidden="true"></span>
             <span class="status-label">

@@ -63,6 +63,9 @@ import { type RepoManager } from './sessions/repo-manager';
 import { type SessionStore } from './sessions/session-store';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
+/** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
+const HANDOVER_TITLE_PREVIEW_CHARS = 60;
+
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
  * reaches in), announces itself for `(userId, deviceId)`, and supervises work for that
@@ -72,9 +75,6 @@ import { type WorktreeManager } from './sessions/worktree-manager';
  * human-in-the-loop gate: the daemon forwards it as `agent.permission_request` and blocks `canUseTool`
  * until the matching `permission.decision` returns from the browser.
  */
-/** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
-const HANDOVER_TITLE_PREVIEW_CHARS = 60;
-
 export interface DaemonOptions {
   readonly relayUrl: string;
   readonly userId: string;
@@ -1144,7 +1144,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /** Whether telecode's Claude Code hooks are installed, and for which events — the setup status the UI shows. */
-  async function readHookStatus(): Promise<{ installed: boolean; events: string[] }> {
+  async function fetchHookInstallStatus(): Promise<{ installed: boolean; events: string[] }> {
     const settingsPath = options.adopt?.settingsPath;
     if (settingsPath === undefined) return { installed: false, events: [] };
     try {
@@ -1186,8 +1186,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /** The `adopt.state` payload: the current policy plus the live hook-install status (for the web to render). */
-  async function currentAdoptState(): Promise<AdoptStatePayload> {
-    const { installed, events } = await readHookStatus();
+  async function buildAdoptState(): Promise<AdoptStatePayload> {
+    const { installed, events } = await fetchHookInstallStatus();
     return { ...adoptConfig, hooksInstalled: installed, events };
   }
 
@@ -1232,7 +1232,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     // Reply the current policy + setup status, sealed to the requesting browser so repo paths never reach the relay.
     const browserPublicKey = envelope.sender_public_key;
-    const state = await currentAdoptState();
+    const state = await buildAdoptState();
     enqueueSend(async () => {
       const fields: { payload: unknown; nonce: string } =
         cipher.enabled && browserPublicKey !== undefined

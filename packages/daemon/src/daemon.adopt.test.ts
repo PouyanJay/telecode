@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  adoptStatePayloadSchema,
   agentNoticePayloadSchema,
   deriveSharedKey,
   encodeKey,
@@ -60,6 +61,20 @@ function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
 function assertReasonContainsAll(reason: string | undefined, expected: readonly string[]): void {
   expect(expected.length).toBeGreaterThan(0); // a misconfigured variant must fail loudly, not vacuously
   for (const fragment of expected) expect(reason).toContain(fragment);
+}
+
+/** Assert each installed hook event carries exactly one telecode hook (proves re-install never duplicates). */
+function assertNoDuplicateTelecodeHooks(settings: {
+  hooks: Record<string, { hooks: { command: string }[] }[]>;
+}): void {
+  for (const [event, groups] of Object.entries(settings.hooks)) {
+    const telecodeCommands = groups
+      .flatMap((g) => g.hooks.map((h) => h.command))
+      .filter((c) => /telecode\b.*\bhook\b/.test(c));
+    expect(telecodeCommands, `event ${event} should have exactly one telecode hook`).toHaveLength(
+      1,
+    );
+  }
 }
 
 /** Reply to the daemon's `session.adopted` announce with the relay-minted id (pairs the Claude session). */
@@ -758,7 +773,7 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     await daemon.start();
   }
 
-  /** Start a daemon wired for FRICTIONLESS setup: a settings path + hook command → auto-install on start. */
+  /** Start a daemon wired for frictionless setup: a settings path + hook command → auto-install on start. */
   async function startWithHooks(settingsPath: string): Promise<void> {
     daemon = createDaemon({
       relayUrl: relay.url,
@@ -846,14 +861,11 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
       'Stop',
     ]);
 
-    // And adopt.state reports the setup status so the web can render "active".
+    // And adopt.state reports the setup status so the web can render "active" — parsed with the wire schema
+    // so the test also proves the daemon emits a schema-conformant payload.
     relay.send(makeEnvelope({ type: 'adopt.config', userId: USER, deviceId: DEVICE, payload: {} }));
     const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
-    const payload = state.payload as {
-      enabled: boolean;
-      hooksInstalled: boolean;
-      events: string[];
-    };
+    const payload = adoptStatePayloadSchema.parse(state.payload);
     expect(payload.enabled).toBe(true);
     expect(payload.hooksInstalled).toBe(true);
     expect(payload.events).toContain('Stop');
@@ -870,12 +882,7 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
       hooks: Record<string, { hooks: { command: string }[] }[]>;
     };
-    for (const groups of Object.values(settings.hooks)) {
-      const telecodeCommands = groups
-        .flatMap((g) => g.hooks.map((h) => h.command))
-        .filter((c) => /telecode\b.*\bhook\b/.test(c));
-      expect(telecodeCommands).toHaveLength(1);
-    }
+    assertNoDuplicateTelecodeHooks(settings);
   });
 
   it('a disabled policy persists across a restart — the daemon never silently re-installs', async () => {
@@ -916,8 +923,10 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
         payload: { set: { enabled: false, denylist: [] } },
       }),
     );
-    const off = await relay.waitForFrame((e) => e.type === 'adopt.state');
-    expect((off.payload as { hooksInstalled: boolean }).hooksInstalled).toBe(false);
+    const off = await relay.waitForFrame(
+      (e) => e.type === 'adopt.state' && !(e.payload as { hooksInstalled: boolean }).hooksInstalled,
+    );
+    expect(adoptStatePayloadSchema.parse(off.payload).hooksInstalled).toBe(false);
     expect('hooks' in JSON.parse(await readFile(settingsPath, 'utf8'))).toBe(false);
 
     // Re-enable → the hooks are reinstalled, no manual step.
@@ -932,7 +941,22 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     const on = await relay.waitForFrame(
       (e) => e.type === 'adopt.state' && (e.payload as { hooksInstalled: boolean }).hooksInstalled,
     );
-    expect((on.payload as { events: string[] }).events).toHaveLength(5);
+    expect(adoptStatePayloadSchema.parse(on.payload).events).toHaveLength(5);
+  });
+
+  it('starts and serves even when the hooks cannot be installed (fail-soft), reporting not-installed', async () => {
+    // A settings path pointing at a directory makes the write fail — the daemon must still start + connect.
+    const blocked = join(dir, 'blocked-settings');
+    await mkdir(blocked, { recursive: true });
+    await expect(startWithHooks(blocked)).resolves.toBeUndefined();
+
+    // It answers adopt.config, honestly reporting the hooks aren't installed rather than a false "active".
+    relay.send(makeEnvelope({ type: 'adopt.config', userId: USER, deviceId: DEVICE, payload: {} }));
+    const state = await relay.waitForFrame((e) => e.type === 'adopt.state');
+    expect(adoptStatePayloadSchema.parse(state.payload)).toMatchObject({
+      enabled: true,
+      hooksInstalled: false,
+    });
   });
 
   it('does NOT adopt a session whose cwd is on the denylist (telecode stays out)', async () => {

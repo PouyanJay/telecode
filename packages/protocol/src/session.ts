@@ -135,6 +135,9 @@ export type AdoptConfigPayload = z.infer<typeof adoptConfigPayloadSchema>;
  */
 export const adoptStatePayloadSchema = adoptSettingsSchema.extend({
   hooksInstalled: z.boolean(),
+  // The installed hook-event names. Today there are 5 (PreToolUse/SessionStart/SessionEnd/Notification/Stop);
+  // `.max(20)` is generous headroom so a future Claude Code hook type doesn't need a wire bump, while still
+  // bounding the encrypted frame.
   events: z.array(z.string().min(1).max(64)).max(20).default([]),
 });
 export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
