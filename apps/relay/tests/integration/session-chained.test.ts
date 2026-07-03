@@ -51,7 +51,10 @@ describe('handover continuation: daemon-initiated chained registration', () => {
     deviceId = deviceRow.rows[0]!.id;
 
     registry = createSessionRegistry(handle);
-    const relayLogger = pino({ level: 'info' }, { write: (chunk: string) => relayLogs.push(chunk) });
+    const relayLogger = pino(
+      { level: 'info' },
+      { write: (chunk: string) => relayLogs.push(chunk) },
+    );
     app = await buildRelay({ logger: relayLogger, sessionRegistry: registry });
     await app.listen({ port: 0, host: '127.0.0.1' });
     relayUrl = `ws://127.0.0.1:${(app.server.address() as AddressInfo).port}/ws`;
@@ -69,7 +72,12 @@ describe('handover continuation: daemon-initiated chained registration', () => {
 
   it('mints a launched row linked to the parent, acks the daemon, and broadcasts to the browser', async () => {
     // The adopted parent the continuation resumes from.
-    const parentId = await registry.createSession({ userId, deviceId, origin: 'external', title: 'adopted' });
+    const parentId = await registry.createSession({
+      userId,
+      deviceId,
+      origin: 'external',
+      title: 'adopted',
+    });
 
     const daemon = await connectDaemon(relayUrl, userId, deviceId);
     const browser = await connectBrowser(relayUrl, userId, deviceId);
@@ -108,10 +116,12 @@ describe('handover continuation: daemon-initiated chained registration', () => {
     expect((browserFrame.payload as { parentSessionId: string }).parentSessionId).toBe(parentId);
 
     // The row is persisted as a launched continuation linked to the adopted parent.
-    const row = await admin.query<{ origin: string; parent_session_id: string; title: string; cwd: string }>(
-      'select origin, parent_session_id, title, cwd from sessions where id = $1',
-      [childId],
-    );
+    const row = await admin.query<{
+      origin: string;
+      parent_session_id: string;
+      title: string;
+      cwd: string;
+    }>('select origin, parent_session_id, title, cwd from sessions where id = $1', [childId]);
     expect(row.rows[0]).toMatchObject({
       origin: 'launched',
       parent_session_id: parentId,

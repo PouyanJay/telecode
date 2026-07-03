@@ -36,6 +36,7 @@ import {
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { type HookEvent } from './adopt/hook-event';
+import { buildHandoverFallbackPrompt } from './adopt/handover-fallback-prompt';
 import { isAdoptionAllowed } from './adopt/is-adoption-allowed';
 import { isFreeFormQuestion } from './adopt/free-form-question';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
@@ -45,6 +46,8 @@ import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import {
   type AgentAdapter,
+  type AgentRunOptions,
+  type AgentRunResult,
   type PermissionDecision,
   type PermissionRequest,
 } from './agent-adapter';
@@ -519,6 +522,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * turn with `session.ended`. `resume` continues a prior agent conversation. The returned conversation
    * id is stored so the next `user.message` follow-up resumes this same session. One turn at a time per
    * session — a follow-up that races an in-flight turn is dropped (the UI also blocks it).
+   *
+   * `resumeFallbackPrompt` (Journey 4): when `resume` is set and the resume run fails — e.g. the SDK can't
+   * pick up an *externally-created* conversation (transcript gone, version skew) — the turn re-runs as a
+   * FRESH launch (no resume/fork) seeded with this prompt, so a free-form handover still continues instead
+   * of dropping the user's answer. Only used for the handover continuation; ordinary turns leave it unset.
    */
   async function runTurn(
     envelope: Envelope,
@@ -526,6 +534,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     resume?: string,
     cwd?: string,
     forkSession?: boolean,
+    resumeFallbackPrompt?: string,
   ): Promise<void> {
     const sessionId = envelope.session_id;
     if (sessionId !== undefined && activeRuns.has(sessionId)) {
@@ -540,27 +549,45 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     const permissionMode =
       sessionId !== undefined ? sessionRecords.get(sessionId)?.permissionMode : undefined;
+    // Options shared by both the resume attempt and the seeded-fresh fallback (only prompt/resume/fork differ).
+    const baseOptions: Omit<AgentRunOptions, 'resume' | 'forkSession'> = {
+      canUseTool: (request) => requestPermission(envelope, request),
+      signal: abort.signal,
+      ...(cwd !== undefined ? { cwd } : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
+      onEvent: (event) => {
+        if (event.type === 'message') {
+          record(sessionId, { kind: 'message', text: event.text });
+          sendForSession(envelope, 'agent.message', { text: event.text });
+        } else {
+          record(sessionId, { kind: 'tool', toolName: event.toolName, input: event.input });
+          sendForSession(envelope, 'agent.tool_use', {
+            toolName: event.toolName,
+            input: event.input,
+          });
+        }
+      },
+    };
     try {
-      const result = await agentAdapter.run(prompt, {
-        canUseTool: (request) => requestPermission(envelope, request),
-        signal: abort.signal,
-        ...(cwd !== undefined ? { cwd } : {}),
-        ...(permissionMode !== undefined ? { permissionMode } : {}),
-        onEvent: (event) => {
-          if (event.type === 'message') {
-            record(sessionId, { kind: 'message', text: event.text });
-            sendForSession(envelope, 'agent.message', { text: event.text });
-          } else {
-            record(sessionId, { kind: 'tool', toolName: event.toolName, input: event.input });
-            sendForSession(envelope, 'agent.tool_use', {
-              toolName: event.toolName,
-              input: event.input,
-            });
-          }
-        },
-        ...(resume !== undefined ? { resume } : {}),
-        ...(forkSession !== undefined ? { forkSession } : {}),
-      });
+      let result: AgentRunResult;
+      try {
+        result = await agentAdapter.run(prompt, {
+          ...baseOptions,
+          ...(resume !== undefined ? { resume } : {}),
+          ...(forkSession !== undefined ? { forkSession } : {}),
+        });
+      } catch (resumeErr) {
+        // A failed resume of an externally-created conversation is recoverable: continue the handover as a
+        // fresh, summary-seeded launch so the user's answer isn't lost. An operator abort is not recoverable.
+        if (abort.signal.aborted || resume === undefined || resumeFallbackPrompt === undefined) {
+          throw resumeErr;
+        }
+        log.warn(
+          { err: resumeErr, deviceId: options.deviceId, sessionId },
+          'daemon: resume failed — falling back to a summary-seeded fresh launch',
+        );
+        result = await agentAdapter.run(resumeFallbackPrompt, baseOptions);
+      }
       if (sessionId !== undefined && result.sessionId !== undefined) {
         sdkSessions.set(sessionId, result.sessionId);
       }
@@ -1284,7 +1311,21 @@ export function createDaemon(options: DaemonOptions): Daemon {
       'daemon: handover continuation launched (forked resume)',
     );
     // Run the forked continuation: resume the adopted conversation by its Claude id, fork it, seed the answer.
-    await runTurn(childSource, answerText, handover.externalSessionId, handover.cwd, true);
+    // If the resume fails (an externally-created conversation the SDK can't pick up), fall back to a fresh
+    // launch seeded with the handover context so the answer still lands (AD-7 fallback).
+    const fallbackPrompt = buildHandoverFallbackPrompt(
+      handover.summary,
+      handover.question,
+      answerText,
+    );
+    await runTurn(
+      childSource,
+      answerText,
+      handover.externalSessionId,
+      handover.cwd,
+      true,
+      fallbackPrompt,
+    );
   }
 
   /**

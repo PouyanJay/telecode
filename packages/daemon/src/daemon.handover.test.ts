@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { makeEnvelope, type Envelope } from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createFakeAgentAdapter } from './agent-adapter';
+import {
+  createFakeAgentAdapter,
+  type AgentAdapter,
+  type AgentRunOptions,
+  type AgentRunResult,
+} from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
 
@@ -73,39 +78,43 @@ async function adopt(relay: FakeRelay, socketPath: string): Promise<void> {
 
 describe('daemon: free-form handover & resume', () => {
   let relay: FakeRelay;
-  let daemon: Daemon;
+  let daemon: Daemon | undefined;
   let dir: string;
   let socketPath: string;
-  let runCalls: { prompt: string; resume?: string; forkSession?: boolean }[];
 
   beforeEach(async () => {
     relay = await startFakeRelay(USER, DEVICE);
     dir = await mkdtemp(join(tmpdir(), 'telecode-daemon-handover-'));
     socketPath = join(dir, 'run', 'hook.sock');
-    runCalls = [];
-    daemon = createDaemon({
-      relayUrl: relay.url,
-      userId: USER,
-      deviceId: DEVICE,
-      agentAdapter: createFakeAgentAdapter(
-        [{ type: 'message', text: 'Continuing with your answer.' }],
-        {
-          sessionId: 'fork-sdk-id',
-          onRun: (call) => runCalls.push(call),
-        },
-      ),
-      adopt: { socketPath, ackTimeoutMs: 2000 },
-    });
-    await daemon.start();
+    daemon = undefined;
   });
 
   afterEach(async () => {
-    await daemon.stop();
+    await daemon?.stop();
     await relay.close();
     await rm(dir, { recursive: true, force: true });
   });
 
+  /** Start a daemon with the given adapter (each test picks one to exercise the resume vs fallback path). */
+  async function start(agentAdapter: AgentAdapter): Promise<void> {
+    daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter,
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+    });
+    await daemon.start();
+  }
+
   it('offers a handover on a free-form Stop, then forks-and-resumes the conversation on the answer', async () => {
+    const runCalls: { prompt: string; resume?: string; forkSession?: boolean }[] = [];
+    await start(
+      createFakeAgentAdapter([{ type: 'message', text: 'Continuing with your answer.' }], {
+        sessionId: 'fork-sdk-id',
+        onRun: (call) => runCalls.push(call),
+      }),
+    );
     await adopt(relay, socketPath);
 
     // The adopted session ends its turn asking a free-form question → the Stop hook offers a handover.
@@ -172,5 +181,74 @@ describe('daemon: free-form handover & resume', () => {
         forkSession: true,
       }),
     );
+  });
+
+  it('falls back to a summary-seeded fresh launch when the resume fails', async () => {
+    // An adapter that fails the fork-resume of the (externally-created) conversation but succeeds a fresh
+    // launch — the exact "resume unavailable" case the AD-7 fallback covers.
+    const runCalls: { prompt: string; resume?: string; forkSession?: boolean }[] = [];
+    const fallbackAdapter: AgentAdapter = {
+      async run(prompt: string, opts: AgentRunOptions): Promise<AgentRunResult> {
+        runCalls.push({
+          prompt,
+          ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+          ...(opts.forkSession !== undefined ? { forkSession: opts.forkSession } : {}),
+        });
+        if (opts.resume !== undefined) {
+          throw new Error('cannot resume an externally-created conversation');
+        }
+        opts.onEvent({ type: 'message', text: 'Continuing from the handover summary.' });
+        return { intercepted: [], allowed: [], denied: [], sessionId: 'fresh-sdk-id' };
+      },
+    };
+    await start(fallbackAdapter);
+    await adopt(relay, socketPath);
+
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      last_assistant_message: 'Which database should we use for the app?',
+    });
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    const { requestId } = offer.payload as { requestId: string };
+    await stop;
+
+    relay.send(
+      makeEnvelope({
+        type: 'handover.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: PARENT_SESSION,
+        payload: { requestId, answerText: 'Use Postgres.' },
+      }),
+    );
+
+    const chained = await relay.waitForFrame((e) => e.type === 'session.chained');
+    const { clientRef } = chained.payload as { clientRef: string };
+    relay.send(
+      makeEnvelope({
+        type: 'session.chained',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: CHILD_SESSION,
+        payload: { clientRef, parentSessionId: PARENT_SESSION },
+      }),
+    );
+
+    // The child continuation still completes (done, not error) — via the fresh-launch fallback.
+    const childEnded = await relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.session_id === CHILD_SESSION,
+    );
+    expect(childEnded.status).toBe('done');
+
+    // Two adapter runs: the failed fork-resume, then a fresh launch (no resume) seeded with the handover
+    // context — carrying the exact question and the user's answer so the fresh conversation continues.
+    await vi.waitFor(() => expect(runCalls).toHaveLength(2));
+    expect(runCalls[0]).toMatchObject({ resume: CLAUDE_SESSION, forkSession: true });
+    expect(runCalls[1]?.resume).toBeUndefined();
+    expect(runCalls[1]?.forkSession).toBeUndefined();
+    expect(runCalls[1]?.prompt).toContain('Which database should we use for the app?');
+    expect(runCalls[1]?.prompt).toContain('Use Postgres.');
   });
 });
