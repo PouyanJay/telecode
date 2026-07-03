@@ -22,7 +22,7 @@ function deps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
     probeRelay: async () => ({ ok: true }),
     adoptionHooks: async () => ({
       installed: true,
-      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification'],
+      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification', 'Stop'],
     }),
     ...overrides,
   };
@@ -63,6 +63,8 @@ describe('runDoctor', () => {
     const check = find(await runDoctor(deps()), 'Adopted sessions');
     expect(check?.status).toBe('pass');
     expect(check?.detail).toContain('SessionEnd');
+    // The free-form handover detector (Journey 4) is part of the installed set.
+    expect(check?.detail).toContain('Stop');
   });
 
   it('warns (does not fail) the adoption check when hooks are not installed', async () => {
