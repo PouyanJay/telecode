@@ -3,7 +3,7 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { makeEnvelope, type Envelope } from '@telecode/protocol';
+import { encodeKey, generateKeyPair, makeEnvelope, type Envelope } from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -95,14 +95,21 @@ describe('daemon: free-form handover & resume', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  /** Start a daemon with the given adapter (each test picks one to exercise the resume vs fallback path). */
-  async function start(agentAdapter: AgentAdapter): Promise<void> {
+  /**
+   * Start a daemon with the given adapter (each test picks one to exercise the resume vs fallback path).
+   * A `keyPair` makes adopted sessions run end-to-end encrypted, exactly like a paired daemon.
+   */
+  async function start(
+    agentAdapter: AgentAdapter,
+    keyPair?: { publicKey: string; privateKey: string },
+  ): Promise<void> {
     daemon = createDaemon({
       relayUrl: relay.url,
       userId: USER,
       deviceId: DEVICE,
       agentAdapter,
       adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
+      ...(keyPair ? { keyPair } : {}),
     });
     await daemon.start();
   }
@@ -347,6 +354,23 @@ describe('daemon: free-form handover & resume', () => {
     const { summary } = offer.payload as { summary: string };
     expect(summary).toContain('User: Add a REST API for orders.');
     expect(summary).toContain('Assistant: I scaffolded the routes.');
+  });
+
+  it('sends the agent.handover offer as ciphertext to the relay (invariant #5)', async () => {
+    const keyPair = await generateKeyPair();
+    await start(createFakeAgentAdapter([]), {
+      publicKey: encodeKey(keyPair.publicKey),
+      privateKey: encodeKey(keyPair.privateKey),
+    });
+    await adopt(relay, socketPath);
+
+    await hookRpc(socketPath, stopEvent('Which database should we use for the app?'));
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+
+    // The offer carries the free-form question (potentially sensitive prompt text) + a transcript summary —
+    // both opaque to the relay: a ciphertext string with a non-empty nonce, never the cleartext object.
+    expect(offer.nonce).not.toBe('');
+    expect(typeof offer.payload).toBe('string');
   });
 
   it('does not offer for a denylisted cwd, honoring a mid-session policy change', async () => {

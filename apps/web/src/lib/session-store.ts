@@ -1,5 +1,6 @@
 import {
   devicePresencePayloadSchema,
+  sessionChainedPayloadSchema,
   sessionStartedPayloadSchema,
   type AdoptSettings,
   type Envelope,
@@ -12,7 +13,14 @@ import {
 import { get, writable, type Readable } from 'svelte/store';
 
 import { createRelayConnection, type ConnectionStatus, type RelayConnection } from './relay-client';
-import { appendUserMessage, markAnswering, markDeciding, markHandoverSubmitting } from './session';
+import {
+  appendUserMessage,
+  initialSessionState,
+  linkHandoverChild,
+  markAnswering,
+  markDeciding,
+  markHandoverSubmitting,
+} from './session';
 import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
 /**
@@ -72,6 +80,27 @@ function handleEvent(envelope: Envelope): void {
     if (!presence.success) return;
     if (presence.data.online) reattachSessions();
     else sessionMap.update((map) => markChannelOffline(map));
+    return;
+  }
+  // A forked handover continuation was registered (Journey 4): it links the parent (adopted) session to the
+  // child. This is a cross-session update (the frame carries the CHILD id + the PARENT id in its payload),
+  // so it's handled here rather than in foldSessionFrame (which routes by a single session_id). The child's
+  // own status/transcript still stream in via its `session.started` etc.
+  if (envelope.type === 'session.chained' && envelope.session_id !== undefined) {
+    const chained = sessionChainedPayloadSchema.safeParse(envelope.payload);
+    if (!chained.success) return;
+    const childId = envelope.session_id;
+    const { parentSessionId } = chained.data;
+    sessionMap.update((map) => {
+      const next = new Map(map);
+      // Record the parent link on the child (create its state if the chained frame beat session.started).
+      const child = next.get(childId) ?? initialSessionState;
+      next.set(childId, { ...child, parentSessionId });
+      // Link the parent's handover to the child so its card can offer a "view continuation" link.
+      const parent = next.get(parentSessionId);
+      if (parent) next.set(parentSessionId, linkHandoverChild(parent, childId));
+      return next;
+    });
     return;
   }
   sessionMap.update((map) => foldSessionFrame(map, envelope));

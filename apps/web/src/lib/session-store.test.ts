@@ -6,6 +6,7 @@ import { type RelayConnection, type RelayConnectionOptions } from './relay-clien
 import {
   adoptState,
   answer,
+  answerHandover,
   connect,
   disconnect,
   launch,
@@ -81,6 +82,30 @@ function makeFakeConnection() {
               },
             ],
           },
+        }),
+      );
+    },
+    /** Simulate the daemon offering a free-form handover on an adopted session (Journey 4). */
+    handover(sessionId: string, requestId: string) {
+      emit(
+        makeEnvelope({
+          type: 'agent.handover',
+          userId,
+          deviceId,
+          sessionId,
+          payload: { requestId, question: 'Which database?', summary: 'scaffolding an API' },
+        }),
+      );
+    },
+    /** Simulate the daemon registering a forked continuation linked to its parent (Journey 4). */
+    chained(childSessionId: string, parentSessionId: string) {
+      emit(
+        makeEnvelope({
+          type: 'session.chained',
+          userId,
+          deviceId,
+          sessionId: childSessionId,
+          payload: { clientRef: 'fork-1', parentSessionId },
         }),
       );
     },
@@ -204,6 +229,29 @@ describe('session-store launch correlation (Task 11)', () => {
         payload: { requestId: 'q1', answers: [{ selectedLabels: ['Postgres'] }] },
       },
     ]);
+  });
+
+  it('takes over a handover and links parent ↔ child on session.chained (Journey 4)', () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started('sess-parent');
+    fake.handover('sess-parent', 'h1');
+
+    answerHandover('sess-parent', { requestId: 'h1', answerText: 'Use Postgres.' });
+    // Marked in-flight locally (submitting) and forwarded to the relay.
+    expect(fake.handovers).toEqual([
+      { sessionId: 'sess-parent', payload: { requestId: 'h1', answerText: 'Use Postgres.' } },
+    ]);
+
+    // The daemon registers the forked continuation → parent ↔ child linked across sessions.
+    fake.chained('sess-child', 'sess-parent');
+    const map = get(sessions);
+    const parentEntry = map.get('sess-parent')?.entries.find((e) => e.kind === 'handover');
+    expect(parentEntry?.kind === 'handover' && parentEntry.childSessionId).toBe('sess-child');
+    expect(map.get('sess-child')?.parentSessionId).toBe('sess-parent');
   });
 
   it('reads + writes the adoption policy and surfaces adopt.state (Journey 3)', () => {

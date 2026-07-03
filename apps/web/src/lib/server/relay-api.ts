@@ -44,6 +44,8 @@ export interface RelaySession {
   status: SessionStatusName;
   /** `launched` (started from telecode) or `external` (a session telecode adopted from the user's machine). */
   origin: SessionOrigin;
+  /** The adopted session this one continues (free-form handover, Journey 4), or null when unchained. */
+  parentSessionId: string | null;
   createdAt: Date;
   updatedAt: Date;
   endedAt: Date | null;
@@ -166,6 +168,7 @@ export async function listSessions(sessionToken: string): Promise<RelaySession[]
       title: string | null;
       status: SessionStatusName;
       origin?: SessionOrigin;
+      parent_session_id?: string | null;
       created_at: string;
       updated_at: string;
       ended_at: string | null;
@@ -178,6 +181,7 @@ export async function listSessions(sessionToken: string): Promise<RelaySession[]
     status: session.status,
     // Default to `launched` so a relay that predates the origin field degrades cleanly.
     origin: session.origin ?? 'launched',
+    parentSessionId: session.parent_session_id ?? null,
     createdAt: new Date(session.created_at),
     updatedAt: new Date(session.updated_at),
     endedAt: session.ended_at ? new Date(session.ended_at) : null,

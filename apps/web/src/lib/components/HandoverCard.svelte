@@ -93,6 +93,9 @@
         <p class="answer-readback"><span class="a-q">YOUR ANSWER</span> {entry.answerText}</p>
       {/if}
       <p class="sent">Taken over · continued in a new session</p>
+      {#if entry.childSessionId}
+        <a class="continuation" href={`/sessions/${entry.childSessionId}`}>View the continuation →</a>
+      {/if}
     </div>
   {:else}
     <!-- closed: the session ended before this was taken over. -->
@@ -225,6 +228,20 @@
     font-size: var(--text-xs);
     letter-spacing: 0.04em;
     color: var(--success);
+  }
+  .continuation {
+    align-self: flex-start;
+    font-size: var(--text-sm);
+    color: var(--accent);
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+  }
+  .continuation:hover {
+    text-decoration: underline;
+  }
+  .continuation:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus-ring);
   }
   .closed {
     margin: 0;

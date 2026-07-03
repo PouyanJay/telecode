@@ -78,6 +78,8 @@ export type TranscriptEntry =
       readonly state: HandoverState;
       /** The user's free-text answer — present once they took it over (submitting/submitted). */
       readonly answerText?: string;
+      /** The forked continuation this handover launched — present once the daemon registered it (link target). */
+      readonly childSessionId?: string;
     };
 
 export interface SessionState {
@@ -92,6 +94,11 @@ export interface SessionState {
    * arrives (the session moved on). Non-blocking — distinct from the `awaiting_input` gate (Journey 3).
    */
   readonly notice: string | null;
+  /**
+   * The adopted session this one continues (free-form handover, Journey 4), or null when unchained. Set
+   * from the daemon's `session.chained` for a forked continuation, so the child can link back to its parent.
+   */
+  readonly parentSessionId: string | null;
 }
 
 export const initialSessionState: SessionState = {
@@ -100,11 +107,19 @@ export const initialSessionState: SessionState = {
   entries: [],
   seq: 0,
   notice: null,
+  parentSessionId: null,
 };
 
 /** Reset to a fresh transcript when launching a new session (the relay assigns the next id). */
 export function startingState(): SessionState {
-  return { sessionId: null, status: 'starting', entries: [], seq: 0, notice: null };
+  return {
+    sessionId: null,
+    status: 'starting',
+    entries: [],
+    seq: 0,
+    notice: null,
+    parentSessionId: null,
+  };
 }
 
 /**
@@ -370,6 +385,7 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
         entries,
         seq: entries.length,
         notice: null, // a backfilled reopen carries no live notice
+        parentSessionId: base.parentSessionId,
       };
     }
 
@@ -459,4 +475,26 @@ export function markHandoverSubmitting(
 /** The free-form handover currently awaiting the user, if any. */
 export function pendingHandover(state: SessionState): TranscriptEntry | undefined {
   return state.entries.find((entry) => entry.kind === 'handover' && entry.state === 'pending');
+}
+
+/**
+ * Link a handover to the forked continuation the daemon just registered (its `session.chained`), so the
+ * card can offer a "view the continuation" link. Sets `childSessionId` on the most recent taken-over
+ * handover (submitting/submitted) that doesn't already have one — a handover leads to exactly one child.
+ */
+export function linkHandoverChild(state: SessionState, childSessionId: string): SessionState {
+  let linked = false;
+  const entries = [...state.entries].reverse().map((entry) => {
+    if (
+      !linked &&
+      entry.kind === 'handover' &&
+      entry.childSessionId === undefined &&
+      (entry.state === 'submitting' || entry.state === 'submitted')
+    ) {
+      linked = true;
+      return { ...entry, childSessionId };
+    }
+    return entry;
+  });
+  return linked ? { ...state, entries: entries.reverse() } : state;
 }

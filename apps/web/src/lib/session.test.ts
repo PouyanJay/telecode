@@ -8,6 +8,7 @@ import {
   initialSessionState,
   markAnswering,
   markDeciding,
+  linkHandoverChild,
   markHandoverSubmitting,
   pendingHandover,
   pendingPermission,
@@ -416,5 +417,19 @@ describe('session reducer: free-form handover (Journey 4)', () => {
   it('ignores an agent.handover with an invalid payload', () => {
     const state = applyEnvelope(startingState(), frame('agent.handover', { requestId: 'h1' }));
     expect(state.entries).toHaveLength(0);
+  });
+
+  it('links the taken-over handover to its forked continuation (childSessionId)', () => {
+    let state = fold([frame('session.started', {}), frame('agent.handover', HANDOVER)]);
+    state = markHandoverSubmitting(state, 'h1', 'Use Postgres.');
+    state = linkHandoverChild(state, 'child-sess-1');
+    const linked = state.entries.find((e) => e.kind === 'handover');
+    expect(linked?.kind === 'handover' && linked.childSessionId).toBe('child-sess-1');
+  });
+
+  it('does not link when there is no taken-over handover to link', () => {
+    const state = fold([frame('session.started', {}), frame('agent.handover', HANDOVER)]);
+    // Still pending (not submitting/submitted) → nothing to link, same state reference back.
+    expect(linkHandoverChild(state, 'child-sess-1')).toBe(state);
   });
 });
