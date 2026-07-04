@@ -42,6 +42,11 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
       });
       // 0600: the plist may carry env values — keep it owner-only.
       await writeFile(plistPath, plist, { mode: 0o600 });
+      // Boot out any previously-loaded instance first so a re-install — or an updated plist — reloads
+      // cleanly instead of failing "already bootstrapped". Best-effort: the result is ignored in ALL
+      // cases (it exits non-zero on a first install when nothing is loaded); the bootstrap below surfaces
+      // any real failure.
+      await deps.runner.run({ command: 'launchctl', args: ['bootout', domain, plistPath] });
       const result = await deps.runner.run({
         command: 'launchctl',
         args: ['bootstrap', domain, plistPath],
