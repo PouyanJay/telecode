@@ -20,6 +20,7 @@ import {
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   type AdoptSettings,
+  type AdoptStatePayload,
   type AgentQuestionItem,
   type Envelope,
   type MessageType,
@@ -38,6 +39,9 @@ import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt
 import { type HookEvent } from './adopt/hook-event';
 import { buildHandoverFallbackPrompt } from './adopt/handover-fallback-prompt';
 import { buildHandoverSummary } from './adopt/handover-summary';
+import { installHooks } from './adopt/hooks-install';
+import { readHooksStatus } from './adopt/hooks-status';
+import { uninstallHooks } from './adopt/hooks-uninstall';
 import { isAdoptionAllowed } from './adopt/is-adoption-allowed';
 import { isFreeFormQuestion } from './adopt/free-form-question';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
@@ -59,6 +63,9 @@ import { type RepoManager } from './sessions/repo-manager';
 import { type SessionStore } from './sessions/session-store';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
+/** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
+const HANDOVER_TITLE_PREVIEW_CHARS = 60;
+
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
  * reaches in), announces itself for `(userId, deviceId)`, and supervises work for that
@@ -68,9 +75,6 @@ import { type WorktreeManager } from './sessions/worktree-manager';
  * human-in-the-loop gate: the daemon forwards it as `agent.permission_request` and blocks `canUseTool`
  * until the matching `permission.decision` returns from the browser.
  */
-/** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
-const HANDOVER_TITLE_PREVIEW_CHARS = 60;
-
 export interface DaemonOptions {
   readonly relayUrl: string;
   readonly userId: string;
@@ -127,6 +131,16 @@ export interface DaemonOptions {
      * memory only (a web change applies for the session but isn't persisted).
      */
     readonly configPath?: string;
+    /**
+     * Frictionless setup: when set, the daemon AUTO-INSTALLS its Claude Code hooks into this path
+     * (`~/.claude/settings.json`) on start whenever adoption is enabled — no manual `telecode hooks install`.
+     * `hookCommand` is what Claude Code runs for each hook event (the daemon's own `"<bin>" hook`). Omitted →
+     * no auto-install (the hooks are managed only via the CLI). Disabling adoption uninstalls them.
+     */
+    readonly settingsPath?: string;
+    readonly hookCommand?: string;
+    /** Hook `timeout` in seconds for the auto-install (AD-3 long timeout); default 3600 in installHooks. */
+    readonly hookTimeoutSeconds?: number;
   };
   readonly logger?: Logger;
 }
@@ -1129,11 +1143,60 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
   }
 
+  /** Whether telecode's Claude Code hooks are installed, and for which events — the setup status the UI shows. */
+  async function fetchHookInstallStatus(): Promise<{ installed: boolean; events: string[] }> {
+    const settingsPath = options.adopt?.settingsPath;
+    if (settingsPath === undefined) return { installed: false, events: [] };
+    try {
+      return await readHooksStatus({ settingsPath });
+    } catch (err) {
+      log.warn({ err, deviceId: options.deviceId }, 'daemon: could not read adoption hook status');
+      return { installed: false, events: [] };
+    }
+  }
+
+  /**
+   * Apply the hook install-state the persisted `enabled` flag demands — the heart of frictionless setup:
+   * adoption enabled → auto-install telecode's Claude Code hooks (idempotent, no manual step); disabled →
+   * uninstall them (telecode backs out of `~/.claude` entirely). No-op without a configured settings path /
+   * hook command. FAIL-SOFT: a settings-write error never crashes the daemon — the UI then shows
+   * hooks-not-installed and the web toggle can retry.
+   */
+  async function applyHookInstallState(): Promise<void> {
+    const settingsPath = options.adopt?.settingsPath;
+    const command = options.adopt?.hookCommand;
+    if (settingsPath === undefined || command === undefined) return;
+    try {
+      if (adoptConfig.enabled) {
+        await installHooks({
+          settingsPath,
+          command,
+          ...(options.adopt?.hookTimeoutSeconds !== undefined
+            ? { timeoutSeconds: options.adopt.hookTimeoutSeconds }
+            : {}),
+        });
+        log.info({ deviceId: options.deviceId }, 'daemon: adoption hooks installed automatically');
+      } else {
+        await uninstallHooks({ settingsPath });
+        log.info({ deviceId: options.deviceId }, 'daemon: adoption disabled — hooks removed');
+      }
+    } catch (err) {
+      log.warn({ err, deviceId: options.deviceId }, 'daemon: could not apply adoption hook state');
+    }
+  }
+
+  /** The `adopt.state` payload: the current policy plus the live hook-install status (for the web to render). */
+  async function buildAdoptState(): Promise<AdoptStatePayload> {
+    const { installed, events } = await fetchHookInstallStatus();
+    return { ...adoptConfig, hooksInstalled: installed, events };
+  }
+
   /**
    * Handle a sealed `adopt.config` (web → daemon, Journey 3): open it under the device shared key, optionally
-   * persist + apply a new policy, then reply the current policy as `adopt.state` sealed back to the requesting
-   * browser. The relay only ever sees ciphertext, so the denylist's repo paths never leave the machine in the
-   * clear (invariant #5). Cleartext on a pre-E2E daemon (no keypair).
+   * persist + apply a new policy (installing/uninstalling the hooks to match — Journey "frictionless setup"),
+   * then reply the current policy + setup status as `adopt.state` sealed back to the requesting browser. The
+   * relay only ever sees ciphertext, so the denylist's repo paths never leave the machine in the clear
+   * (invariant #5). Cleartext on a pre-E2E daemon (no keypair).
    */
   async function handleAdoptConfig(envelope: Envelope): Promise<void> {
     let payload: unknown;
@@ -1154,6 +1217,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (parsed.data.set) {
       adoptConfig = parsed.data.set;
       if (options.adopt?.configPath) await saveAdoptConfig(options.adopt.configPath, adoptConfig);
+      // The enabled toggle DRIVES hook install/uninstall (one control, from the browser): enabling installs
+      // the hooks, disabling backs telecode out of ~/.claude entirely.
+      await applyHookInstallState();
       // Log the shape, never the denylist paths (they can name private repos — keep them out of log sinks).
       log.info(
         {
@@ -1164,9 +1230,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
         'daemon: adoption policy updated',
       );
     }
-    // Reply the current policy, sealed to the requesting browser so repo paths never reach the relay.
+    // Reply the current policy + setup status, sealed to the requesting browser so repo paths never reach the relay.
     const browserPublicKey = envelope.sender_public_key;
-    const state = adoptConfig;
+    const state = await buildAdoptState();
     enqueueSend(async () => {
       const fields: { payload: unknown; nonce: string } =
         cipher.enabled && browserPublicKey !== undefined
@@ -1558,6 +1624,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (options.adopt?.configPath !== undefined) {
         adoptConfig = await loadAdoptConfig(options.adopt.configPath);
       }
+      // Frictionless setup: bring adoption online with NO manual step — auto-install the Claude Code hooks
+      // when adoption is enabled (the default), or ensure they're removed when the user has disabled it. A
+      // local file write, independent of the relay; fail-soft (never blocks start).
+      await applyHookInstallState();
       await new Promise<void>((resolve, reject) => {
         let settled = false;
         const onReady = (): void => {

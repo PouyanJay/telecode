@@ -49,6 +49,15 @@ const log = pino({
 });
 
 const cliArgs = process.argv.slice(2);
+
+// `~/.claude/settings.json` holds telecode's hooks. `hookCommand` is what Claude Code runs for each event:
+// this very bin (quoted for spaces) + the `hook` subcommand. `process.argv[1]` is `string | undefined` under
+// strict indexing; if the bin path can't be determined, the command is left undefined (adoption can't
+// auto-install rather than baking a broken `"undefined" hook` command into the user's settings).
+const claudeSettingsPath = join(homedir(), '.claude', 'settings.json');
+const daemonBinPath = process.argv[1];
+const hookCommand = daemonBinPath !== undefined ? `"${daemonBinPath}" hook` : undefined;
+
 // `telecode doctor`: a preflight that reports whether this machine can run an agent (Node version, API
 // key, pairing, relay reachability) and exits — it never starts the daemon.
 if (cliArgs.includes('doctor')) {
@@ -71,13 +80,14 @@ if (cliArgs[0] === 'hook') {
 // `telecode hooks <install|uninstall|status>`: opt in/out of adopting your own Claude Code sessions by
 // (un)installing telecode's hooks in `~/.claude/settings.json` — transparent, idempotent, reversible.
 if (cliArgs[0] === 'hooks') {
-  const settingsPath = join(homedir(), '.claude', 'settings.json');
-  // The command Claude Code will run: this very bin (quoted in case the install path has spaces), plus
-  // the `hook` subcommand.
-  const command = `"${process.argv[1]}" hook`;
+  const settingsPath = claudeSettingsPath;
   switch (cliArgs[1]) {
     case 'install':
-      await installHooks({ settingsPath, command });
+      if (hookCommand === undefined) {
+        log.error('telecode: cannot determine this bin path — run via `npx` or an absolute path');
+        process.exit(1);
+      }
+      await installHooks({ settingsPath, command: hookCommand });
       log.info({ settingsPath }, 'telecode: installed Claude Code hooks — adoption enabled');
       break;
     case 'uninstall':
@@ -140,14 +150,13 @@ const defaultRepoPath = process.env.TELECODE_REPO;
 // reopened session backfills its real transcript (invariant #7) rather than going blank.
 const sessionsRoot = process.env.TELECODE_SESSIONS_ROOT ?? join(telecodeHome, 'sessions');
 const sessionStore = createSessionStore({ dir: sessionsRoot, logger: log });
-// Adopt externally-started Claude Code sessions: the daemon listens here for the `telecode hook` bridge.
-// Listening is harmless until the user opts in with `telecode hooks install` (which is what makes Claude
-// Code actually call the bridge). Disable entirely with TELECODE_ADOPT=0.
+// Adopt externally-started Claude Code sessions: the daemon listens here for the `telecode hook` bridge,
+// and — frictionless setup — AUTO-INSTALLS the Claude Code hooks on start when adoption is enabled (no
+// manual `telecode hooks install`). Disable entirely with TELECODE_ADOPT=0.
 const isAdoptEnabled = process.env.TELECODE_ADOPT !== '0';
 const hookSocketPath = join(telecodeHome, 'run', 'hook.sock');
 // The per-machine adoption policy (enabled + denylist), managed from the web and applied at runtime (Journey 3).
 const adoptConfigPath = join(telecodeHome, 'adopt-config.json');
-
 const daemon = createDaemon({
   relayUrl: relayWsUrl,
   userId: credentials.userId,
@@ -160,7 +169,17 @@ const daemon = createDaemon({
   repoManager,
   sessionStore,
   ...(defaultRepoPath ? { defaultRepoPath } : {}),
-  ...(isAdoptEnabled ? { adopt: { socketPath: hookSocketPath, configPath: adoptConfigPath } } : {}),
+  ...(isAdoptEnabled
+    ? {
+        adopt: {
+          socketPath: hookSocketPath,
+          configPath: adoptConfigPath,
+          settingsPath: claudeSettingsPath,
+          // Only auto-install when the bin path is known; otherwise adoption listens but installs nothing.
+          ...(hookCommand !== undefined ? { hookCommand } : {}),
+        },
+      }
+    : {}),
 });
 
 try {

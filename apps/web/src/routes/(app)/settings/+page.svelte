@@ -8,6 +8,7 @@
   import { Button, Panel, Switch } from '@telecode/ui';
   import type { PermissionModeName } from '@telecode/protocol';
 
+  import { resolveAdoptSetupState } from '$lib/adopt-setup-state';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import PermissionModeField from '$lib/components/PermissionModeField.svelte';
   import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
@@ -143,8 +144,8 @@
     <Panel title="Adopted sessions" meta="this device">
       <div class="body">
         <p class="hint">
-          telecode can monitor and steer the Claude Code sessions you start yourself (terminal or IDE). Run
-          <code class="mono">telecode hooks install</code> on this device to enable it.
+          telecode monitors and steers the Claude Code sessions you start yourself (terminal or IDE). It sets
+          this up automatically when you pair the device — nothing to install by hand.
         </p>
 
         {#if !$adoptState}
@@ -154,6 +155,30 @@
               : 'Connect this device to manage adoption.'}
           </p>
         {:else}
+          {@const setupState = resolveAdoptSetupState($adoptState)}
+          <div class="status" data-state={setupState} role="status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="status-label">
+              {setupState === 'active'
+                ? 'ACTIVE'
+                : setupState === 'attention'
+                  ? 'NOT INSTALLED'
+                  : 'OFF'}
+            </span>
+            <span class="status-detail">
+              {#if setupState === 'active'}
+                Watching your sessions — {$adoptState.events.length} hook{$adoptState.events.length === 1
+                  ? ''
+                  : 's'} installed on this device.
+              {:else if setupState === 'attention'}
+                telecode couldn’t install its hooks — check that <code class="mono">~/.claude</code> is
+                writable, then toggle adoption off and on.
+              {:else}
+                telecode isn’t touching your Claude Code config.
+              {/if}
+            </span>
+          </div>
+
           <div class="toggle">
             <div class="toggle-text">
               <span class="toggle-label">Adopt my sessions</span>
@@ -301,6 +326,43 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-5);
+  }
+  /* Setup status: a dot + UPPERCASE mono label (the house status convention), no saturated pill. */
+  .status {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .status-dot {
+    align-self: center;
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: var(--radius-full);
+    background: var(--text-muted);
+  }
+  .status[data-state='active'] .status-dot {
+    background: var(--success);
+  }
+  .status[data-state='attention'] .status-dot {
+    background: var(--warning);
+  }
+  .status-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--text-secondary);
+  }
+  .status[data-state='active'] .status-label {
+    color: var(--success);
+  }
+  .status[data-state='attention'] .status-label {
+    color: var(--warning);
+  }
+  .status-detail {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
   .field {
     display: flex;
