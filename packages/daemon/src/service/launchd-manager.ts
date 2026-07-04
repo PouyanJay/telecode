@@ -1,7 +1,9 @@
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import type { CommandResult } from './command-runner';
+import { pathExists } from '../sessions/path-exists';
+import { commandDetail } from './command-detail';
+import { resolveLogPaths } from './log-paths';
 import { renderLaunchdPlist } from './render-launchd-plist';
 import type {
   ServiceActionResult,
@@ -18,27 +20,11 @@ import type {
  */
 const LABEL = 'ai.telecode.daemon';
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** A human-readable detail for a failed launchctl call: its stderr, or the bare exit code. */
-function commandDetail(result: CommandResult): string {
-  return result.stderr.trim() || `exit ${result.code}`;
-}
-
 /** Create the macOS launchd {@link ServiceManager}. */
 export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
   const launchAgentsDir = join(deps.home, 'Library', 'LaunchAgents');
   const plistPath = join(launchAgentsDir, `${LABEL}.plist`);
-  const logDir = join(deps.home, '.telecode', 'logs');
-  const stdoutPath = join(logDir, 'daemon.log');
-  const stderrPath = join(logDir, 'daemon.err.log');
+  const { logDir, stdoutPath, stderrPath } = resolveLogPaths(deps.home);
   const uid = deps.uid ?? process.getuid?.() ?? 0;
   const domain = `gui/${uid}`;
   const serviceTarget = `${domain}/${LABEL}`;
@@ -96,7 +82,7 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
 
   async function start(): Promise<ServiceActionResult> {
     try {
-      if (!(await fileExists(plistPath))) {
+      if (!(await pathExists(plistPath))) {
         return { ok: false, message: 'not installed — run `telecode service install` first' };
       }
       // kickstart -k (re)starts the job now, killing any existing instance first.
@@ -128,7 +114,7 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
   }
 
   async function status(): Promise<ServiceStatus> {
-    const installed = await fileExists(plistPath);
+    const installed = await pathExists(plistPath);
     // `launchctl print <target>` exits non-zero when the job is not loaded; when loaded its output
     // carries a `state = running` line. The plist always sets RunAtLoad, so a present plist is
     // enabled-at-login.

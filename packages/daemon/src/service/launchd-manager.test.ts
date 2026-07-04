@@ -4,7 +4,8 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { CommandResult, CommandRunner, CommandSpec } from './command-runner';
+import type { CommandResult, CommandRunner } from './command-runner';
+import { createRecordingRunner } from './fake-command-runner';
 import { createLaunchdManager } from './launchd-manager';
 
 /**
@@ -14,20 +15,6 @@ import { createLaunchdManager } from './launchd-manager';
  */
 const UID = 501;
 const LABEL = 'ai.telecode.daemon';
-
-function scriptedRunner(handler: (spec: CommandSpec) => CommandResult): {
-  runner: CommandRunner;
-  calls: CommandSpec[];
-} {
-  const calls: CommandSpec[] = [];
-  const runner: CommandRunner = {
-    run(spec) {
-      calls.push(spec);
-      return Promise.resolve(handler(spec));
-    },
-  };
-  return { runner, calls };
-}
 
 const ok: CommandResult = { ok: true, stdout: '', stderr: '', code: 0 };
 const failed: CommandResult = {
@@ -62,7 +49,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
   it('reports running when launchctl print shows the job in the running state', async () => {
     // Arrange
     await writePlist();
-    const { runner, calls } = scriptedRunner((spec) =>
+    const { runner, calls } = createRecordingRunner((spec) =>
       spec.args[0] === 'print'
         ? { ok: true, stdout: 'ai.telecode.daemon = {\n\tstate = running\n}', stderr: '', code: 0 }
         : ok,
@@ -84,7 +71,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
   it('reports not-running when launchctl print cannot find the job', async () => {
     // Arrange
     await writePlist();
-    const { runner } = scriptedRunner((spec) =>
+    const { runner } = createRecordingRunner((spec) =>
       spec.args[0] === 'print'
         ? { ok: false, stdout: '', stderr: 'Could not find service', code: 113 }
         : ok,
@@ -100,7 +87,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
 
   it('does not probe launchctl for running state when the plist is absent', async () => {
     // Arrange
-    const { runner, calls } = scriptedRunner(() => ok);
+    const { runner, calls } = createRecordingRunner(() => ok);
 
     // Act
     const status = await manager(runner).status();
@@ -114,7 +101,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
   it('start kickstarts the job when installed', async () => {
     // Arrange
     await writePlist();
-    const { runner, calls } = scriptedRunner(() => ok);
+    const { runner, calls } = createRecordingRunner(() => ok);
 
     // Act
     const result = await manager(runner).start();
@@ -130,7 +117,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
 
   it('start refuses (without touching launchctl) when the service is not installed', async () => {
     // Arrange
-    const { runner, calls } = scriptedRunner(() => ok);
+    const { runner, calls } = createRecordingRunner(() => ok);
 
     // Act
     const result = await manager(runner).start();
@@ -144,7 +131,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
   it('start surfaces a kickstart failure as a clean non-ok result', async () => {
     // Arrange
     await writePlist();
-    const { runner } = scriptedRunner(() => failed);
+    const { runner } = createRecordingRunner(() => failed);
 
     // Act
     const result = await manager(runner).start();
@@ -157,7 +144,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
   it('stop boots the job out of the login domain', async () => {
     // Arrange
     await writePlist();
-    const { runner, calls } = scriptedRunner(() => ok);
+    const { runner, calls } = createRecordingRunner(() => ok);
 
     // Act
     const result = await manager(runner).stop();
@@ -173,7 +160,7 @@ describe('createLaunchdManager — running state + start/stop', () => {
   it('stop surfaces a bootout failure as a clean non-ok result', async () => {
     // Arrange
     await writePlist();
-    const { runner } = scriptedRunner(() => failed);
+    const { runner } = createRecordingRunner(() => failed);
 
     // Act
     const result = await manager(runner).stop();

@@ -4,27 +4,16 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { CommandResult, CommandRunner, CommandSpec } from './command-runner';
+import { createRecordingRunner } from './fake-command-runner';
 import { runServiceCli } from './service-cli';
 
 /**
  * Walking skeleton for the background login service: drive the `telecode service` CLI end-to-end
  * through the OS selector → the macOS launchd manager → a REAL temp filesystem, with the OS command
- * boundary faked. `launchctl` is never run in CI — the fake `CommandRunner` records the planned
+ * boundary faked. `launchctl` is never run in CI — the recording `CommandRunner` captures the planned
  * commands so we assert the *exact plan* (bootstrap on install, bootout on uninstall) alongside the
  * on-disk plist artifact. This proves every layer of the feature is wired before any real behavior.
  */
-function createFakeRunner(result?: CommandResult): { runner: CommandRunner; calls: CommandSpec[] } {
-  const calls: CommandSpec[] = [];
-  const runner: CommandRunner = {
-    run(spec) {
-      calls.push(spec);
-      return Promise.resolve(result ?? { ok: true, stdout: '', stderr: '', code: 0 });
-    },
-  };
-  return { runner, calls };
-}
-
 describe('runServiceCli — macOS launchd walking skeleton', () => {
   const UID = 501;
   const RELAY = 'wss://relay.example.test/ws';
@@ -40,7 +29,7 @@ describe('runServiceCli — macOS launchd walking skeleton', () => {
 
   it('runs the install → status → uninstall roundtrip, writing the plist and planning launchctl', async () => {
     // Arrange
-    const { runner, calls } = createFakeRunner();
+    const { runner, calls } = createRecordingRunner();
     const out: string[] = [];
     const base = {
       env: { TELECODE_RELAY_URL: RELAY } as NodeJS.ProcessEnv,
@@ -86,12 +75,12 @@ describe('runServiceCli — macOS launchd walking skeleton', () => {
 
   it('reports a launchctl bootstrap failure as a non-zero exit and a clean message', async () => {
     // Arrange — the fake runner reports launchctl failing (e.g. the agent is already loaded)
-    const { runner } = createFakeRunner({
+    const { runner } = createRecordingRunner(() => ({
       ok: false,
       stdout: '',
       stderr: 'Bootstrap failed: 5: Input/output error',
       code: 5,
-    });
+    }));
     const out: string[] = [];
 
     // Act
@@ -114,7 +103,7 @@ describe('runServiceCli — macOS launchd walking skeleton', () => {
 
   it('reports an unsupported platform and leaves the filesystem untouched', async () => {
     // Arrange
-    const { runner } = createFakeRunner();
+    const { runner } = createRecordingRunner();
     const out: string[] = [];
 
     // Act
@@ -136,6 +125,46 @@ describe('runServiceCli — macOS launchd walking skeleton', () => {
   });
 });
 
+describe('runServiceCli — Linux routing (systemd)', () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'telecode-svc-linux-'));
+  });
+
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it('routes a linux platform to the systemd manager, writing the user unit', async () => {
+    // Arrange
+    const { runner, calls } = createRecordingRunner();
+    const out: string[] = [];
+
+    // Act
+    const code = await runServiceCli({
+      argv: ['service', 'install'],
+      env: { TELECODE_RELAY_URL: 'wss://relay.example.test/ws' },
+      platform: 'linux',
+      home,
+      runner,
+      nodePath: '/usr/bin/node',
+      binPath: '/opt/telecode/bin/telecode.mjs',
+      write: (t) => void out.push(t),
+    });
+
+    // Assert
+    expect(code).toBe(0);
+    const unit = await readFile(
+      join(home, '.config', 'systemd', 'user', 'telecode.service'),
+      'utf8',
+    );
+    expect(unit).toContain('[Service]');
+    expect(unit).toContain('wss://relay.example.test/ws');
+    expect(calls.some((c) => c.command === 'systemctl' && c.args.includes('enable'))).toBe(true);
+  });
+});
+
 describe('runServiceCli — start / stop / logs dispatch', () => {
   let home: string;
 
@@ -153,7 +182,7 @@ describe('runServiceCli — start / stop / logs dispatch', () => {
       env: {} as NodeJS.ProcessEnv,
       platform: 'darwin' as const,
       home: currentHome,
-      runner: createFakeRunner().runner,
+      runner: createRecordingRunner().runner,
       uid: 501,
       nodePath: '/usr/local/bin/node',
       binPath: '/opt/telecode/bin/telecode.mjs',
