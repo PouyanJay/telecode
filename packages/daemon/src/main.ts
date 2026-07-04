@@ -14,6 +14,7 @@ import { runDoctorCli } from './doctor-cli';
 import { detectOs } from './os-info';
 import { pairDevice } from './pairing';
 import { resolveRelayUrl } from './relay-url';
+import { runServiceCli } from './service/service-cli';
 import { createGitRepoManager } from './sessions/repo-manager';
 import { createSessionStore } from './sessions/session-store';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
@@ -105,6 +106,14 @@ if (cliArgs[0] === 'hooks') {
       process.exit(1);
   }
   process.exit(0);
+}
+
+// `telecode service <install|uninstall|status>`: host the daemon as a user-level login service so it
+// starts at login, restarts on crash, and survives reboot — no terminal to keep alive. This only manages
+// *how the daemon is hosted*; it never starts the daemon inline (the service does that at login).
+if (cliArgs[0] === 'service') {
+  const exitCode = await runServiceCli({ argv: cliArgs, env: process.env });
+  process.exit(exitCode);
 }
 
 // `--relay-url <wss://…/ws>` (or `TELECODE_RELAY_URL`) points the daemon at a self-hosted relay; the
