@@ -5,6 +5,7 @@ import { resolveRelayUrl } from '../relay-url';
 import type { CommandRunner } from './command-runner';
 import { createExecCommandRunner } from './exec-command-runner';
 import { selectServiceManager } from './select-service-manager';
+import { describeExecutableStability } from './service-executable';
 import type { ServiceActionResult, ServiceManager, ServiceStatus } from './service-manager';
 
 /**
@@ -124,6 +125,9 @@ export async function runServiceCli(options: ServiceCliOptions): Promise<number>
   // unset/invalid URL, so resolution is confined to the install path.
   let daemonArgs: readonly string[] = [];
   if (subcommand === 'install') {
+    // A service pinned to an ephemeral npx/dlx path breaks once the cache is cleared — warn but proceed.
+    const { hint } = describeExecutableStability(binPath);
+    if (hint) write(`${hint}\n`);
     try {
       daemonArgs = ['--relay-url', resolveRelayUrl(options.argv, options.env)];
     } catch (err) {

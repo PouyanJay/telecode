@@ -15,6 +15,7 @@ import { detectOs } from './os-info';
 import { pairDevice } from './pairing';
 import { resolveRelayUrl } from './relay-url';
 import { runServiceCli } from './service/service-cli';
+import { acquireSingleInstanceLock } from './single-instance-lock';
 import { createGitRepoManager } from './sessions/repo-manager';
 import { createSessionStore } from './sessions/session-store';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
@@ -48,6 +49,16 @@ const log = pino({
     censor: '[redacted]',
   },
 });
+
+/**
+ * Release the single-instance lock on the one `exit` event, and route SIGINT/SIGTERM through
+ * `process.exit(0)` so the release runs exactly once regardless of how the daemon stops.
+ */
+function releaseLockOnExit(release: () => void): void {
+  process.once('exit', release);
+  process.once('SIGINT', () => process.exit(0));
+  process.once('SIGTERM', () => process.exit(0));
+}
 
 const cliArgs = process.argv.slice(2);
 
@@ -128,6 +139,21 @@ try {
 log.info({ relayUrl: relayWsUrl }, 'daemon: using relay');
 // Derive the relay's HTTP base for the pairing endpoints (ws→http, wss→https, strip the /ws path).
 const relayHttpUrl = relayWsUrl.replace(/^ws/, 'http').replace(/\/ws$/, '');
+
+// Single-instance lock: refuse to start a second daemon (e.g. a manual `telecode` while the background
+// service already runs) — two daemons as the same device would fight over sessions. A stale lock from a
+// crashed daemon is reclaimed automatically; the lock is released on exit so the survivor can take over.
+const pidFilePath = join(homedir(), '.telecode', 'run', 'daemon.pid');
+const lock = await acquireSingleInstanceLock({ pidFilePath });
+if (!lock.acquired) {
+  log.warn(
+    { holderPid: lock.holderPid },
+    'daemon: another telecode daemon is already running — not starting a second instance',
+  );
+  process.exit(0);
+}
+// Release once, on the single `exit` event; a signal simply routes to `exit` via `process.exit(0)`.
+releaseLockOnExit(lock.release);
 
 let credentials = await loadCredentials();
 if (!credentials) {

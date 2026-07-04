@@ -272,3 +272,41 @@ describe('runServiceCli — start / stop / logs dispatch', () => {
     expect(out.join('')).toMatch(/no logs yet/i);
   });
 });
+
+describe('runServiceCli — install guards', () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'telecode-svc-guard-'));
+  });
+
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it('warns about an ephemeral npx executable but still installs', async () => {
+    // Arrange — a bin path inside npm's npx cache
+    const { runner } = createRecordingRunner();
+    const out: string[] = [];
+
+    // Act
+    const code = await runServiceCli({
+      argv: ['service', 'install'],
+      env: {},
+      platform: 'darwin',
+      home,
+      runner,
+      uid: 501,
+      nodePath: '/usr/local/bin/node',
+      binPath: '/Users/u/.npm/_npx/a1b2/node_modules/@telecode/cli/bin/telecode.mjs',
+      write: (t) => void out.push(t),
+    });
+
+    // Assert — the install still proceeds (code 0, plist written) and the warning is surfaced
+    expect(code).toBe(0);
+    await expect(
+      readFile(join(home, 'Library', 'LaunchAgents', 'ai.telecode.daemon.plist'), 'utf8'),
+    ).resolves.toContain('ai.telecode.daemon');
+    expect(out.join('')).toMatch(/-g|global/i);
+  });
+});
