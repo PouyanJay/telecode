@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -133,5 +133,113 @@ describe('runServiceCli — macOS launchd walking skeleton', () => {
     expect(code).toBe(1);
     expect(out.join('')).toMatch(/not.*supported/i);
     expect(await readdir(home)).toHaveLength(0);
+  });
+});
+
+describe('runServiceCli — start / stop / logs dispatch', () => {
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'telecode-svc-logs-'));
+  });
+
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  // Built per test with the live temp `home` so the closure never reads a stale binding.
+  function makeBase(currentHome: string, write: (text: string) => void) {
+    return {
+      env: {} as NodeJS.ProcessEnv,
+      platform: 'darwin' as const,
+      home: currentHome,
+      runner: createFakeRunner().runner,
+      uid: 501,
+      nodePath: '/usr/local/bin/node',
+      binPath: '/opt/telecode/bin/telecode.mjs',
+      write,
+    };
+  }
+
+  it('dispatches start once the service is installed', async () => {
+    // Arrange — install first so the plist exists
+    const out: string[] = [];
+    const base = makeBase(home, (t) => void out.push(t));
+    await runServiceCli({ ...base, argv: ['service', 'install'] });
+    out.length = 0;
+
+    // Act
+    const code = await runServiceCli({ ...base, argv: ['service', 'start'] });
+
+    // Assert
+    expect(code).toBe(0);
+    expect(out.join('')).toMatch(/started/i);
+  });
+
+  it('dispatches stop', async () => {
+    // Arrange
+    const out: string[] = [];
+
+    // Act
+    const code = await runServiceCli({
+      ...makeBase(home, (t) => void out.push(t)),
+      argv: ['service', 'stop'],
+    });
+
+    // Assert
+    expect(code).toBe(0);
+    expect(out.join('')).toMatch(/stopped/i);
+  });
+
+  it('prints the recent lines of the service log', async () => {
+    // Arrange — a log file at the platform log path
+    const logDir = join(home, '.telecode', 'logs');
+    await mkdir(logDir, { recursive: true });
+    await writeFile(join(logDir, 'daemon.log'), 'first line\nsecond line\nthird line\n');
+    const out: string[] = [];
+
+    // Act
+    const code = await runServiceCli({
+      ...makeBase(home, (t) => void out.push(t)),
+      argv: ['service', 'logs'],
+    });
+
+    // Assert
+    expect(code).toBe(0);
+    expect(out.join('')).toContain('first line');
+    expect(out.join('')).toContain('third line');
+  });
+
+  it('reports that there are no logs yet for an absent log file', async () => {
+    // Arrange
+    const out: string[] = [];
+
+    // Act
+    const code = await runServiceCli({
+      ...makeBase(home, (t) => void out.push(t)),
+      argv: ['service', 'logs'],
+    });
+
+    // Assert
+    expect(code).toBe(0);
+    expect(out.join('')).toMatch(/no logs yet/i);
+  });
+
+  it('reports that there are no logs yet for an empty log file', async () => {
+    // Arrange — a present-but-empty log file (distinct cause, same message as an absent file)
+    const logDir = join(home, '.telecode', 'logs');
+    await mkdir(logDir, { recursive: true });
+    await writeFile(join(logDir, 'daemon.log'), '');
+    const out: string[] = [];
+
+    // Act
+    const code = await runServiceCli({
+      ...makeBase(home, (t) => void out.push(t)),
+      argv: ['service', 'logs'],
+    });
+
+    // Assert
+    expect(code).toBe(0);
+    expect(out.join('')).toMatch(/no logs yet/i);
   });
 });

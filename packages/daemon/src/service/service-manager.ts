@@ -36,6 +36,10 @@ export interface ServiceManager {
   install(): Promise<ServiceActionResult>;
   /** Remove the login service cleanly (idempotent when already absent). */
   uninstall(): Promise<ServiceActionResult>;
+  /** (Re)start the service now (it must already be installed). */
+  start(): Promise<ServiceActionResult>;
+  /** Stop the running service; it stays installed and starts again at next login. */
+  stop(): Promise<ServiceActionResult>;
   /** Report installed / running / enabled-at-login and where the log + unit live. */
   status(): Promise<ServiceStatus>;
 }

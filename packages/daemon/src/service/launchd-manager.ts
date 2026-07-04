@@ -1,6 +1,7 @@
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import type { CommandResult } from './command-runner';
 import { renderLaunchdPlist } from './render-launchd-plist';
 import type {
   ServiceActionResult,
@@ -26,6 +27,11 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+/** A human-readable detail for a failed launchctl call: its stderr, or the bare exit code. */
+function commandDetail(result: CommandResult): string {
+  return result.stderr.trim() || `exit ${result.code}`;
+}
+
 /** Create the macOS launchd {@link ServiceManager}. */
 export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
   const launchAgentsDir = join(deps.home, 'Library', 'LaunchAgents');
@@ -35,6 +41,7 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
   const stderrPath = join(logDir, 'daemon.err.log');
   const uid = deps.uid ?? process.getuid?.() ?? 0;
   const domain = `gui/${uid}`;
+  const serviceTarget = `${domain}/${LABEL}`;
 
   async function install(): Promise<ServiceActionResult> {
     try {
@@ -59,8 +66,10 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
           message: `installed — the telecode daemon will start at login (${plistPath})`,
         };
       }
-      const detail = result.stderr.trim() || `exit ${result.code}`;
-      return { ok: false, message: `wrote ${plistPath} but launchctl bootstrap failed: ${detail}` };
+      return {
+        ok: false,
+        message: `wrote ${plistPath} but launchctl bootstrap failed: ${commandDetail(result)}`,
+      };
     } catch (err) {
       // Honour the ServiceActionResult contract — a filesystem error (e.g. EACCES) surfaces as a clean
       // failure line, not an unhandled rejection out of the CLI.
@@ -85,18 +94,60 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
     }
   }
 
+  async function start(): Promise<ServiceActionResult> {
+    try {
+      if (!(await fileExists(plistPath))) {
+        return { ok: false, message: 'not installed — run `telecode service install` first' };
+      }
+      // kickstart -k (re)starts the job now, killing any existing instance first.
+      const result = await deps.runner.run({
+        command: 'launchctl',
+        args: ['kickstart', '-k', serviceTarget],
+      });
+      return result.ok
+        ? { ok: true, message: 'started — the telecode daemon is running' }
+        : { ok: false, message: `launchctl kickstart failed: ${commandDetail(result)}` };
+    } catch (err) {
+      return {
+        ok: false,
+        message: `start failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  async function stop(): Promise<ServiceActionResult> {
+    // bootout the service target: unloads the job so KeepAlive cannot restart it. The plist stays on
+    // disk, so it comes back at next login or via `telecode service start`.
+    const result = await deps.runner.run({
+      command: 'launchctl',
+      args: ['bootout', serviceTarget],
+    });
+    return result.ok
+      ? { ok: true, message: 'stopped — starts again at next login or `telecode service start`' }
+      : { ok: false, message: `launchctl bootout failed: ${commandDetail(result)}` };
+  }
+
   async function status(): Promise<ServiceStatus> {
     const installed = await fileExists(plistPath);
-    // Running-state detection (parsing `launchctl print`) lands in the launchd-completeness task;
-    // for now a present plist is reported as enabled-at-login (the plist always sets RunAtLoad).
+    // `launchctl print <target>` exits non-zero when the job is not loaded; when loaded its output
+    // carries a `state = running` line. The plist always sets RunAtLoad, so a present plist is
+    // enabled-at-login.
+    let running = false;
+    if (installed) {
+      const printed = await deps.runner.run({
+        command: 'launchctl',
+        args: ['print', serviceTarget],
+      });
+      running = printed.ok && /^\s+state\s*=\s*running$/m.test(printed.stdout);
+    }
     return {
       installed,
-      running: false,
+      running,
       enabled: installed,
       logPath: stdoutPath,
       unitPath: plistPath,
     };
   }
 
-  return { platform: 'darwin', install, uninstall, status };
+  return { platform: 'darwin', install, uninstall, start, stop, status };
 }
