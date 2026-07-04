@@ -56,7 +56,10 @@ export interface ServiceManagerDeps {
   readonly runner: CommandRunner;
   /** Absolute path to the `node` binary that will run the daemon. */
   readonly nodePath: string;
-  /** Absolute path to the telecode bin shim (`bin/telecode.mjs`). */
+  /**
+   * Absolute path to the telecode bin shim (`bin/telecode.mjs`). Read only when writing the unit/plist
+   * during `install` — `status`/`start`/`stop` ignore it, so a probe-only caller may pass a placeholder.
+   */
   readonly binPath: string;
   /** The user's numeric uid for the `gui/<uid>` launchd domain; defaults to the current process uid. */
   readonly uid?: number;

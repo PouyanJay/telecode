@@ -1,4 +1,5 @@
 import type { StoredCredentials } from './credentials';
+import type { ServiceStatus } from './service/service-manager';
 
 /**
  * `telecode doctor` (Phase 4 T12): a preflight that tells a new user, in one screen, whether this machine
@@ -41,6 +42,8 @@ export interface DoctorDeps {
   readonly probeRelay: (healthUrl: string) => Promise<{ ok: boolean; error?: string }>;
   /** Whether telecode's Claude Code hooks are installed (and for which events) — the adoption opt-in. */
   readonly adoptionHooks: () => Promise<HookStatus>;
+  /** The background login-service status, or `null` when telecode has no service impl for this platform. */
+  readonly serviceStatus: () => Promise<ServiceStatus | null>;
 }
 
 /** Node floor: WebCrypto X25519 (the E2E handshake, Phase 4) needs Node 22+. */
@@ -120,7 +123,7 @@ function adoptionCheck(env: NodeJS.ProcessEnv, hooks: HookStatus): DoctorCheck {
     return makeCheck(
       'Adopted sessions',
       'warn',
-      'hooks not installed — run `telecode hooks install` to adopt your own Claude Code sessions',
+      'hooks not installed yet — they install automatically when the daemon runs with adoption enabled',
     );
   }
   return makeCheck(
@@ -130,6 +133,43 @@ function adoptionCheck(env: NodeJS.ProcessEnv, hooks: HookStatus): DoctorCheck {
   );
 }
 
+/**
+ * Advisory (never `fail`): whether the daemon is hosted as a background login service. A machine without
+ * it still works — the user just keeps a terminal open — so a missing or stopped service is a warning,
+ * not a failure. `null` means telecode has no service implementation for this platform yet (e.g. Windows).
+ */
+function serviceCheck(status: ServiceStatus | null): DoctorCheck {
+  if (status === null) {
+    return makeCheck(
+      'Background service',
+      'warn',
+      'not available on this platform yet — keep telecode running in a terminal',
+    );
+  }
+  if (!status.installed) {
+    return makeCheck(
+      'Background service',
+      'warn',
+      'not installed — run `telecode service install` to run telecode in the background',
+    );
+  }
+  if (!status.running) {
+    return makeCheck(
+      'Background service',
+      'warn',
+      'installed but not running — start it with `telecode service start`',
+    );
+  }
+  if (!status.enabled) {
+    return makeCheck(
+      'Background service',
+      'warn',
+      'running now but not enabled at login — run `telecode service install` to restore auto-start',
+    );
+  }
+  return makeCheck('Background service', 'pass', 'running in the background (starts at login)');
+}
+
 /** Run all diagnostics and assemble the report. */
 export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
@@ -137,6 +177,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     apiKeyCheck(deps.env),
     await pairingCheck(deps.loadCredentials),
     await relayCheck(deps.relay, deps.probeRelay),
+    serviceCheck(await deps.serviceStatus()),
     adoptionCheck(deps.env, await deps.adoptionHooks()),
   ];
   return { checks, ok: checks.every((c) => c.status !== 'fail') };

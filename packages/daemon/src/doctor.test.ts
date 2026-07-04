@@ -24,6 +24,13 @@ function deps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
       installed: true,
       events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification', 'Stop'],
     }),
+    serviceStatus: async () => ({
+      installed: true,
+      running: true,
+      enabled: true,
+      logPath: '/home/u/.telecode/logs/daemon.log',
+      unitPath: '/home/u/Library/LaunchAgents/ai.telecode.daemon.plist',
+    }),
     ...overrides,
   };
 }
@@ -73,8 +80,78 @@ describe('runDoctor', () => {
     );
     const check = find(report, 'Adopted sessions');
     expect(check?.status).toBe('warn');
-    expect(check?.detail).toContain('telecode hooks install');
+    // Hooks now auto-install on daemon start — the advisory must not tell the user to run the old command.
+    expect(check?.detail).toContain('automatically');
+    expect(check?.detail).not.toContain('telecode hooks install');
     expect(report.ok).toBe(true); // advisory — never sinks the run
+  });
+
+  it('passes the background-service check when the service is installed and running', async () => {
+    const check = find(await runDoctor(deps()), 'Background service');
+    expect(check?.status).toBe('pass');
+    expect(check?.detail).toMatch(/login/i);
+  });
+
+  it('warns (does not fail) the service check when the service is not installed', async () => {
+    const report = await runDoctor(
+      deps({
+        serviceStatus: async () => ({
+          installed: false,
+          running: false,
+          enabled: false,
+          logPath: '/l',
+          unitPath: '', // no unit/plist on disk when not installed
+        }),
+      }),
+    );
+    const check = find(report, 'Background service');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('telecode service install');
+    expect(report.ok).toBe(true);
+  });
+
+  it('warns (does not fail) the service check when installed but not running', async () => {
+    const report = await runDoctor(
+      deps({
+        serviceStatus: async () => ({
+          installed: true,
+          running: false,
+          enabled: true,
+          logPath: '/l',
+          unitPath: '/u',
+        }),
+      }),
+    );
+    const check = find(report, 'Background service');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('telecode service start');
+    expect(report.ok).toBe(true);
+  });
+
+  it('warns (does not fail) the service check when running but not enabled at login', async () => {
+    const report = await runDoctor(
+      deps({
+        serviceStatus: async () => ({
+          installed: true,
+          running: true,
+          enabled: false,
+          logPath: '/l',
+          unitPath: '/u',
+        }),
+      }),
+    );
+    const check = find(report, 'Background service');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/not enabled at login/i);
+    expect(report.ok).toBe(true);
+  });
+
+  it('warns (does not fail) the service check on an unsupported platform (null status)', async () => {
+    const report = await runDoctor(deps({ serviceStatus: async () => null }));
+    const check = find(report, 'Background service');
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/not available on this platform/i);
+    expect(report.ok).toBe(true);
   });
 
   it('warns (does not fail) the adoption check when TELECODE_ADOPT=0', async () => {
