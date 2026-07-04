@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { pathExists } from '../sessions/path-exists';
 import { commandDetail } from './command-detail';
+import { errorDetail } from './error-detail';
 import { resolveLogPaths } from './log-paths';
 import { renderLaunchdPlist } from './render-launchd-plist';
 import type {
@@ -66,7 +67,7 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
       // failure line, not an unhandled rejection out of the CLI.
       return {
         ok: false,
-        message: `install failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: `install failed: ${errorDetail(err)}`,
       };
     }
   }
@@ -80,7 +81,7 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
     } catch (err) {
       return {
         ok: false,
-        message: `uninstall failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: `uninstall failed: ${errorDetail(err)}`,
       };
     }
   }
@@ -101,21 +102,25 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
     } catch (err) {
       return {
         ok: false,
-        message: `start failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: `start failed: ${errorDetail(err)}`,
       };
     }
   }
 
   async function stop(): Promise<ServiceActionResult> {
-    // bootout the service target: unloads the job so KeepAlive cannot restart it. The plist stays on
-    // disk, so it comes back at next login or via `telecode service start`.
-    const result = await deps.runner.run({
-      command: 'launchctl',
-      args: ['bootout', serviceTarget],
-    });
-    return result.ok
-      ? { ok: true, message: 'stopped — starts again at next login or `telecode service start`' }
-      : { ok: false, message: `launchctl bootout failed: ${commandDetail(result)}` };
+    try {
+      // bootout the service target: unloads the job so KeepAlive cannot restart it. The plist stays on
+      // disk, so it comes back at next login or via `telecode service start`.
+      const result = await deps.runner.run({
+        command: 'launchctl',
+        args: ['bootout', serviceTarget],
+      });
+      return result.ok
+        ? { ok: true, message: 'stopped — starts again at next login or `telecode service start`' }
+        : { ok: false, message: `launchctl bootout failed: ${commandDetail(result)}` };
+    } catch (err) {
+      return { ok: false, message: `stop failed: ${errorDetail(err)}` };
+    }
   }
 
   async function status(): Promise<ServiceStatus> {

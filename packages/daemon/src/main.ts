@@ -193,12 +193,13 @@ if (!credentials) {
 // single-instance lock is released on exit and the service reclaims it). `--no-service` / a non-interactive
 // stdin skip the prompt with a hint. Baking `--relay-url` captures the relay this run resolved.
 if (wasJustPaired) {
-  const serviceBinPath = daemonBinPath ?? process.execPath;
+  // A status-only probe manager for platform-support + already-installed checks; status ignores binPath,
+  // so the placeholder is harmless (the real install resolves + guards `process.argv[1]` in runServiceCli).
   const serviceManager = selectServiceManager(process.platform, {
     home: homedir(),
     runner: createExecCommandRunner(),
     nodePath: process.execPath,
-    binPath: serviceBinPath,
+    binPath: daemonBinPath ?? process.execPath,
   });
   await offerBackgroundService({
     isInteractive: Boolean(process.stdin.isTTY),
@@ -207,13 +208,11 @@ if (wasJustPaired) {
     isInstalled: async () => (serviceManager ? (await serviceManager.status()).installed : false),
     confirm: confirmDefaultYes,
     // runServiceCli prints the install confirmation (and any ephemeral-npx warning); the offer's notify
-    // adds the distinct hand-off line. Pass the resolved binPath so a missing `process.argv[1]` can't
-    // silently fail the install.
+    // adds the distinct hand-off line. It resolves + guards its own binPath (`process.argv[1]`).
     install: async () =>
       (await runServiceCli({
         argv: ['service', 'install', '--relay-url', relayWsUrl],
         env: process.env,
-        binPath: serviceBinPath,
       })) === 0,
     handOff: () => process.exit(0),
     notify: (message) => process.stdout.write(`${message}\n`),

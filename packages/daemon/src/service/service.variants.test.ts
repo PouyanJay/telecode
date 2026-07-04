@@ -128,7 +128,11 @@ describe('service variant coverage', () => {
     const out: string[] = [];
 
     // Act
-    await runServiceCli({ ...base, argv: ['service', 'install', '--relay-url', 'wss://r/ws'] });
+    await runServiceCli({
+      ...base,
+      argv: ['service', 'install', '--relay-url', 'wss://r/ws'],
+      write: () => undefined,
+    });
     await runServiceCli({
       ...base,
       argv: ['service', 'status'],

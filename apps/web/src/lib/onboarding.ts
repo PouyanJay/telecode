@@ -39,7 +39,9 @@ export function buildOnboardingSteps(context: OnboardingContext): OnboardingStep
     {
       key: 'pair',
       title: 'Pair your machine',
-      body: "Run the command on the machine you want to control, then enter the code it gives you. telecode will offer to run in the background, so there's no terminal to keep open.",
+      body:
+        'Run the command on the machine you want to control, then enter the code it gives you. ' +
+        "telecode will offer to run in the background, so there's no terminal to keep open.",
       status: paired ? 'done' : 'current',
       command: instructions.command,
       codeLocation: instructions.codeLocation,

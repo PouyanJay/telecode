@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -168,5 +168,56 @@ describe('createLaunchdManager — running state + start/stop', () => {
     // Assert
     expect(result.ok).toBe(false);
     expect(result.message).toMatch(/bootout failed/i);
+  });
+
+  it('install writes the plist and boots out before bootstrapping', async () => {
+    // Arrange
+    const { runner, calls } = createRecordingRunner();
+
+    // Act
+    const result = await manager(runner).install();
+
+    // Assert
+    expect(result.ok).toBe(true);
+    const plist = await readFile(plistPath, 'utf8');
+    expect(plist).toContain(LABEL);
+    // Idempotent reload: the bootout must precede the bootstrap.
+    const bootoutIndex = calls.findIndex((c) => c.args[0] === 'bootout');
+    const bootstrapIndex = calls.findIndex((c) => c.args[0] === 'bootstrap');
+    expect(bootoutIndex).toBeGreaterThanOrEqual(0);
+    expect(bootstrapIndex).toBeGreaterThan(bootoutIndex);
+    expect(calls[bootstrapIndex]?.args).toEqual(['bootstrap', `gui/${UID}`, plistPath]);
+  });
+
+  it('install surfaces a bootstrap failure as a clean non-ok result', async () => {
+    // Arrange — bootstrap fails, bootout (best-effort) succeeds
+    const { runner } = createRecordingRunner((spec) =>
+      spec.args[0] === 'bootstrap' ? failed : ok,
+    );
+
+    // Act
+    const result = await manager(runner).install();
+
+    // Assert
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/bootstrap failed/i);
+  });
+
+  it('uninstall boots out and removes the plist', async () => {
+    // Arrange
+    await writePlist();
+    const { runner, calls } = createRecordingRunner();
+
+    // Act
+    const result = await manager(runner).uninstall();
+
+    // Assert
+    expect(result.ok).toBe(true);
+    expect(calls.find((c) => c.args[0] === 'bootout')?.args).toEqual([
+      'bootout',
+      `gui/${UID}`,
+      plistPath,
+    ]);
+    await expect(stat(plistPath)).rejects.toThrow();
   });
 });

@@ -66,13 +66,32 @@ async function readRecentLogLines(logPath: string): Promise<string | null> {
   return `${body.split('\n').slice(-LOG_TAIL_LINES).join('\n')}\n`;
 }
 
-/** Print an action's message and map its outcome to a process exit code. */
 function reportAction(result: ServiceActionResult, write: (text: string) => void): number {
   write(`${result.message}\n`);
   return result.ok ? 0 : 1;
 }
 
-/** Route a resolved subcommand to the selected manager. */
+/**
+ * Resolve the `install`-only daemon args: warn about an ephemeral executable, then bake the relay URL
+ * (captured now because a login-session service does not inherit the shell env). Returns `null` after
+ * printing the reason when the relay URL is invalid.
+ */
+function resolveInstallDaemonArgs(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  binPath: string,
+  write: (text: string) => void,
+): readonly string[] | null {
+  const { hint } = describeExecutableStability(binPath);
+  if (hint) write(`${hint}\n`);
+  try {
+    return ['--relay-url', resolveRelayUrl(argv, env)];
+  } catch (err) {
+    write(`telecode: ${err instanceof Error ? err.message : 'invalid relay URL'}\n`);
+    return null;
+  }
+}
+
 async function dispatchServiceCommand(
   manager: ServiceManager,
   subcommand: string | undefined,
@@ -120,20 +139,12 @@ export async function runServiceCli(options: ServiceCliOptions): Promise<number>
 
   const subcommand = options.argv[1];
 
-  // Only `install` bakes the relay URL into the service (a login-session service does not inherit the
-  // shell env, so `TELECODE_RELAY_URL` is captured now). Read-only subcommands must never fail on an
-  // unset/invalid URL, so resolution is confined to the install path.
+  // Only `install` resolves + bakes the relay URL; read-only subcommands must never fail on an unset URL.
   let daemonArgs: readonly string[] = [];
   if (subcommand === 'install') {
-    // A service pinned to an ephemeral npx/dlx path breaks once the cache is cleared — warn but proceed.
-    const { hint } = describeExecutableStability(binPath);
-    if (hint) write(`${hint}\n`);
-    try {
-      daemonArgs = ['--relay-url', resolveRelayUrl(options.argv, options.env)];
-    } catch (err) {
-      write(`telecode: ${err instanceof Error ? err.message : 'invalid relay URL'}\n`);
-      return 1;
-    }
+    const installArgs = resolveInstallDaemonArgs(options.argv, options.env, binPath, write);
+    if (installArgs === null) return 1;
+    daemonArgs = installArgs;
   }
 
   const manager = selectServiceManager(platform, {

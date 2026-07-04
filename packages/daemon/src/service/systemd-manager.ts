@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { pathExists } from '../sessions/path-exists';
 import { commandDetail } from './command-detail';
+import { errorDetail } from './error-detail';
 import { resolveLogPaths } from './log-paths';
 import { renderSystemdUnit } from './render-systemd-unit';
 import type {
@@ -62,7 +63,7 @@ export function createSystemdManager(deps: ServiceManagerDeps): ServiceManager {
     } catch (err) {
       return {
         ok: false,
-        message: `install failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: `install failed: ${errorDetail(err)}`,
       };
     }
   }
@@ -78,26 +79,34 @@ export function createSystemdManager(deps: ServiceManagerDeps): ServiceManager {
     } catch (err) {
       return {
         ok: false,
-        message: `uninstall failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: `uninstall failed: ${errorDetail(err)}`,
       };
     }
   }
 
   async function start(): Promise<ServiceActionResult> {
-    if (!(await pathExists(unitPath))) {
-      return { ok: false, message: 'not installed — run `telecode service install` first' };
+    try {
+      if (!(await pathExists(unitPath))) {
+        return { ok: false, message: 'not installed — run `telecode service install` first' };
+      }
+      const result = await systemctl('--user', 'start', SERVICE);
+      return result.ok
+        ? { ok: true, message: 'started — the telecode daemon is running' }
+        : { ok: false, message: `systemctl --user start failed: ${commandDetail(result)}` };
+    } catch (err) {
+      return { ok: false, message: `start failed: ${errorDetail(err)}` };
     }
-    const result = await systemctl('--user', 'start', SERVICE);
-    return result.ok
-      ? { ok: true, message: 'started — the telecode daemon is running' }
-      : { ok: false, message: `systemctl --user start failed: ${commandDetail(result)}` };
   }
 
   async function stop(): Promise<ServiceActionResult> {
-    const result = await systemctl('--user', 'stop', SERVICE);
-    return result.ok
-      ? { ok: true, message: 'stopped — starts again at next login or `telecode service start`' }
-      : { ok: false, message: `systemctl --user stop failed: ${commandDetail(result)}` };
+    try {
+      const result = await systemctl('--user', 'stop', SERVICE);
+      return result.ok
+        ? { ok: true, message: 'stopped — starts again at next login or `telecode service start`' }
+        : { ok: false, message: `systemctl --user stop failed: ${commandDetail(result)}` };
+    } catch (err) {
+      return { ok: false, message: `stop failed: ${errorDetail(err)}` };
+    }
   }
 
   async function status(): Promise<ServiceStatus> {
