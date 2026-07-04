@@ -21,6 +21,13 @@ function deps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
     }),
     probeRelay: async () => ({ ok: true }),
     adoptionHooks: async () => ({ installed: true, events: ['PreToolUse'] }),
+    serviceStatus: async () => ({
+      installed: true,
+      running: true,
+      enabled: true,
+      logPath: '/l',
+      unitPath: '/u',
+    }),
     ...overrides,
   };
 }

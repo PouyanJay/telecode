@@ -38,7 +38,8 @@
     "bin",
     "src",
     "!src/**/*.test.ts",
-    "!src/spike-agent-sdk.ts"
+    "!src/spike-agent-sdk.ts",
+    "!src/service/fake-command-runner.ts"
   ],
   "exports": {
     ".": "./src/index.ts"

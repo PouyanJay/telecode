@@ -5,6 +5,8 @@ import { readHooksStatus } from './adopt/hooks-status';
 import { loadCredentials } from './credentials';
 import { formatDoctorReport, runDoctor, type DoctorDeps } from './doctor';
 import { resolveRelayUrl } from './relay-url';
+import { createExecCommandRunner } from './service/exec-command-runner';
+import { selectServiceManager } from './service/select-service-manager';
 
 /**
  * The `telecode doctor` CLI entry: binds the pure {@link runDoctor} to real probes (a network health
@@ -52,6 +54,17 @@ export async function runDoctorCli(options: DoctorCliOptions): Promise<number> {
     loadCredentials: () => loadCredentials(),
     probeRelay,
     adoptionHooks: () => readHooksStatus({ settingsPath }),
+    serviceStatus: async () => {
+      // ServiceManagerDeps is the superset every manager shares; status() reads only the unit/plist and
+      // a read-only probe, so the interface-required binPath (an install-time field) is a placeholder here.
+      const manager = selectServiceManager(process.platform, {
+        home: homedir(),
+        runner: createExecCommandRunner(),
+        nodePath: process.execPath,
+        binPath: process.argv[1] ?? process.execPath,
+      });
+      return manager ? manager.status() : null;
+    },
   });
 
   write(`${formatDoctorReport(report)}\n`);
