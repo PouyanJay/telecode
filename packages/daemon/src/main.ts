@@ -1,5 +1,6 @@
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 
 import { encodeKey, generateKeyPair } from '@telecode/protocol';
 import { pino } from 'pino';
@@ -14,6 +15,9 @@ import { runDoctorCli } from './doctor-cli';
 import { detectOs } from './os-info';
 import { pairDevice } from './pairing';
 import { resolveRelayUrl } from './relay-url';
+import { createExecCommandRunner } from './service/exec-command-runner';
+import { offerBackgroundService } from './service/offer-background-service';
+import { selectServiceManager } from './service/select-service-manager';
 import { runServiceCli } from './service/service-cli';
 import { acquireSingleInstanceLock } from './single-instance-lock';
 import { createGitRepoManager } from './sessions/repo-manager';
@@ -58,6 +62,17 @@ function releaseLockOnExit(release: () => void): void {
   process.once('exit', release);
   process.once('SIGINT', () => process.exit(0));
   process.once('SIGTERM', () => process.exit(0));
+}
+
+/** Prompt a yes/no question on the terminal, defaulting to yes (an empty answer). */
+async function confirmDefaultYes(question: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(`${question} `)).trim().toLowerCase();
+    return answer === '' || answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
 }
 
 const cliArgs = process.argv.slice(2);
@@ -156,6 +171,7 @@ if (!lock.acquired) {
 releaseLockOnExit(lock.release);
 
 let credentials = await loadCredentials();
+const wasJustPaired = !credentials;
 if (!credentials) {
   log.info('daemon: no credentials found — pairing this device');
   const keyPair = await generateKeyPair();
@@ -170,6 +186,38 @@ if (!credentials) {
   credentials = { ...paired, publicKey, privateKey: encodeKey(keyPair.privateKey) };
   await saveCredentials(credentials);
   log.info({ deviceId: credentials.deviceId }, 'daemon: paired; credentials saved');
+}
+
+// First run only: offer to host the daemon as a background login service, so there is no terminal to keep
+// open. On yes it installs the service and hands off by exiting — the service takes over this session (the
+// single-instance lock is released on exit and the service reclaims it). `--no-service` / a non-interactive
+// stdin skip the prompt with a hint. Baking `--relay-url` captures the relay this run resolved.
+if (wasJustPaired) {
+  const serviceBinPath = daemonBinPath ?? process.execPath;
+  const serviceManager = selectServiceManager(process.platform, {
+    home: homedir(),
+    runner: createExecCommandRunner(),
+    nodePath: process.execPath,
+    binPath: serviceBinPath,
+  });
+  await offerBackgroundService({
+    isInteractive: Boolean(process.stdin.isTTY),
+    noServiceFlag: cliArgs.includes('--no-service'),
+    platformSupported: serviceManager !== null,
+    isInstalled: async () => (serviceManager ? (await serviceManager.status()).installed : false),
+    confirm: confirmDefaultYes,
+    // runServiceCli prints the install confirmation (and any ephemeral-npx warning); the offer's notify
+    // adds the distinct hand-off line. Pass the resolved binPath so a missing `process.argv[1]` can't
+    // silently fail the install.
+    install: async () =>
+      (await runServiceCli({
+        argv: ['service', 'install', '--relay-url', relayWsUrl],
+        env: process.env,
+        binPath: serviceBinPath,
+      })) === 0,
+    handOff: () => process.exit(0),
+    notify: (message) => process.stdout.write(`${message}\n`),
+  });
 }
 
 // Each session runs in its own git worktree (Phase 2): a launch's GitHub repo is cloned on demand

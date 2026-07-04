@@ -1,9 +1,9 @@
 /**
  * Render a systemd `--user` service unit (pure — no filesystem, fully unit-testable as string output).
- * This is the on-disk contract that makes the daemon a Linux login service: `Restart=on-failure`
- * restarts it on crash, `WantedBy=default.target` starts it at login (combined with `loginctl
- * enable-linger` so it survives logout/reboot), and `StandardOutput/Error=append:` capture its logs into
- * the same `~/.telecode/logs` files the launchd service uses, so `telecode service logs` is uniform.
+ * This is the on-disk contract that makes the daemon a Linux login service: `Restart=always` keeps it
+ * alive through crashes and clean exits, `WantedBy=default.target` starts it at login (combined with
+ * `loginctl enable-linger` so it survives logout/reboot), and `StandardOutput/Error=append:` capture its
+ * logs into the same `~/.telecode/logs` files the launchd service uses, so `telecode service logs` is uniform.
  */
 export interface SystemdUnitConfig {
   /** `Description=` line shown by `systemctl status`. */
@@ -40,7 +40,10 @@ export function renderSystemdUnit(config: SystemdUnitConfig): string {
     '[Service]',
     'Type=simple',
     `ExecStart=${config.execStart.map(quote).join(' ')}`,
-    'Restart=on-failure',
+    // `always` (not `on-failure`): recover even after a clean exit, so the service takes over once a
+    // first-run foreground hands off (it backs off to the single-instance lock, then reclaims it).
+    // RestartSec=5 keeps this to ≤2 cycles per 10s — safely under systemd's default StartLimitBurst=5.
+    'Restart=always',
     `RestartSec=${config.restartSec ?? 5}`,
     `StandardOutput=append:${config.stdoutPath}`,
     `StandardError=append:${config.stderrPath}`,

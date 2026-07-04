@@ -25,12 +25,18 @@ describe('renderSystemdUnit', () => {
     expect(unit).toContain('WantedBy=default.target');
   });
 
-  it('restarts on failure and appends stdout/stderr to the shared log files', () => {
+  it('always restarts and appends stdout/stderr to the shared log files', () => {
     const unit = renderSystemdUnit(base);
 
-    expect(unit).toContain('Restart=on-failure');
+    // Restart=always (not on-failure) covers clean-exit hand-offs — see render-systemd-unit.ts.
+    expect(unit).toContain('Restart=always');
     expect(unit).toContain('StandardOutput=append:/home/u/.telecode/logs/daemon.log');
     expect(unit).toContain('StandardError=append:/home/u/.telecode/logs/daemon.err.log');
+  });
+
+  it('defaults RestartSec to 5 and honours a provided value', () => {
+    expect(renderSystemdUnit(base)).toContain('RestartSec=5');
+    expect(renderSystemdUnit({ ...base, restartSec: 10 })).toContain('RestartSec=10');
   });
 
   it('quotes every ExecStart argument so paths with spaces survive systemd parsing', () => {
