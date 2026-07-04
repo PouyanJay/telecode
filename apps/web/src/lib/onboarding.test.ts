@@ -53,4 +53,9 @@ describe('buildOnboardingSteps', () => {
       expect(step.body.length).toBeGreaterThan(0);
     }
   });
+
+  it('sets the "runs in the background" expectation on the pair step', () => {
+    const pair = buildOnboardingSteps({ paired: false, hasSessions: false, instructions })[0];
+    expect(pair?.body).toMatch(/background/i);
+  });
 });
