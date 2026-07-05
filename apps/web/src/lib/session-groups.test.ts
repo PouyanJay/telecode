@@ -10,6 +10,7 @@ function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
     status,
     deviceName: 'studio-mbp',
     origin: 'launched',
+    isContinuation: false,
     createdAt: new Date(createdAt),
   };
 }

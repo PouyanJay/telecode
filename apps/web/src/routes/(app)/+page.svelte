@@ -37,6 +37,7 @@
         status: s.status,
         deviceName: deviceName(s.deviceId),
         origin: s.origin,
+        isContinuation: s.parentSessionId !== null,
         createdAt: s.createdAt,
       });
     }
@@ -51,6 +52,8 @@
         deviceName: existing?.deviceName ?? device?.name ?? null,
         // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
         origin: existing?.origin ?? 'launched',
+        // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
+        isContinuation: (existing?.isContinuation ?? false) || state.parentSessionId !== null,
         createdAt: existing?.createdAt ?? new Date(),
       });
     }
