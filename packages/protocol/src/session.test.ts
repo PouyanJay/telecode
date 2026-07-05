@@ -18,6 +18,7 @@ import {
   sessionLaunchPayloadSchema,
   sessionOriginSchema,
   userMessagePayloadSchema,
+  viewerPresencePayloadSchema,
 } from './session';
 
 /**
@@ -621,5 +622,17 @@ describe('sessionKeyPayloadSchema', () => {
 
   it('rejects a missing key', () => {
     expect(sessionKeyPayloadSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe('viewerPresencePayloadSchema (relay → daemon viewer presence)', () => {
+  it('validates the online boolean either way', () => {
+    expect(viewerPresencePayloadSchema.parse({ online: true })).toEqual({ online: true });
+    expect(viewerPresencePayloadSchema.parse({ online: false })).toEqual({ online: false });
+  });
+
+  it('rejects a missing or non-boolean online', () => {
+    expect(viewerPresencePayloadSchema.safeParse({}).success).toBe(false);
+    expect(viewerPresencePayloadSchema.safeParse({ online: 'yes' }).success).toBe(false);
   });
 });

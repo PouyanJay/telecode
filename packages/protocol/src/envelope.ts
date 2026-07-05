@@ -71,6 +71,11 @@ export const MESSAGE_TYPES = [
   // flip its live sessions to `offline_paused` and resume them on reconnect. Cleartext routing metadata
   // the relay generates itself — it carries no session payload.
   'device.presence',
+  // viewer presence (relay -> daemon): the mirror of `device.presence`. Tells the daemon whether ANY
+  // browser is currently connected on its channel, so an adopted session only holds a tool for a remote
+  // approval when someone is actually there to give it — otherwise the daemon defers to Claude Code's own
+  // local prompt, never freezing a session the user is driving locally. Relay-generated cleartext metadata.
+  'viewer.presence',
 ] as const;
 
 export const messageTypeSchema = z.enum(MESSAGE_TYPES);

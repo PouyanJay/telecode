@@ -128,6 +128,10 @@ describe('envelope E2E routing-metadata fields (Phase 3)', () => {
     expect(safeParseEnvelope({ ...validWire, type: 'session.adopted' }).success).toBe(true);
   });
 
+  it('recognizes viewer.presence as a valid message type (relay -> daemon presence)', () => {
+    expect(safeParseEnvelope({ ...validWire, type: 'viewer.presence' }).success).toBe(true);
+  });
+
   it.each(['agent.handover', 'handover.answer', 'session.chained'] as const)(
     'recognizes %s as a valid message type (Journey 4)',
     (type) => {

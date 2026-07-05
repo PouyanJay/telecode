@@ -129,7 +129,9 @@ function adoptionCheck(env: NodeJS.ProcessEnv, hooks: HookStatus): DoctorCheck {
   return makeCheck(
     'Adopted sessions',
     'pass',
-    `adopting your own sessions (hooks: ${hooks.events.join(', ')})`,
+    `adopting your own sessions — telecode mirrors each session's permission mode (Bypass never gates) and ` +
+      `only prompts remotely while a browser is watching; disable with \`telecode hooks uninstall\` ` +
+      `(hooks: ${hooks.events.join(', ')})`,
   );
 }
 

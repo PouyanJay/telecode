@@ -163,6 +163,16 @@ export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
 export const devicePresencePayloadSchema = z.object({ online: z.boolean() });
 export type DevicePresencePayload = z.infer<typeof devicePresencePayloadSchema>;
 
+/**
+ * Payload for `viewer.presence` (relay → daemon): the mirror of `device.presence`. Whether ANY browser is
+ * currently connected on the daemon's channel. The relay sends it when the browser count crosses 0↔1 (and
+ * once on daemon registration), so the daemon knows whether a remote operator is present to approve a tool
+ * — an adopted session only holds a consequential tool for a remote decision when `online` is true;
+ * otherwise it defers to Claude Code's own local prompt rather than freezing an unwatched local session.
+ */
+export const viewerPresencePayloadSchema = z.object({ online: z.boolean() });
+export type ViewerPresencePayload = z.infer<typeof viewerPresencePayloadSchema>;
+
 /** Payload for `agent.message` (daemon → web): a chunk of streamed agent text. */
 export const agentMessagePayloadSchema = z.object({ text: z.string() });
 export type AgentMessagePayload = z.infer<typeof agentMessagePayloadSchema>;

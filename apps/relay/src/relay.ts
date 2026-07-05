@@ -296,6 +296,24 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
   }
 
+  /**
+   * A `viewer.presence` frame (relay → daemon): the mirror of {@link presenceFrame}. Whether ANY browser is
+   * currently connected on the channel. Cleartext routing metadata the relay generates itself; it lets the
+   * daemon hold an adopted session's tool for a remote approval only while an operator is actually watching,
+   * and otherwise defer to Claude Code's own local prompt (never freezing an unwatched local session).
+   */
+  function viewerPresenceFrame(userId: string, deviceId: string, online: boolean): string {
+    return JSON.stringify(
+      makeEnvelope({ type: 'viewer.presence', userId, deviceId, payload: { online } }),
+    );
+  }
+
+  /** Tell the channel's daemon (if one is connected) whether any browser is currently watching it. */
+  function notifyDaemonViewerPresence(userId: string, deviceId: string, online: boolean): void {
+    const daemon = daemons.get(channelKey(userId, deviceId));
+    if (daemon) daemon.send(viewerPresenceFrame(userId, deviceId, online));
+  }
+
   async function routeFromBrowser(
     envelope: Envelope,
     channel: string,
@@ -741,8 +759,15 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         daemons.set(channel, socket);
       } else {
         const set = browsers.get(channel) ?? new Set<WebSocket>();
+        const firstBrowser = set.size === 0;
         set.add(socket);
         browsers.set(channel, set);
+        // First browser on the channel → an operator is now watching; tell the daemon so it routes adopted
+        // gates remotely (the mirror of device.presence). A no-op until the daemon connects — its own
+        // registration below then reads the current browser count.
+        if (firstBrowser) {
+          notifyDaemonViewerPresence(envelope.user_id, envelope.device_id, true);
+        }
       }
       log.info({ channel, role }, 'relay: peer registered');
       // Opt-in telemetry: aggregate connection count by role — no identifiers (default no-op).
@@ -761,6 +786,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       // that connected while its device is offline is told so, so its live session list reflects reality.
       if (role === 'daemon') {
         broadcastToBrowsers(channel, presenceFrame(envelope.user_id, envelope.device_id, true));
+        // Tell the freshly-(re)connected daemon whether an operator is already watching, so its adopted-
+        // session gate starts with the right posture instead of assuming nobody is present.
+        notifyDaemonViewerPresence(
+          envelope.user_id,
+          envelope.device_id,
+          (browsers.get(channel)?.size ?? 0) > 0,
+        );
       } else if (!daemons.has(channel)) {
         socket.send(presenceFrame(envelope.user_id, envelope.device_id, false));
       }
@@ -801,7 +833,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           }
         }
       } else if (peer.role === 'browser') {
-        browsers.get(peer.channel)?.delete(socket);
+        const set = browsers.get(peer.channel);
+        set?.delete(socket);
+        // Last browser left the channel → no operator is watching; tell the daemon so its adopted-session
+        // gate falls back to Claude Code's own local prompt instead of freezing on a remote approval no one
+        // is there to give.
+        if (set && set.size === 0 && peer.userId !== null && peer.deviceId !== null) {
+          notifyDaemonViewerPresence(peer.userId, peer.deviceId, false);
+        }
       }
       if (peer.role === 'daemon' || peer.role === 'browser') {
         telemetry.record({ name: 'peer_disconnected', role: peer.role });

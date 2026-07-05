@@ -140,7 +140,20 @@ if (cliArgs[0] === 'hooks') {
 // starts at login, restarts on crash, and survives reboot — no terminal to keep alive. This only manages
 // *how the daemon is hosted*; it never starts the daemon inline (the service does that at login).
 if (cliArgs[0] === 'service') {
-  const exitCode = await runServiceCli({ argv: cliArgs, env: process.env });
+  const exitCode = await runServiceCli({
+    argv: cliArgs,
+    env: process.env,
+    // Disengage cleanly: on a successful `service uninstall` (the user turning telecode off) also remove its
+    // Claude Code hooks, so they don't linger firing `telecode hook` on every tool with no daemon to answer.
+    // Injected here at the composition root so the service module stays free of the adoption dependency.
+    onUninstallHooks: async () => {
+      await uninstallHooks({ settingsPath: claudeSettingsPath });
+      log.info(
+        { settingsPath: claudeSettingsPath },
+        'telecode: removed Claude Code hooks — adoption disabled along with the service',
+      );
+    },
+  });
   process.exit(exitCode);
 }
 

@@ -19,6 +19,7 @@ import {
   sessionLaunchPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
+  viewerPresencePayloadSchema,
   WS_CLOSE_UNAUTHORIZED,
   type AdoptSettings,
   type AdoptStatePayload,
@@ -46,6 +47,7 @@ import { readHooksStatus } from './adopt/hooks-status';
 import { uninstallHooks } from './adopt/hooks-uninstall';
 import { isAdoptionAllowed } from './adopt/is-adoption-allowed';
 import { isFreeFormQuestion } from './adopt/free-form-question';
+import { adoptedGateDecision } from './adopt/adopted-gate-decision';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
 import { preToolUseOutput } from './adopt/pretooluse-output';
 import { buildQuestionDenyReason } from './adopt/question-deny-reason';
@@ -180,6 +182,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
   let stopped = false;
   let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Whether a browser is currently watching this device's channel (relay `viewer.presence`, the mirror of
+  // `device.presence`). An ADOPTED session only holds a tool for a remote approval while an operator is
+  // present; with nobody watching, the gate defers to Claude Code's own local prompt so telecode never
+  // freezes an unwatched local session. Defaults false — a just-connected daemon assumes nobody is watching
+  // until the relay reports the current state (it sends `viewer.presence` right after `hello.ack`).
+  let remoteViewerOnline = false;
   const reconnectBaseMs = options.reconnect?.baseMs ?? 500;
   const reconnectMaxMs = options.reconnect?.maxMs ?? 10_000;
   // How long to await the relay's `session.chained` ACK for a handover continuation before falling back
@@ -992,6 +1000,24 @@ export function createDaemon(options: DaemonOptions): Daemon {
         await handleAdoptConfig(envelope);
         return;
       }
+      case 'viewer.presence': {
+        // Relay tells us whether any browser is watching this channel (the mirror of device.presence). We
+        // hold it so the adopted-session gate only blocks for a remote approval while an operator is present.
+        const presence = viewerPresencePayloadSchema.safeParse(envelope.payload);
+        if (!presence.success) {
+          log.warn(
+            { deviceId: options.deviceId },
+            'daemon: dropped viewer.presence with invalid payload',
+          );
+          return;
+        }
+        remoteViewerOnline = presence.data.online;
+        log.debug(
+          { deviceId: options.deviceId, online: remoteViewerOnline },
+          'daemon: viewer presence updated',
+        );
+        return;
+      }
       default:
         log.debug({ type: envelope.type }, 'daemon: ignoring message');
     }
@@ -1600,6 +1626,25 @@ export function createDaemon(options: DaemonOptions): Daemon {
     await mirrorTranscript(telecodeSessionId, event.transcript_path);
 
     if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
+      // Mirror the LOCAL session's permission mode. In a mode where Claude Code never prompts
+      // (bypassPermissions / auto / dontAsk) telecode DEFERS — returns no opinion so Claude Code's own mode
+      // runs the tool (bypass runs it, auto safety-checks it, dontAsk applies its allowlist). This is the
+      // fix for an adopted session freezing on a remote approval the user never intended: telecode must
+      // never gate a session the user is driving locally, nor override those local checks with a blanket
+      // allow. A telecode-launched session is the opposite — it never surrenders the gate.
+      const gate = adoptedGateDecision(event.tool_name, event.permission_mode);
+      // A non-gating local mode (bypass / auto / dontAsk): defer entirely — Claude Code's own mode runs it.
+      if (gate === 'defer') return {};
+      // A read-only tool (or an acceptEdits edit): auto-runs locally anyway, so telecode approves it with no
+      // human round-trip — no operator needs to be watching.
+      if (gate === 'allow') return preToolUseOutput('allow');
+
+      // From here the tool needs a human (a consequential tool, or an AskUserQuestion). Only hold it for a
+      // REMOTE decision while an operator is actually watching this channel; with nobody watching, defer so
+      // Claude Code's own local prompt/picker handles it — telecode must never freeze a session no one is
+      // remotely steering (the "only gate when watched" safety rule; relay `viewer.presence` drives this).
+      if (!remoteViewerOnline) return {};
+
       // AskUserQuestion (Journey 2): the agent is asking the human a multiple-choice question. PreToolUse
       // fires before it renders locally, so we forward it to the browser and relay the remote pick back as
       // deny-feedback (best-effort, AD-4). An unparseable question fails closed — defer to the local picker.
@@ -1617,6 +1662,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
         if (answers === null) return preToolUseOutput('ask');
         return preToolUseOutput('deny', buildQuestionDenyReason(questions, answers));
       }
+
+      // A consequential tool the local session would prompt for, with an operator watching: hold it for the
+      // remote decision.
       const decision = await requestPermission(adoptedSource(telecodeSessionId), {
         toolName: event.tool_name,
         input: event.tool_input ?? {},

@@ -76,6 +76,25 @@ async function adopt(relay: FakeRelay, socketPath: string): Promise<void> {
   await first;
 }
 
+/**
+ * Tell the daemon a browser is watching (relay `viewer.presence`), so a consequential tool is held for a
+ * remote approval rather than deferred to the local prompt. The echo round-trip is an in-order barrier.
+ */
+async function markViewerPresent(relay: FakeRelay): Promise<void> {
+  relay.send(
+    makeEnvelope({
+      type: 'viewer.presence',
+      userId: USER,
+      deviceId: DEVICE,
+      payload: { online: true },
+    }),
+  );
+  relay.send(
+    makeEnvelope({ type: 'echo', userId: USER, deviceId: DEVICE, payload: { text: 'barrier' } }),
+  );
+  await relay.waitForFrame((e) => e.type === 'echo.reply');
+}
+
 describe('daemon: free-form handover & resume', () => {
   let relay: FakeRelay;
   let daemon: Daemon | undefined;
@@ -377,6 +396,7 @@ describe('daemon: free-form handover & resume', () => {
   it('does not offer a handover while a permission gate is already pending', async () => {
     await start(createFakeAgentAdapter([]));
     await adopt(relay, socketPath);
+    await markViewerPresent(relay); // a browser is watching, so the consequential tool is gated remotely
 
     // A consequential tool blocks on the approval gate → the session is awaiting_input.
     const gate = hookRpc(socketPath, {
