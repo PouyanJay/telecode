@@ -58,6 +58,8 @@ export type TranscriptEntry =
       readonly toolName: string;
       readonly input: Record<string, unknown>;
       readonly decision: DecisionState;
+      /** Client receive-time of the ask (ms epoch) — waiting timers until the wire gains timestamps. */
+      readonly askedAt?: number;
     }
   | {
       readonly kind: 'question';
@@ -65,6 +67,8 @@ export type TranscriptEntry =
       readonly requestId: string;
       readonly questions: readonly AgentQuestionItem[];
       readonly answer: AnswerState;
+      /** Client receive-time of the ask (ms epoch) — waiting timers until the wire gains timestamps. */
+      readonly askedAt?: number;
       /** The human's pick(s), one per question — present once answering/answered. */
       readonly answers?: readonly QuestionAnswerItem[];
     }
@@ -77,6 +81,8 @@ export type TranscriptEntry =
       /** Deterministic handover summary of recent context (may be empty). */
       readonly summary: string;
       readonly state: HandoverState;
+      /** Client receive-time of the ask (ms epoch) — waiting timers until the wire gains timestamps. */
+      readonly askedAt?: number;
       /** The user's free-text answer — present once they took it over (submitting/submitted). */
       readonly answerText?: string;
       /** The forked continuation this handover launched — present once the daemon registered it (link target). */
@@ -218,8 +224,15 @@ function revertInFlightActions(entries: readonly TranscriptEntry[]): readonly Tr
   return changed ? next : entries;
 }
 
-/** Fold one inbound relay frame into the session state. Unknown/invalid frames are ignored. */
-export function applyEnvelope(state: SessionState, envelope: Envelope): SessionState {
+/**
+ * Fold one inbound relay frame into the session state. Unknown/invalid frames are ignored. `now` stamps
+ * newly-arrived asks (their client receive-time) — injected so the reducer stays pure and testable.
+ */
+export function applyEnvelope(
+  state: SessionState,
+  envelope: Envelope,
+  now: number = Date.now(),
+): SessionState {
   // Handled BEFORE the in-flight confirm below: the failed action must be REVERTED, not confirmed.
   if (envelope.type === 'relay.error') {
     const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
@@ -300,6 +313,7 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
             toolName: parsed.data.toolName,
             input: parsed.data.input,
             decision: 'pending',
+            askedAt: now,
           },
         ],
         seq: base.seq + 1,
@@ -321,6 +335,7 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
             requestId: parsed.data.requestId,
             questions: parsed.data.questions,
             answer: 'pending',
+            askedAt: now,
           },
         ],
         seq: base.seq + 1,
@@ -344,6 +359,7 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
             question: parsed.data.question,
             summary: parsed.data.summary,
             state: 'pending',
+            askedAt: now,
           },
         ],
         seq: base.seq + 1,
