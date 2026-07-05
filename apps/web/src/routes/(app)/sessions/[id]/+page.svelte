@@ -137,7 +137,9 @@
       {/if}
       {#if !known}
         <div class="placeholder">
-          <p class="eyebrow">{$connectionState === 'error' ? 'OFFLINE' : 'RECONNECTING…'}</p>
+          <!-- "RELAY OFFLINE", not bare "OFFLINE" — this is the browser↔relay link, a different fact
+               from device presence or a paused session. -->
+          <p class="eyebrow">{$connectionState === 'error' ? 'RELAY OFFLINE' : 'RECONNECTING…'}</p>
           <p class="sub">
             {$connectionState === 'error'
               ? 'The channel is offline. It will restore when the connection returns.'
