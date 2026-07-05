@@ -1,12 +1,15 @@
 import type { AddressInfo } from 'node:net';
 
+import { makeEnvelope } from '@telecode/protocol';
+
 import { createAuthService, type AuthService } from '../../src/auth/auth-service';
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
+import { hashDeviceToken } from '../../src/device-auth';
 import { createDeviceRegistry, type DeviceRegistry } from '../../src/registry/device-registry';
 import { createSessionRegistry, type SessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
-import { connectBrowser, waitForEnvelope } from '../_helpers/ws';
+import { connectBrowser, connectDaemon, waitForEnvelope } from '../_helpers/ws';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
@@ -280,6 +283,82 @@ describe('relay device listing: GET /me/devices', () => {
       expect((frame.payload as { status: string }).status).toBe('done');
     }
     browser.close();
+  });
+
+  it('revoke succeeds when nobody is watching (broadcast has no audience, cascade still runs)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'unwatched-revoke',
+      deviceTokenHash: 'hash-unwatched-revoke',
+    });
+    const running = await sessions.createSession({ userId: alice.userId, deviceId });
+    await sessions.markRunning({ userId: alice.userId, sessionId: running });
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(del.statusCode).toBe(204);
+    const rows = await sessions.listByUser(alice.userId);
+    expect(rows.find((s) => s.id === running)?.status).toBe('done');
+  });
+
+  it('does not leak the revoke broadcast to a browser watching a different device', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const keeperToken = 'dt_scoped-keeper';
+    const revokedId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'to-revoke-scoped',
+      deviceTokenHash: 'hash-scoped-revoke',
+    });
+    const keeperId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'keeper-scoped',
+      deviceTokenHash: hashDeviceToken(keeperToken),
+    });
+    const running = await sessions.createSession({ userId: alice.userId, deviceId: revokedId });
+    await sessions.markRunning({ userId: alice.userId, sessionId: running });
+
+    // The browser watches the KEEPER's channel — the revoked device's frames must not reach it. The
+    // keeper daemon exists only to provide a deterministic ordering barrier on the browser's socket.
+    const relayUrl = `ws://127.0.0.1:${(app.server.address() as AddressInfo).port}/ws`;
+    const daemon = await connectDaemon(relayUrl, alice.userId, keeperId, keeperToken);
+    const browser = await connectBrowser(
+      relayUrl,
+      alice.userId,
+      keeperId,
+      await auth.mintChannelToken(alice.userId),
+    );
+    const frames: string[] = [];
+    browser.on('message', (raw: Buffer) => frames.push(raw.toString()));
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/me/devices/${revokedId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(del.statusCode).toBe(204);
+
+    // Barrier: the broadcast (if wrongly scoped) was already written during the DELETE; an echo.reply
+    // sent now arrives after it on the browser's FIFO socket, so awaiting it flushes any stray frame
+    // into `frames`. No timing waits.
+    const replied = waitForEnvelope(browser, (e) => e.type === 'echo.reply');
+    daemon.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'echo.reply',
+          userId: alice.userId,
+          deviceId: keeperId,
+          payload: { text: 'barrier' },
+        }),
+      ),
+    );
+    await replied;
+    expect(frames.some((f) => f.includes('session.ended'))).toBe(false);
+    browser.close();
+    daemon.close();
   });
 
   it('cannot revoke another user’s device (RLS-scoped → 404)', async () => {

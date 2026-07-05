@@ -12,7 +12,10 @@ function stubFetch(impl: () => Promise<Response>): void {
 }
 
 const okJson = (body: unknown): Response =>
-  new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
 
 afterEach(() => {
   vi.unstubAllGlobals();

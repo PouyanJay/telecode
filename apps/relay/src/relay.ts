@@ -471,7 +471,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         // renders both terminal states as ended, moving the phantom out of "awaiting" into recent.
         await registry.markEnded({ userId: envelope.user_id, sessionId: row.id, status: 'done' });
         // Tell watching browsers so a live dashboard clears the phantom without a refresh.
-        broadcastToBrowsers(channel, sessionEndedFrame(envelope.user_id, envelope.device_id, row.id));
+        broadcastToBrowsers(
+          channel,
+          sessionEndedFrame(envelope.user_id, envelope.device_id, row.id),
+        );
       }),
     );
     const failed = results.filter((r) => r.status === 'rejected').length;
@@ -941,7 +944,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         // slightly staler timestamp until the next hello.
         if (peer.deviceId !== null && deviceRegistry) {
           deviceRegistry.touchLastSeen(peer.deviceId).catch((err: unknown) => {
-            log.warn({ err, channel: peer.channel }, 'relay: could not stamp last_seen_at on close');
+            log.warn(
+              { err, channel: peer.channel },
+              'relay: could not stamp last_seen_at on close',
+            );
           });
         }
       } else if (peer.role === 'browser') {

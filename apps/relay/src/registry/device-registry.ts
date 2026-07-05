@@ -78,10 +78,7 @@ export function createDeviceRegistry(db: DbHandle): DeviceRegistry {
     },
 
     async touchLastSeen(deviceId): Promise<void> {
-      await db.db
-        .update(devices)
-        .set({ lastSeenAt: new Date() })
-        .where(eq(devices.id, deviceId));
+      await db.db.update(devices).set({ lastSeenAt: new Date() }).where(eq(devices.id, deviceId));
     },
 
     async findActiveByUser(userId): Promise<ActiveDevice[]> {

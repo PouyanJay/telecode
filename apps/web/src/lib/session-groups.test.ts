@@ -1,12 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { initialSessionState, type SessionStatus } from './session';
-import {
-  buildSessionRows,
-  groupSessions,
-  sessionCounts,
-  type SessionRow,
-} from './session-groups';
+import { buildSessionRows, groupSessions, sessionCounts, type SessionRow } from './session-groups';
 
 function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
   return {
@@ -151,7 +146,10 @@ describe('buildSessionRows', () => {
   it('marks a continuation from either the registry link or a live session.chained frame', () => {
     const chainedRegistry = [{ ...registry[0]!, id: 's-child', parentSessionId: 's-parent' }];
     const liveChained = new Map([
-      ['s-live-child', { ...initialSessionState, status: 'running' as const, parentSessionId: 'p' }],
+      [
+        's-live-child',
+        { ...initialSessionState, status: 'running' as const, parentSessionId: 'p' },
+      ],
     ]);
     const rows = buildSessionRows({
       registry: chainedRegistry,
@@ -177,5 +175,47 @@ describe('buildSessionRows', () => {
       now: NOW,
     });
     expect(sessionCounts(rows)).toEqual({ running: 1, awaiting: 1 });
+  });
+});
+
+describe('buildSessionRows variants', () => {
+  it('passes registry rows through untouched when nothing is live', () => {
+    const rows = buildSessionRows({
+      registry: [
+        {
+          id: 's-done',
+          title: 'shipped',
+          status: 'done',
+          deviceId: 'dev-1',
+          origin: 'external',
+          parentSessionId: null,
+          createdAt: new Date('2026-07-01T00:00:00Z'),
+        },
+      ],
+      live: new Map(),
+      deviceNameOf: () => 'macbook',
+      watchedDeviceName: null,
+    });
+    expect(rows).toEqual([
+      {
+        id: 's-done',
+        title: 'shipped',
+        status: 'done',
+        deviceName: 'macbook',
+        origin: 'external',
+        isContinuation: false,
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    ]);
+  });
+
+  it('returns no rows when both sources are empty', () => {
+    const rows = buildSessionRows({
+      registry: [],
+      live: new Map(),
+      deviceNameOf: () => null,
+      watchedDeviceName: null,
+    });
+    expect(rows).toEqual([]);
   });
 });
