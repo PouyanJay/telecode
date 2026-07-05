@@ -827,6 +827,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           socket.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
           return;
         }
+        // Presence honesty: stamp last_seen_at so the UI's "last seen" is real data. Awaited before the
+        // ack (an acked daemon is a stamped daemon) but never fatal — registration must survive a DB blip.
+        try {
+          await deviceRegistry.touchLastSeen(device.id);
+        } catch (err) {
+          log.warn({ err, channel }, 'relay: could not stamp last_seen_at on hello');
+        }
       }
 
       peer.role = role;
@@ -909,6 +916,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           if (peer.userId !== null && peer.deviceId !== null) {
             broadcastToBrowsers(peer.channel, presenceFrame(peer.userId, peer.deviceId, false));
           }
+        }
+        // Close the presence window: the disconnect stamp makes "last seen" honest while the device is
+        // offline. Fire-and-forget — a close handler must not block, and a failed stamp only means a
+        // slightly staler timestamp until the next hello.
+        if (peer.deviceId !== null && deviceRegistry) {
+          deviceRegistry.touchLastSeen(peer.deviceId).catch((err: unknown) => {
+            log.warn({ err, channel: peer.channel }, 'relay: could not stamp last_seen_at on close');
+          });
         }
       } else if (peer.role === 'browser') {
         const set = browsers.get(peer.channel);

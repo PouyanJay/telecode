@@ -38,6 +38,12 @@ export interface DeviceRegistry {
   }): Promise<string>;
   /** Resolve a non-revoked device by its token hash (daemon authentication), or null. */
   findActiveByTokenHash(tokenHash: string): Promise<DeviceRecord | null>;
+  /**
+   * Stamp a device's `last_seen_at` (daemon connected/disconnected). Runs on the trusted owner
+   * connection keyed by primary key — like `findActiveByTokenHash`, it executes at `hello` time where
+   * no user context exists yet, and it can only touch the one presence column.
+   */
+  touchLastSeen(deviceId: string): Promise<void>;
   /** List a user's non-revoked devices (newest first) under their RLS scope, for the web to target. */
   findActiveByUser(userId: string): Promise<ActiveDevice[]>;
   /**
@@ -69,6 +75,13 @@ export function createDeviceRegistry(db: DbHandle): DeviceRegistry {
         .where(and(eq(devices.deviceTokenHash, tokenHash), isNull(devices.revokedAt)))
         .limit(1);
       return row ?? null;
+    },
+
+    async touchLastSeen(deviceId): Promise<void> {
+      await db.db
+        .update(devices)
+        .set({ lastSeenAt: new Date() })
+        .where(eq(devices.id, deviceId));
     },
 
     async findActiveByUser(userId): Promise<ActiveDevice[]> {
