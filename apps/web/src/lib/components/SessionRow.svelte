@@ -18,10 +18,6 @@
   // Sessions telecode adopted from the user's own Claude Code runs (terminal / IDE) are marked, so the
   // operator can tell them from sessions launched here — they're monitored + gated, not telecode-driven.
   const isAdopted = $derived(row.origin === 'external');
-  // A forked continuation of another session (a free-form handover the user took over) is marked too, so a
-  // chained session reads as chained in the list — not only inside the session view. A continuation is
-  // always a launch, so it never overlaps the adopted "on device" mark.
-  const isContinuation = $derived(row.isContinuation);
 </script>
 
 <a class="row hairline-b" class:await={isAwaiting} href="/sessions/{row.id}">
@@ -29,9 +25,13 @@
     <StatusDot tone={display.tone} label={display.label} pulse={display.pulse} />
   </span>
   <span class="titlecell">
+    <!-- At most one origin mark: a session is either adopted from the user's own Claude Code ("on device")
+         or a forked continuation of another (a free-form handover they took over). A continuation is always
+         a launch, so the two never overlap. Marking it here makes a chained session read as chained in the
+         list, not only inside the session view. -->
     {#if isAdopted}
       <Pill label="on device" />
-    {:else if isContinuation}
+    {:else if row.isContinuation}
       <Pill label="continuation" />
     {/if}
     <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
