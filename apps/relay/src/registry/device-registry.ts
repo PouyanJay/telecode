@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
 import { devices } from '../db/schema';
@@ -38,6 +38,12 @@ export interface DeviceRegistry {
   }): Promise<string>;
   /** Resolve a non-revoked device by its token hash (daemon authentication), or null. */
   findActiveByTokenHash(tokenHash: string): Promise<DeviceRecord | null>;
+  /**
+   * Stamp a device's `last_seen_at` (daemon connected/disconnected). Runs on the trusted owner
+   * connection keyed by primary key — like `findActiveByTokenHash`, it executes at `hello` time where
+   * no user context exists yet, and it can only touch the one presence column.
+   */
+  touchLastSeen(deviceId: string): Promise<void>;
   /** List a user's non-revoked devices (newest first) under their RLS scope, for the web to target. */
   findActiveByUser(userId: string): Promise<ActiveDevice[]>;
   /**
@@ -47,7 +53,11 @@ export interface DeviceRegistry {
   revoke(userId: string, deviceId: string): Promise<boolean>;
 }
 
-export function createDeviceRegistry(db: DbHandle): DeviceRegistry {
+/** `clock` is injectable so presence-stamp ordering is testable without wall-clock sleeps. */
+export function createDeviceRegistry(
+  db: DbHandle,
+  clock: () => Date = () => new Date(),
+): DeviceRegistry {
   return {
     async createDevice({ userId, name, deviceTokenHash, publicKey, os }): Promise<string> {
       return withUserContext(db, userId, async (scoped) => {
@@ -69,6 +79,18 @@ export function createDeviceRegistry(db: DbHandle): DeviceRegistry {
         .where(and(eq(devices.deviceTokenHash, tokenHash), isNull(devices.revokedAt)))
         .limit(1);
       return row ?? null;
+    },
+
+    async touchLastSeen(deviceId): Promise<void> {
+      // Monotonic: both call sites (hello, disconnect) are fire-and-forget, so two in-flight stamps
+      // from a flapping connection have no guaranteed completion order — greatest() ensures the column
+      // never regresses to the earlier one.
+      await db.db
+        .update(devices)
+        .set({
+          lastSeenAt: sql`greatest(coalesce(${devices.lastSeenAt}, to_timestamp(0)), ${clock()})`,
+        })
+        .where(eq(devices.id, deviceId));
     },
 
     async findActiveByUser(userId): Promise<ActiveDevice[]> {

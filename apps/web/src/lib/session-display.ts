@@ -16,11 +16,13 @@ export interface StatusDisplay {
  * the amber accent (the "live / needs you" signal); everything else stays neutral/semantic.
  */
 export const SESSION_DISPLAY: Record<SessionStatus, StatusDisplay> = {
-  idle: { tone: 'muted', label: 'READY', pulse: false },
+  idle: { tone: 'muted', label: 'IDLE', pulse: false },
   starting: { tone: 'warning', label: 'STARTING…', pulse: false },
   running: { tone: 'accent', label: 'RUNNING', pulse: true },
   awaiting_input: { tone: 'accent', label: 'AWAITING INPUT', pulse: true },
   done: { tone: 'success', label: 'DONE', pulse: false },
   error: { tone: 'danger', label: 'ERROR', pulse: false },
-  offline_paused: { tone: 'warning', label: 'OFFLINE', pulse: false },
+  // "PAUSED · OFFLINE", never bare "OFFLINE": that word already means device presence — a paused
+  // session and an offline device are different facts and must read differently.
+  offline_paused: { tone: 'warning', label: 'PAUSED · OFFLINE', pulse: false },
 };

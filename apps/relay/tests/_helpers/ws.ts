@@ -27,8 +27,12 @@ export function waitForEnvelope(
 }
 
 /**
- * Open a browser-role connection to the relay and wait until it is registered (hello.ack). When the
- * relay enforces auth, pass the short-lived channel `token` to authenticate the `hello`.
+ * Open a browser-role connection to the relay and wait until it is registered (hello.ack) AND its
+ * mandatory `device.presence` snapshot has been drained. The relay answers every browser hello with
+ * exactly one presence snapshot (honesty pass T2); draining it here — like the ack — means no test has
+ * to expect it in its own frame assertions, and no frame is lost in the gap between the handshake and
+ * the caller attaching its listeners. When the relay enforces auth, pass the short-lived channel
+ * `token` to authenticate the `hello`.
  */
 export async function connectBrowser(
   relayUrl: string,
@@ -42,6 +46,7 @@ export async function connectBrowser(
     socket.once('error', reject);
   });
   const ack = waitForEnvelope(socket, (e) => e.type === 'hello.ack');
+  const presenceSnapshot = waitForEnvelope(socket, (e) => e.type === 'device.presence');
   socket.send(
     JSON.stringify(
       makeEnvelope({
@@ -52,7 +57,7 @@ export async function connectBrowser(
       }),
     ),
   );
-  await ack;
+  await Promise.all([ack, presenceSnapshot]);
   return socket;
 }
 

@@ -10,11 +10,12 @@
   import SidebarResizer from '$lib/components/SidebarResizer.svelte';
   import SystemBar from '$lib/components/SystemBar.svelte';
   import { launchDrawerOpen } from '$lib/launch-drawer';
-  import { sessionCounts } from '$lib/session-groups';
+  import { buildSessionRows, sessionCounts } from '$lib/session-groups';
   import {
     connectionState,
     ensureConnection,
     sessions as liveSessions,
+    watchedDaemonOnline,
   } from '$lib/session-store';
   import {
     DEFAULT_SIDEBAR_WIDTH,
@@ -35,13 +36,19 @@
 
   const RELAY_URL = env.PUBLIC_TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
   const device = $derived(data.devices[0] ?? null);
-  // Live working/blocked tallies for the system bar, straight from the demuxed session map.
-  const counts = $derived(sessionCounts([...$liveSessions.values()]));
-  // Total sessions for the sidebar's nav badge: the persisted registry unioned with any launched this
-  // visit but not yet in it — the same set the dashboard lists, so the badge matches the page.
-  const sessionTotal = $derived(
-    new Set([...data.sessions.map((s) => s.id), ...$liveSessions.keys()]).size,
+  // The system bar and sidebar badge count the SAME merged rows the dashboard lists (registry overlaid
+  // with live status via the one shared buildSessionRows) — the tallies can never disagree between
+  // surfaces. Counting live-only used to miss persisted awaiting sessions the dashboard showed.
+  const mergedRows = $derived(
+    buildSessionRows({
+      registry: data.sessions,
+      live: $liveSessions,
+      deviceNameOf: () => null,
+      watchedDeviceName: null,
+    }),
   );
+  const counts = $derived(sessionCounts(mergedRows));
+  const sessionTotal = $derived(mergedRows.length);
 
   // Operator-adjustable sidebar width: seed from storage on the client, persist on every change.
   let sidebarWidth = $state(browser ? readSidebarWidth(localStorage) : DEFAULT_SIDEBAR_WIDTH);
@@ -82,6 +89,7 @@
     user={data.user}
     devices={data.devices}
     connection={$connectionState}
+    daemonOnline={$watchedDaemonOnline}
     {sessionTotal}
     onlaunch={openLaunchDrawer}
   />

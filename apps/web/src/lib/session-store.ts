@@ -55,6 +55,10 @@ const LAUNCH_TIMEOUT_MS = 15_000;
 
 const sessionMap = writable<SessionMap>(new Map());
 const connState = writable<ConnectionState>('idle');
+// Whether the watched device's DAEMON is on the channel — the relay's `device.presence` signal (every
+// connecting browser gets a snapshot). Null until the first frame arrives: unknown, not a claim. This is
+// what makes a device row "online" — never the browser's own socket state alone.
+const daemonPresence = writable<boolean | null>(null);
 // The daemon's current adoption policy (Journey 3), updated from sealed `adopt.state` frames. Null until the
 // Settings page requests it (or the daemon replies). Device-scoped, not per-session.
 const adoptStateStore = writable<AdoptStatePayload | null>(null);
@@ -69,6 +73,10 @@ const pendingLaunches: PendingLaunch[] = [];
 export const sessions: Readable<SessionMap> = { subscribe: sessionMap.subscribe };
 /** The connection's honest state (idle / connecting / connected / error) for the top-bar indicator. */
 export const connectionState: Readable<ConnectionState> = { subscribe: connState.subscribe };
+/** Whether the watched device's daemon is on the channel (null = no presence frame yet). */
+export const watchedDaemonOnline: Readable<boolean | null> = {
+  subscribe: daemonPresence.subscribe,
+};
 /** The daemon's current adoption policy for the Settings UI; null until first received (Journey 3). */
 export const adoptState: Readable<AdoptStatePayload | null> = {
   subscribe: adoptStateStore.subscribe,
@@ -81,6 +89,7 @@ function handleEvent(envelope: Envelope): void {
   if (envelope.type === 'device.presence') {
     const presence = devicePresencePayloadSchema.safeParse(envelope.payload);
     if (!presence.success) return;
+    daemonPresence.set(presence.data.online);
     if (presence.data.online) reattachSessions();
     else sessionMap.update((map) => markChannelOffline(map));
     return;
@@ -312,5 +321,6 @@ export function disconnect(): void {
   // Full teardown (sign-out): drop watched-session state. A later reconnect re-fetches the list from the
   // registry and backfills transcripts, so nothing stale should linger across a disconnect.
   sessionMap.set(new Map());
+  daemonPresence.set(null);
   adoptStateStore.set(null);
 }

@@ -1,6 +1,6 @@
-import type { SessionOrigin } from '@telecode/protocol';
+import type { SessionOrigin, SessionStatusName } from '@telecode/protocol';
 
-import type { SessionStatus } from './session';
+import type { SessionState, SessionStatus } from './session';
 
 /**
  * The dashboard presentation layer: how the session list is bucketed, ordered, and tallied. Kept apart
@@ -23,6 +23,67 @@ export interface SessionRow {
    */
   readonly isContinuation: boolean;
   readonly createdAt: Date;
+}
+
+/** A persisted-registry session, as the layout load delivers it (the fields the dashboard renders). */
+export interface RegistrySessionRow {
+  readonly id: string;
+  readonly title: string | null;
+  readonly status: SessionStatusName;
+  readonly deviceId: string;
+  readonly origin: SessionOrigin;
+  readonly parentSessionId: string | null;
+  readonly createdAt: Date;
+}
+
+function firstPrompt(entries: SessionState['entries']): string | undefined {
+  return entries.find((entry) => entry.kind === 'user')?.text;
+}
+
+/**
+ * THE single merge of the persisted registry with the live channel — every surface that shows session
+ * rows or tallies (dashboard list, system bar, sidebar badge) builds from this one function, so their
+ * numbers can never disagree. Registry rows are overlaid with live status; sessions launched this visit
+ * but not yet persisted are appended, attributed to the watched device (the only device launches go to).
+ */
+export function buildSessionRows(input: {
+  readonly registry: readonly RegistrySessionRow[];
+  readonly live: ReadonlyMap<string, SessionState>;
+  readonly deviceNameOf: (deviceId: string) => string | null;
+  readonly watchedDeviceName: string | null;
+  /** Clock for the createdAt of not-yet-persisted live sessions (injected so the merge stays pure). */
+  readonly now?: Date;
+}): SessionRow[] {
+  const byId = new Map<string, SessionRow>();
+  for (const session of input.registry) {
+    byId.set(session.id, {
+      id: session.id,
+      title: session.title,
+      status: session.status,
+      deviceName: input.deviceNameOf(session.deviceId),
+      origin: session.origin,
+      isContinuation: session.parentSessionId !== null,
+      createdAt: session.createdAt,
+    });
+  }
+  for (const [id, state] of input.live) {
+    const existing = byId.get(id);
+    // A live state that is still `idle` carries no frames yet — keep what the registry says.
+    const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
+    const title = existing?.title ?? firstPrompt(state.entries) ?? null;
+    byId.set(id, {
+      id,
+      title,
+      status,
+      deviceName: existing?.deviceName ?? input.watchedDeviceName,
+      // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
+      origin: existing?.origin ?? 'launched',
+      // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
+      isContinuation: (existing?.isContinuation ?? false) || state.parentSessionId !== null,
+      createdAt: existing?.createdAt ?? input.now ?? new Date(),
+    });
+  }
+  return [...byId.values()];
 }
 
 /** The dashboard's three buckets (the mockup's "Needs your decision" / "Active" / "Recent"). */

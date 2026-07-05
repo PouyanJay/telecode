@@ -18,12 +18,15 @@
     user,
     devices,
     connection,
+    daemonOnline,
     sessionTotal,
     onlaunch,
   }: {
     user: { displayName?: string | null; email?: string | null } | null;
     devices: RelayDevice[];
     connection: ConnectionState;
+    /** Whether the watched device's daemon is on the channel (null = no presence frame yet). */
+    daemonOnline: boolean | null;
     sessionTotal: number;
     onlaunch: () => void;
   } = $props();
@@ -86,6 +89,7 @@
             lastSeenAt: device.lastSeenAt,
             isWatched: i === 0,
             connection,
+            daemonOnline,
           })}
           <li class="device">
             <span class="device-dot" data-tone={status.tone} aria-hidden="true"></span>
