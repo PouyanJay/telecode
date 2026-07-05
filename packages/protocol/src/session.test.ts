@@ -653,4 +653,11 @@ describe('sessionReconcilePayloadSchema (daemon → relay reconciliation)', () =
     expect(sessionReconcilePayloadSchema.safeParse({ heldSessionIds: [1, 2] }).success).toBe(false);
     expect(sessionReconcilePayloadSchema.safeParse({ heldSessionIds: [''] }).success).toBe(false);
   });
+
+  it('accepts a large list — a busy daemon can hold many sessions (no upper bound)', () => {
+    const many = Array.from({ length: 500 }, (_, i) => `s${i}`);
+    expect(
+      sessionReconcilePayloadSchema.parse({ heldSessionIds: many }).heldSessionIds,
+    ).toHaveLength(500);
+  });
 });

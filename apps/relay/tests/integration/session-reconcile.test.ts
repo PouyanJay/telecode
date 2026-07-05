@@ -82,6 +82,9 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
     await registry.markEnded({ userId, sessionId: alreadyDone, status: 'done' });
     const otherDeviceAwaiting = await registry.createSession({ userId, deviceId: otherDeviceId });
     await registry.markAwaitingInput({ userId, sessionId: otherDeviceAwaiting });
+    // A launch not yet accepted stays `starting`: reconcile must NOT retire it — it may be a launch just
+    // forwarded to the daemon (a genuinely orphaned one is failed by the offline-launch path instead).
+    const orphanStarting = await registry.createSession({ userId, deviceId });
 
     const daemon = await connectDaemon(relayUrl, userId, deviceId);
     const browser = await connectBrowser(relayUrl, userId, deviceId);
@@ -110,6 +113,7 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
     await expectSessionStatus(admin, held, 'running');
     await expectSessionStatus(admin, alreadyDone, 'done');
     await expectSessionStatus(admin, otherDeviceAwaiting, 'awaiting_input');
+    await expectSessionStatus(admin, orphanStarting, 'starting');
 
     daemon.close();
     browser.close();
@@ -124,9 +128,14 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
     const daemon = await connectDaemon(relayUrl, userId, deviceId);
     const browser = await connectBrowser(relayUrl, userId, deviceId);
 
+    // Wait for BOTH retirements (not just one) so the DB assertions don't lean on the status poll's tolerance.
     const endedAwaiting = waitForEnvelope(
       browser,
       (e) => e.type === 'session.ended' && e.session_id === awaiting,
+    );
+    const endedRunning = waitForEnvelope(
+      browser,
+      (e) => e.type === 'session.ended' && e.session_id === running,
     );
     daemon.send(
       JSON.stringify(
@@ -138,7 +147,7 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
         }),
       ),
     );
-    await endedAwaiting;
+    await Promise.all([endedAwaiting, endedRunning]);
 
     await expectSessionStatus(admin, awaiting, 'done');
     await expectSessionStatus(admin, running, 'done');

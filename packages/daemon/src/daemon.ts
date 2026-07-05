@@ -823,8 +823,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // Reconcile the registry: tell the relay which sessions we still hold so it can retire any OTHERS
         // left stale (a revoke/restart leaves `running`/`awaiting_input` rows the daemon no longer has —
         // otherwise they show as phantom "awaiting" in the dashboard and resurrect on every refresh). Sent
-        // on every (re)registration; cleartext session ids only.
-        socket?.send(reconcileFrame());
+        // on every (re)registration; cleartext session ids only. Routed through the outbound chain like every
+        // other send, so a frame a future hello.ack step might add can never overtake or be overtaken by it.
+        enqueueSend(async () => reconcileFrame());
         return;
       }
       case 'echo': {

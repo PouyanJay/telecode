@@ -702,6 +702,9 @@ describe('daemon: session reconciliation on (re)connect', () => {
       ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
       await evt;
 
+      // waitForHello is a sufficient barrier: the daemon sends the reconcile right after receiving hello.ack,
+      // over the same socket, and FakeRelay buffers it until consumed — so no timing wait is needed. (The
+      // first, empty reconcile was already consumed above, so this awaits the post-reconnect one.)
       relay.dropConnection();
       await relay.waitForHello();
       const afterReconnect = await relay.waitForFrame((e) => e.type === 'session.reconcile');
