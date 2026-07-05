@@ -81,6 +81,11 @@ export const MESSAGE_TYPES = [
   // device left stale in the registry — e.g. a session that was `awaiting_input` when the device was
   // revoked or the daemon restarted. Cleartext routing metadata (session ids only), no session payload.
   'session.reconcile',
+  // delivery failure (relay -> web): a browser frame could not reach its daemon (e.g. the device is
+  // offline), so the sender must not pretend it was acted on — an approval that went nowhere shows as
+  // undelivered, never as a spinner. Relay-generated cleartext routing metadata: an error code + the
+  // type of the frame that failed; never any session payload.
+  'relay.error',
 ] as const;
 
 export const messageTypeSchema = z.enum(MESSAGE_TYPES);
