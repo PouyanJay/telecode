@@ -728,18 +728,15 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // (session-token authed; RLS-scoped to the owner). The revoke cascade reports the session ids it
     // ended so watching browsers hear about them immediately — same synthetic frame as reconcile.
     if (deviceRegistry) {
-      registerDeviceRoutes(
-        app,
-        options.auth.service,
-        deviceRegistry,
-        sessionRegistry,
-        ({ userId, deviceId, sessionIds }) => {
+      registerDeviceRoutes(app, options.auth.service, deviceRegistry, {
+        ...(sessionRegistry ? { sessionRegistry } : {}),
+        onSessionsEnded: ({ userId, deviceId, sessionIds }) => {
           const channel = channelKey(userId, deviceId);
           for (const sessionId of sessionIds) {
             broadcastToBrowsers(channel, sessionEndedFrame(userId, deviceId, sessionId));
           }
         },
-      );
+      });
     }
     // Operator-only infra controls (scale-to-zero toggles). Registered only when configured (Azure env);
     // every request is gated to the operator allowlist inside the routes.
@@ -847,13 +844,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           socket.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
           return;
         }
-        // Presence honesty: stamp last_seen_at so the UI's "last seen" is real data. Awaited before the
-        // ack (an acked daemon is a stamped daemon) but never fatal — registration must survive a DB blip.
-        try {
-          await deviceRegistry.touchLastSeen(device.id);
-        } catch (err) {
+        // Presence honesty: stamp last_seen_at so the UI's "last seen" is real data. Fire-and-forget —
+        // registration must never wait on (or fail with) this write: a slow/hung DB would otherwise
+        // stall the handshake unbounded. Symmetric with the disconnect stamp in the close handler.
+        deviceRegistry.touchLastSeen(device.id).catch((err: unknown) => {
           log.warn({ err, channel }, 'relay: could not stamp last_seen_at on hello');
-        }
+        });
       }
 
       peer.role = role;

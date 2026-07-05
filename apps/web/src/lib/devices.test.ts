@@ -99,6 +99,34 @@ describe('deviceStatus', () => {
     });
   });
 
+  it('reports offline on a connection error, whatever presence said last', () => {
+    const status = deviceStatus(
+      {
+        lastSeenAt: new Date(NOW - 60_000),
+        isWatched: true,
+        connection: 'error',
+        daemonOnline: true,
+      },
+      NOW,
+    );
+    expect(status.online).toBe(false);
+    expect(status.label).toBe('OFFLINE');
+  });
+
+  it('stays connecting mid-reconnect even when the last presence frame said online', () => {
+    const status = deviceStatus(
+      {
+        lastSeenAt: new Date(NOW - 60_000),
+        isWatched: true,
+        connection: 'connecting',
+        daemonOnline: true,
+      },
+      NOW,
+    );
+    expect(status.online).toBe(false);
+    expect(status.label).toBe('CONNECTING…');
+  });
+
   it("reads a never-seen device's last-seen as 'never'", () => {
     const status = deviceStatus(
       { lastSeenAt: null, isWatched: false, connection: 'idle', daemonOnline: null },

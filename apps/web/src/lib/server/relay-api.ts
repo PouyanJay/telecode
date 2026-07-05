@@ -1,4 +1,10 @@
-import { type SessionOrigin, type SessionStatusName } from '@telecode/protocol';
+import {
+  SESSION_ORIGINS,
+  SESSION_STATUSES,
+  type SessionOrigin,
+  type SessionStatusName,
+} from '@telecode/protocol';
+import { z } from 'zod';
 
 import { env } from '$env/dynamic/private';
 
@@ -117,38 +123,56 @@ export interface RelayListResult<T> {
   readonly items: T[];
 }
 
-/** List the user's active paired devices (session-token authed). */
-export async function listDevices(sessionToken: string): Promise<RelayListResult<RelayDevice>> {
+/**
+ * One place owns the error contract for registry list reads: an error status, an unreachable relay, or
+ * a body that fails validation all yield `{ ok: false, items: [] }` — a failure the caller must
+ * surface, never an empty account. `parse` returns null on shape mismatch (zod at the trust boundary).
+ */
+async function fetchRegistryList<Item>(
+  path: string,
+  sessionToken: string,
+  parse: (body: unknown) => Item[] | null,
+): Promise<RelayListResult<Item>> {
   try {
-    const res = await fetch(`${RELAY_HTTP_URL}/me/devices`, {
+    const res = await fetch(`${RELAY_HTTP_URL}${path}`, {
       headers: { authorization: `Bearer ${sessionToken}` },
     });
     if (!res.ok) {
       return { ok: false, items: [] };
     }
-    const body = (await res.json()) as {
-      devices: {
-        id: string;
-        name: string;
-        os: string | null;
-        last_seen_at: string | null;
-        public_key: string | null;
-      }[];
-    };
-    return {
-      ok: true,
-      items: body.devices.map((device) => ({
-        id: device.id,
-        name: device.name,
-        os: device.os,
-        lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
-        publicKey: device.public_key ?? null,
-      })),
-    };
+    const items = parse(await res.json());
+    return items === null ? { ok: false, items: [] } : { ok: true, items };
   } catch {
-    // Relay unreachable — a failure the caller must surface, not an empty account.
     return { ok: false, items: [] };
   }
+}
+
+/** The relay's `GET /me/devices` body — validated, not cast (this is a trust boundary). */
+const deviceListBodySchema = z.object({
+  devices: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      os: z.string().nullable(),
+      last_seen_at: z.string().nullable(),
+      public_key: z.string().nullable(),
+    }),
+  ),
+});
+
+/** List the user's active paired devices (session-token authed). */
+export async function listDevices(sessionToken: string): Promise<RelayListResult<RelayDevice>> {
+  return fetchRegistryList('/me/devices', sessionToken, (body) => {
+    const parsed = deviceListBodySchema.safeParse(body);
+    if (!parsed.success) return null;
+    return parsed.data.devices.map((device) => ({
+      id: device.id,
+      name: device.name,
+      os: device.os,
+      lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
+      publicKey: device.public_key,
+    }));
+  });
 }
 
 /** The outcome of a revoke attempt — `notFound` distinguishes "already gone" from a transient failure. */
@@ -171,47 +195,43 @@ export async function revokeDevice(sessionToken: string, deviceId: string): Prom
   }
 }
 
+/** The relay's `GET /me/sessions` body — validated, not cast (this is a trust boundary). */
+const sessionListBodySchema = z.object({
+  sessions: z.array(
+    z.object({
+      id: z.string(),
+      device_id: z.string(),
+      title: z.string().nullable(),
+      // Enums rebuilt from the protocol's exported tuples (not its schema objects) so this file's zod
+      // instance never composes another instance's types.
+      status: z.enum(SESSION_STATUSES),
+      origin: z.enum(SESSION_ORIGINS).optional(),
+      parent_session_id: z.string().nullable().optional(),
+      created_at: z.string(),
+      updated_at: z.string(),
+      ended_at: z.string().nullable(),
+    }),
+  ),
+});
+
 /** List the user's sessions, newest-first (session-token authed). */
 export async function listSessions(sessionToken: string): Promise<RelayListResult<RelaySession>> {
-  try {
-    const res = await fetch(`${RELAY_HTTP_URL}/me/sessions`, {
-      headers: { authorization: `Bearer ${sessionToken}` },
-    });
-    if (!res.ok) {
-      return { ok: false, items: [] };
-    }
-    const body = (await res.json()) as {
-      sessions: {
-        id: string;
-        device_id: string;
-        title: string | null;
-        status: SessionStatusName;
-        origin?: SessionOrigin;
-        parent_session_id?: string | null;
-        created_at: string;
-        updated_at: string;
-        ended_at: string | null;
-      }[];
-    };
-    return {
-      ok: true,
-      items: body.sessions.map((session) => ({
-        id: session.id,
-        deviceId: session.device_id,
-        title: session.title,
-        status: session.status,
-        // Default to `launched` so a relay that predates the origin field degrades cleanly.
-        origin: session.origin ?? 'launched',
-        parentSessionId: session.parent_session_id ?? null,
-        createdAt: new Date(session.created_at),
-        updatedAt: new Date(session.updated_at),
-        endedAt: session.ended_at ? new Date(session.ended_at) : null,
-      })),
-    };
-  } catch {
-    // Relay unreachable — a failure the caller must surface, not an empty account.
-    return { ok: false, items: [] };
-  }
+  return fetchRegistryList('/me/sessions', sessionToken, (body) => {
+    const parsed = sessionListBodySchema.safeParse(body);
+    if (!parsed.success) return null;
+    return parsed.data.sessions.map((session) => ({
+      id: session.id,
+      deviceId: session.device_id,
+      title: session.title,
+      status: session.status,
+      // Default to `launched` so a relay that predates the origin field degrades cleanly.
+      origin: session.origin ?? 'launched',
+      parentSessionId: session.parent_session_id ?? null,
+      createdAt: new Date(session.created_at),
+      updatedAt: new Date(session.updated_at),
+      endedAt: session.ended_at ? new Date(session.ended_at) : null,
+    }));
+  });
 }
 
 /** A GitHub repo the user can launch a session against (for the launch picker). */

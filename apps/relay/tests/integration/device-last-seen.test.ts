@@ -4,6 +4,7 @@ import { makeEnvelope } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
+import WebSocket from 'ws';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDb, type DbHandle } from '../../src/db/client';
@@ -11,17 +12,18 @@ import { runMigrations } from '../../src/db/migrate';
 import { hashDeviceToken } from '../../src/device-auth';
 import { createDeviceRegistry, type DeviceRegistry } from '../../src/registry/device-registry';
 import { buildRelay } from '../../src/relay';
-import { connectDaemon } from '../_helpers/ws';
+import { connectBrowser, connectDaemon, waitForEnvelope } from '../_helpers/ws';
 
 /**
  * Device presence honesty (UX honesty pass, T1): `devices.last_seen_at` must reflect reality. The relay
  * stamps it when a daemon registers (hello) and again when it disconnects, so "last seen" in the UI is
- * real data instead of the permanent null it has been. Real relay + real Postgres + real WS.
+ * real data instead of the permanent null it has been. Real relay + real Postgres + real WS. The
+ * registry gets a deterministic monotonic clock so stamp ordering is assertable without wall-clock
+ * sleeps (each stamp is one injected second apart).
  */
 const DATABASE_URL = process.env.DATABASE_URL;
 const DEVICE_TOKEN = 'dt_last-seen-test-token';
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const CLOCK_BASE_MS = new Date('2026-07-05T12:00:00Z').getTime();
 
 describe('relay: devices.last_seen_at stamping', () => {
   let app: FastifyInstance;
@@ -31,6 +33,7 @@ describe('relay: devices.last_seen_at stamping', () => {
   let relayUrl: string;
   let userId: string;
   let deviceId: string;
+  let clockTicks = 0;
 
   async function lastSeenAt(id: string): Promise<Date | null> {
     const res = await admin.query<{ last_seen_at: Date | null }>(
@@ -47,7 +50,7 @@ describe('relay: devices.last_seen_at stamping', () => {
     await runMigrations(DATABASE_URL);
     handle = createDb(DATABASE_URL);
     admin = new Pool({ connectionString: DATABASE_URL });
-    registry = createDeviceRegistry(handle);
+    registry = createDeviceRegistry(handle, () => new Date(CLOCK_BASE_MS + ++clockTicks * 1000));
 
     app = await buildRelay({ logger: pino({ level: 'silent' }), deviceRegistry: registry });
     await app.listen({ port: 0, host: '127.0.0.1' });
@@ -73,37 +76,40 @@ describe('relay: devices.last_seen_at stamping', () => {
     });
   });
 
-  it('touchLastSeen stamps the column (registry primitive)', async () => {
+  it('touchLastSeen stamps the column with the injected clock (registry primitive)', async () => {
     expect(await lastSeenAt(deviceId)).toBeNull();
+    const before = clockTicks;
     await registry.touchLastSeen(deviceId);
-    const seen = await lastSeenAt(deviceId);
-    expect(seen).not.toBeNull();
-    expect(Date.now() - seen!.getTime()).toBeLessThan(5000);
+    expect((await lastSeenAt(deviceId))?.getTime()).toBe(CLOCK_BASE_MS + (before + 1) * 1000);
   });
 
-  it('stamps last_seen_at when the daemon registers (hello.ack implies the stamp)', async () => {
+  it('stamps last_seen_at when the daemon registers', async () => {
     expect(await lastSeenAt(deviceId)).toBeNull();
     const daemon = await connectDaemon(relayUrl, userId, deviceId, DEVICE_TOKEN);
-    // hello.ack already received inside connectDaemon — the stamp must be visible now, no polling.
-    const seen = await lastSeenAt(deviceId);
-    expect(seen).not.toBeNull();
+    // The stamp is fire-and-forget (registration never waits on it), so poll for it to land.
+    await expect
+      .poll(async () => (await lastSeenAt(deviceId)) !== null, { timeout: 3000 })
+      .toBe(true);
     daemon.close();
   });
 
   it('stamps last_seen_at again when the daemon disconnects', async () => {
     const daemon = await connectDaemon(relayUrl, userId, deviceId, DEVICE_TOKEN);
-    const atHello = await lastSeenAt(deviceId);
-    expect(atHello).not.toBeNull();
-    // Let the clock move past the hello stamp so the disconnect stamp is distinguishable.
-    await sleep(25);
+    // The hello stamp is fire-and-forget — wait for it to land before using it as the baseline. The
+    // injected clock is strictly monotonic (one second per stamp), so the disconnect stamp is
+    // distinguishable with no wall-clock dependency.
+    await expect
+      .poll(async () => (await lastSeenAt(deviceId)) !== null, { timeout: 3000 })
+      .toBe(true);
+    const atHello = (await lastSeenAt(deviceId))!;
     daemon.close();
     await expect
       .poll(async () => (await lastSeenAt(deviceId))?.getTime(), { timeout: 3000 })
-      .toBeGreaterThan(atHello!.getTime());
+      .toBeGreaterThan(atHello.getTime());
   });
 
   it('does not stamp on a rejected hello (invalid device token)', async () => {
-    const socket = new (await import('ws')).default(relayUrl);
+    const socket = new WebSocket(relayUrl);
     await new Promise<void>((resolve, reject) => {
       socket.once('open', () => resolve());
       socket.once('error', reject);
@@ -135,6 +141,36 @@ describe('relay: devices.last_seen_at stamping', () => {
     // connectDaemon resolves only on hello.ack — registration succeeded despite the failed stamp.
     const daemon = await connectDaemon(flakyUrl, userId, deviceId, DEVICE_TOKEN);
     daemon.close();
+    await flakyApp.close();
+    expect(await lastSeenAt(deviceId)).toBeNull();
+  });
+
+  it('still broadcasts offline presence when the disconnect stamp fails (teardown must not block)', async () => {
+    const flaky: DeviceRegistry = {
+      ...registry,
+      touchLastSeen: () => Promise.reject(new Error('db hiccup')),
+    };
+    const flakyApp = await buildRelay({ logger: pino({ level: 'silent' }), deviceRegistry: flaky });
+    await flakyApp.listen({ port: 0, host: '127.0.0.1' });
+    const flakyUrl = `ws://127.0.0.1:${(flakyApp.server.address() as AddressInfo).port}/ws`;
+
+    const browser = await connectBrowser(flakyUrl, userId, deviceId);
+    const online = waitForEnvelope(
+      browser,
+      (e) => e.type === 'device.presence' && (e.payload as { online: boolean }).online,
+    );
+    const daemon = await connectDaemon(flakyUrl, userId, deviceId, DEVICE_TOKEN);
+    await online;
+
+    // The daemon drops; its stamp write rejects — watching browsers must still be told it went offline.
+    const offline = waitForEnvelope(
+      browser,
+      (e) => e.type === 'device.presence' && !(e.payload as { online: boolean }).online,
+    );
+    daemon.close();
+    await offline;
+
+    browser.close();
     await flakyApp.close();
     expect(await lastSeenAt(deviceId)).toBeNull();
   });

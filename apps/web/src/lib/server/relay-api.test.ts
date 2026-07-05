@@ -62,6 +62,18 @@ describe('listDevices', () => {
     const result = await listDevices('tok');
     expect(result).toEqual({ ok: false, items: [] });
   });
+
+  it('returns ok:false on a 200 whose body is not JSON (parse failure is a failure, not emptiness)', async () => {
+    stubFetch(() => Promise.resolve(new Response('<html>gateway</html>', { status: 200 })));
+    const result = await listDevices('tok');
+    expect(result).toEqual({ ok: false, items: [] });
+  });
+
+  it('returns ok:false on a 200 whose JSON does not match the contract (validated, not cast)', async () => {
+    stubFetch(() => Promise.resolve(okJson({ devices: [{ id: 42 }] })));
+    const result = await listDevices('tok');
+    expect(result).toEqual({ ok: false, items: [] });
+  });
 });
 
 describe('listSessions', () => {

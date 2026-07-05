@@ -162,6 +162,35 @@ describe('buildSessionRows', () => {
     expect(rows.find((r) => r.id === 's-live-child')?.isContinuation).toBe(true);
   });
 
+  it('marks a continuation when a live session.chained frame arrives for an EXISTING registry row', () => {
+    // The overlay OR: the registry row predates the chain link (parentSessionId null), the live frame
+    // carries it — the merged row must read as a continuation.
+    const liveChained = new Map([
+      ['s-reg', { ...initialSessionState, status: 'running' as const, parentSessionId: 'p' }],
+    ]);
+    const rows = buildSessionRows({
+      registry,
+      live: liveChained,
+      deviceNameOf,
+      watchedDeviceName: null,
+      now: NOW,
+    });
+    expect(rows.find((r) => r.id === 's-reg')?.isContinuation).toBe(true);
+  });
+
+  it('leaves a live-only session with no entries untitled (null, no throw)', () => {
+    const live = new Map([['s-empty', { ...initialSessionState, status: 'running' as const }]]);
+    const rows = buildSessionRows({
+      registry: [],
+      live,
+      deviceNameOf,
+      watchedDeviceName: null,
+      now: NOW,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.title).toBeNull();
+  });
+
   it('feeds sessionCounts so every surface reports the same awaiting/running numbers', () => {
     const live = new Map([
       ['s-reg', { ...initialSessionState, status: 'awaiting_input' as const }],
