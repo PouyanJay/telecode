@@ -10,6 +10,7 @@ import {
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
   sessionEndedPayloadSchema,
+  WS_CLOSE_UNAUTHORIZED,
   type Envelope,
 } from '@telecode/protocol';
 
@@ -714,7 +715,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         const tokenUserId = token ? await authService.verifyChannelToken(token) : null;
         if (tokenUserId === null || tokenUserId !== envelope.user_id) {
           log.warn({ channel }, 'relay: rejected browser hello (invalid channel token)');
-          socket.close(4001, 'unauthorized');
+          socket.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
           return;
         }
       }
@@ -727,7 +728,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           : null;
         if (!device || device.userId !== envelope.user_id || device.id !== envelope.device_id) {
           log.warn({ channel }, 'relay: rejected daemon hello (invalid device token)');
-          socket.close(4001, 'unauthorized');
+          socket.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
           return;
         }
       }

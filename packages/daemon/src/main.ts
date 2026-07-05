@@ -1,3 +1,4 @@
+import { rm } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -9,8 +10,9 @@ import { runHookBridge } from './adopt/hook-bridge';
 import { installHooks } from './adopt/hooks-install';
 import { readHooksStatus } from './adopt/hooks-status';
 import { uninstallHooks } from './adopt/hooks-uninstall';
-import { loadCredentials, saveCredentials } from './credentials';
-import { createDaemon } from './daemon';
+import { loadCredentials, saveCredentials, type StoredCredentials } from './credentials';
+import { createDaemon, type Daemon } from './daemon';
+import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
 import { runDoctorCli } from './doctor-cli';
 import { detectOs } from './os-info';
 import { pairDevice } from './pairing';
@@ -170,10 +172,11 @@ if (!lock.acquired) {
 // Release once, on the single `exit` event; a signal simply routes to `exit` via `process.exit(0)`.
 releaseLockOnExit(lock.release);
 
-let credentials = await loadCredentials();
-const wasJustPaired = !credentials;
-if (!credentials) {
-  log.info('daemon: no credentials found — pairing this device');
+// Pair this device: generate a keypair, run the device-authorization grant (prints a code to approve in
+// the web app), and persist the credentials. Extracted so a re-pair (after a revocation) reuses it.
+const credentialsPath = join(homedir(), '.telecode', 'credentials.json');
+async function pairAndSaveCredentials(): Promise<StoredCredentials> {
+  log.info('daemon: pairing this device');
   const keyPair = await generateKeyPair();
   const publicKey = encodeKey(keyPair.publicKey);
   const paired = await pairDevice({
@@ -183,10 +186,15 @@ if (!credentials) {
     publicKey,
     logger: log,
   });
-  credentials = { ...paired, publicKey, privateKey: encodeKey(keyPair.privateKey) };
-  await saveCredentials(credentials);
-  log.info({ deviceId: credentials.deviceId }, 'daemon: paired; credentials saved');
+  const creds = { ...paired, publicKey, privateKey: encodeKey(keyPair.privateKey) };
+  await saveCredentials(creds);
+  log.info({ deviceId: creds.deviceId }, 'daemon: paired; credentials saved');
+  return creds;
 }
+
+let credentials = await loadCredentials();
+const wasJustPaired = !credentials;
+if (!credentials) credentials = await pairAndSaveCredentials();
 
 // First run only: offer to host the daemon as a background login service, so there is no terminal to keep
 // open. On yes it installs the service and hands off by exiting — the service takes over this session (the
@@ -239,35 +247,74 @@ const isAdoptEnabled = process.env.TELECODE_ADOPT !== '0';
 const hookSocketPath = join(telecodeHome, 'run', 'hook.sock');
 // The per-machine adoption policy (enabled + denylist), managed from the web and applied at runtime (Journey 3).
 const adoptConfigPath = join(telecodeHome, 'adopt-config.json');
-const daemon = createDaemon({
-  relayUrl: relayWsUrl,
-  userId: credentials.userId,
-  deviceId: credentials.deviceId,
-  deviceToken: credentials.deviceToken,
-  // The persisted X25519 keypair: run every session end-to-end encrypted (Phase 3).
-  keyPair: { publicKey: credentials.publicKey, privateKey: credentials.privateKey },
-  logger: log,
-  worktreeManager,
-  repoManager,
-  sessionStore,
-  ...(defaultRepoPath ? { defaultRepoPath } : {}),
-  ...(isAdoptEnabled
-    ? {
-        adopt: {
-          socketPath: hookSocketPath,
-          configPath: adoptConfigPath,
-          settingsPath: claudeSettingsPath,
-          // Only auto-install when the bin path is known; otherwise adoption listens but installs nothing.
-          ...(hookCommand !== undefined ? { hookCommand } : {}),
-        },
-      }
-    : {}),
-});
-
-try {
-  await daemon.start();
-  log.info({ deviceId: credentials.deviceId }, 'daemon: started');
-} catch (err) {
-  log.error({ err }, 'daemon: failed to start');
-  process.exit(1);
+// Rebuilt on each (re-)launch so a re-pair uses the fresh credentials + token.
+function buildDaemon(creds: StoredCredentials): Daemon {
+  return createDaemon({
+    relayUrl: relayWsUrl,
+    userId: creds.userId,
+    deviceId: creds.deviceId,
+    deviceToken: creds.deviceToken,
+    // The persisted X25519 keypair: run every session end-to-end encrypted (Phase 3).
+    keyPair: { publicKey: creds.publicKey, privateKey: creds.privateKey },
+    logger: log,
+    worktreeManager,
+    repoManager,
+    sessionStore,
+    ...(defaultRepoPath ? { defaultRepoPath } : {}),
+    ...(isAdoptEnabled
+      ? {
+          adopt: {
+            socketPath: hookSocketPath,
+            configPath: adoptConfigPath,
+            settingsPath: claudeSettingsPath,
+            // Only auto-install when the bin path is known; otherwise adoption listens but installs nothing.
+            ...(hookCommand !== undefined ? { hookCommand } : {}),
+          },
+        }
+      : {}),
+    // Device revoked while running → re-pair instead of looping forever on the dead token.
+    onUnauthorized: () => void repairAndRelaunch(),
+  });
 }
+
+let activeDaemon: Daemon | null = null;
+let isRepairing = false;
+
+// A revoked/invalid device token can never be accepted, so clear it and re-pair (prints a fresh code to
+// approve in the web app), then relaunch. Guarded so concurrent 4001s trigger a single re-pair. A pairing
+// failure (network hiccup, user cancels) is fatal: exit non-zero so a service manager restarts + retries,
+// rather than leaving the guard stuck true and silently wedging every future re-pair.
+async function repairAndRelaunch(): Promise<void> {
+  if (isRepairing) return;
+  isRepairing = true;
+  try {
+    log.warn('daemon: device token rejected by the relay (revoked?) — re-pairing this machine');
+    await activeDaemon?.stop().catch(() => undefined);
+    await rm(credentialsPath, { force: true });
+    const creds = await pairAndSaveCredentials();
+    await launchDaemon(creds);
+  } catch (err) {
+    log.error({ err }, 'daemon: re-pairing failed');
+    process.exit(1);
+  } finally {
+    isRepairing = false;
+  }
+}
+
+async function launchDaemon(creds: StoredCredentials): Promise<void> {
+  activeDaemon = buildDaemon(creds);
+  try {
+    await activeDaemon.start();
+    log.info({ deviceId: creds.deviceId }, 'daemon: started');
+  } catch (err) {
+    // A token rejected on the FIRST connect surfaces here; anything else is fatal.
+    if (err instanceof DaemonUnauthorizedError) {
+      await repairAndRelaunch();
+      return;
+    }
+    log.error({ err }, 'daemon: failed to start');
+    process.exit(1);
+  }
+}
+
+await launchDaemon(credentials);
