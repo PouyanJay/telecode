@@ -112,3 +112,21 @@ export async function startFakeRelay(
     },
   };
 }
+
+/**
+ * Tell a daemon under test that a browser is watching its channel (relay `viewer.presence`), so its adopted-
+ * session gate holds a consequential tool for a REMOTE decision instead of deferring to Claude Code's local
+ * prompt. The echo round-trip is an in-order barrier: `viewer.presence` and `echo` travel the same socket, so
+ * once the `echo.reply` returns the daemon has already applied the presence update — no timing wait.
+ */
+export async function markViewerPresent(
+  relay: FakeRelay,
+  userId: string,
+  deviceId: string,
+): Promise<void> {
+  relay.send(
+    makeEnvelope({ type: 'viewer.presence', userId, deviceId, payload: { online: true } }),
+  );
+  relay.send(makeEnvelope({ type: 'echo', userId, deviceId, payload: { text: 'barrier' } }));
+  await relay.waitForFrame((e) => e.type === 'echo.reply');
+}

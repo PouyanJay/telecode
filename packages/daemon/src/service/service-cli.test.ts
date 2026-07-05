@@ -73,6 +73,33 @@ describe('runServiceCli — macOS launchd walking skeleton', () => {
     expect(bootout?.args).toEqual(['bootout', `gui/${UID}`, plistPath]);
   });
 
+  it('removes the Claude Code hooks on a successful uninstall (clean disengage), never on install', async () => {
+    // Arrange
+    const { runner } = createRecordingRunner();
+    const out: string[] = [];
+    let hookUninstalls = 0;
+    const base = {
+      env: { TELECODE_RELAY_URL: RELAY } as NodeJS.ProcessEnv,
+      platform: 'darwin' as const,
+      home,
+      runner,
+      uid: UID,
+      nodePath: '/usr/local/bin/node',
+      binPath: '/opt/telecode/bin/telecode.mjs',
+      onUninstallHooks: async (): Promise<void> => void (hookUninstalls += 1),
+      write: (text: string): void => void out.push(text),
+    };
+
+    // Act + Assert — installing the service must NOT touch the user's Claude Code hooks.
+    await runServiceCli({ ...base, argv: ['service', 'install'] });
+    expect(hookUninstalls).toBe(0);
+
+    // Act + Assert — uninstalling the service disengages telecode fully: the hooks are removed too.
+    const code = await runServiceCli({ ...base, argv: ['service', 'uninstall'] });
+    expect(code).toBe(0);
+    expect(hookUninstalls).toBe(1);
+  });
+
   it('reports a launchctl bootstrap failure as a non-zero exit and a clean message', async () => {
     // Arrange — the fake runner reports launchctl failing (e.g. the agent is already loaded)
     const { runner } = createRecordingRunner(() => ({

@@ -30,6 +30,12 @@ export interface ServiceCliOptions {
   readonly uid?: number;
   /** Env vars to inject into the service process. */
   readonly serviceEnv?: Readonly<Record<string, string>>;
+  /**
+   * Remove telecode's Claude Code hooks — invoked after a successful `uninstall` so disengaging is clean
+   * (the hooks the service caused don't linger). Injected at the composition root so this module stays free
+   * of the adoption dependency; omitted (e.g. in most tests) it is a no-op.
+   */
+  readonly onUninstallHooks?: () => Promise<void>;
   /** Sink for output; defaults to stdout. Injected in tests. */
   readonly write?: (text: string) => void;
 }
@@ -163,5 +169,12 @@ export async function runServiceCli(options: ServiceCliOptions): Promise<number>
     return 1;
   }
 
-  return dispatchServiceCommand(manager, subcommand, write);
+  const exitCode = await dispatchServiceCommand(manager, subcommand, write);
+  // Disengage cleanly: uninstalling the service is the user turning telecode off, so also remove its Claude
+  // Code hooks — otherwise they keep firing `telecode hook` on every tool call with no daemon to answer.
+  // Only on a *successful* uninstall; every other subcommand leaves the hooks untouched.
+  if (subcommand === 'uninstall' && exitCode === 0 && options.onUninstallHooks) {
+    await options.onUninstallHooks();
+  }
+  return exitCode;
 }

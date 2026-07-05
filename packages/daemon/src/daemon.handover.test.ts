@@ -13,7 +13,7 @@ import {
   type AgentRunResult,
 } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
-import { startFakeRelay, type FakeRelay } from './fake-relay';
+import { markViewerPresent, startFakeRelay, type FakeRelay } from './fake-relay';
 
 /**
  * Free-form handover & resume, end-to-end through the daemon (Journey 4 walking skeleton): an adopted
@@ -377,6 +377,7 @@ describe('daemon: free-form handover & resume', () => {
   it('does not offer a handover while a permission gate is already pending', async () => {
     await start(createFakeAgentAdapter([]));
     await adopt(relay, socketPath);
+    await markViewerPresent(relay, USER, DEVICE); // a browser is watching → the consequential tool is gated
 
     // A consequential tool blocks on the approval gate → the session is awaiting_input.
     const gate = hookRpc(socketPath, {

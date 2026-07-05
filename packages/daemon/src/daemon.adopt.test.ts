@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createFakeAgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
-import { startFakeRelay, type FakeRelay } from './fake-relay';
+import { markViewerPresent, startFakeRelay, type FakeRelay } from './fake-relay';
 
 /**
  * Adopted sessions, end-to-end through the daemon (Journey 1, Task 8): the `telecode hook` bridge reaches
@@ -109,6 +109,10 @@ describe('daemon: adopted sessions end-to-end', () => {
       adopt: { socketPath, ackTimeoutMs: 2000 },
     });
     await daemon.start();
+    // These tests act as a watching browser (they send permission/question decisions), so tell the daemon a
+    // viewer is present — otherwise the gate would defer to the local prompt. The dedicated "no browser
+    // watching" describe below covers the unwatched case.
+    await markViewerPresent(relay, USER, DEVICE);
   });
 
   afterEach(async () => {
@@ -209,6 +213,35 @@ describe('daemon: adopted sessions end-to-end', () => {
     );
 
     expect(await bash).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
+
+  it('mirrors bypassPermissions — a consequential tool defers to the local session, never gated', async () => {
+    // Adopt the session (read-only) and ack it. The session reports it is running in Bypass mode.
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+      permission_mode: 'bypassPermissions',
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // A consequential tool in a locally-Bypass session must NOT block on a remote approval — the daemon
+    // defers so Claude Code's own bypass runs it. Were it still gated, this round-trip would hang forever
+    // (no `permission.decision` is ever sent), timing the test out; resolving at all is the proof.
+    const bash = await hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Bash',
+      tool_input: { command: 'rm -rf build' },
+      tool_use_id: 'toolu_bypass',
+      permission_mode: 'bypassPermissions',
+    });
+    // Defer = an empty object (no `hookSpecificOutput`): telecode voices no opinion, Claude Code's mode
+    // decides. Contrast the `default`-mode test above, which DOES forward an `agent.permission_request`.
+    expect(bash).toEqual({});
   });
 
   it('forwards an AskUserQuestion as agent.question and relays the pick as deny-feedback', async () => {
@@ -549,6 +582,97 @@ describe('daemon: adopted sessions end-to-end', () => {
   });
 });
 
+describe('daemon: adopted gate defers to the local prompt when no browser is watching', () => {
+  it('defers a consequential tool ({}) instead of blocking on a remote approval nobody can give', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-unwatched-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+    });
+    await daemon.start();
+    // Deliberately NO markViewerPresent — remoteViewerOnline stays at its cold default (false).
+    try {
+      // Adopt the session with a read-only event, ack it.
+      const first = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      await first;
+
+      // A consequential tool in `default` mode WOULD normally gate — but with nobody watching remotely,
+      // telecode must defer to Claude Code's own local prompt ({}) rather than block forever on a remote
+      // decision no operator is there to give. A block would hang this round-trip until the test times out.
+      const bash = await hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf build' },
+        tool_use_id: 'toolu_unwatched',
+      });
+      expect(bash).toEqual({});
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('daemon: viewer presence resets on reconnect (no stale gating)', () => {
+  it('resets to "not watching" on reconnect, so an adopted tool defers until the relay re-asserts', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-reconnect-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+    });
+    await daemon.start();
+    try {
+      // A browser is watching → gating is active. Adopt the session and ack it.
+      await markViewerPresent(relay, USER, DEVICE);
+      const first = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      await first;
+
+      // The relay link drops and the daemon reconnects. A real relay re-asserts viewer.presence right after
+      // hello.ack; this stand-in does NOT — so if the reset were missing, the daemon would still believe a
+      // viewer is watching and gate the tool below (hanging forever). With the reset it defers to local ({}).
+      relay.dropConnection();
+      await relay.waitForHello();
+
+      const bash = await hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf build' },
+        tool_use_id: 'toolu_reconnect',
+      });
+      expect(bash).toEqual({});
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('daemon: an unanswered adopted question fails closed (no hook-socket deadlock)', () => {
   it('settles a pending question when the daemon stops, instead of hanging', async () => {
     const relay = await startFakeRelay(USER, DEVICE);
@@ -562,6 +686,7 @@ describe('daemon: an unanswered adopted question fails closed (no hook-socket de
       adopt: { socketPath, ackTimeoutMs: 2000 },
     });
     await daemon.start();
+    await markViewerPresent(relay, USER, DEVICE); // a browser is watching, so the question forwards (not defers to local)
     try {
       const ask = hookRpc(socketPath, {
         hook_event_name: 'PreToolUse',
@@ -610,6 +735,7 @@ describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
       },
     });
     await daemon.start();
+    await markViewerPresent(relay, USER, DEVICE); // a browser is watching, so the consequential tool is gated remotely
     try {
       // The hook will block on the gate (Bash is consequential); we only assert what the relay sees.
       const blocked = hookRpc(socketPath, {
@@ -651,6 +777,7 @@ describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
       },
     });
     await daemon.start();
+    await markViewerPresent(relay, USER, DEVICE); // a browser is watching, so the question forwards (as ciphertext)
     try {
       const blocked = hookRpc(socketPath, {
         hook_event_name: 'PreToolUse',
