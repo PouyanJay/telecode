@@ -16,6 +16,12 @@ export interface SessionRow {
   readonly deviceName: string | null;
   /** `external` rows are adopted from the user's own Claude Code runs; the dashboard marks them. */
   readonly origin: SessionOrigin;
+  /**
+   * True when this session is a forked continuation of another (it has a `parentSessionId` — a free-form
+   * handover the user took over, Journey 4). The dashboard marks it so a continuation is distinguishable
+   * from a plain launch in the list, not only inside the session view.
+   */
+  readonly isContinuation: boolean;
   readonly createdAt: Date;
 }
 

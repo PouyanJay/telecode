@@ -10,6 +10,7 @@ function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
     status,
     deviceName: 'studio-mbp',
     origin: 'launched',
+    isContinuation: false,
     createdAt: new Date(createdAt),
   };
 }
@@ -41,6 +42,13 @@ describe('groupSessions', () => {
 
   it('returns empty buckets rather than omitting them', () => {
     expect(groupSessions([])).toEqual({ awaiting: [], active: [], recent: [] });
+  });
+
+  it('buckets by status regardless of isContinuation (a display flag, never a grouping criterion)', () => {
+    const groups = groupSessions([
+      { ...row('cont', 'running', '2026-06-29T10:00:00Z'), isContinuation: true },
+    ]);
+    expect(groups.active.map((r) => r.id)).toEqual(['cont']);
   });
 });
 

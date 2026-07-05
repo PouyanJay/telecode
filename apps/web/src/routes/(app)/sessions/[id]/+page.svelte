@@ -6,7 +6,7 @@
   import SessionNotice from '$lib/components/SessionNotice.svelte';
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
-  import { initialSessionState, pendingPermission, type SessionState } from '$lib/session';
+  import { initialSessionState, type SessionState } from '$lib/session';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
     answer,
@@ -76,14 +76,16 @@
     sendUserMessage(sessionId, text);
   }
 
-  function onDecide(behavior: 'allow' | 'deny'): void {
-    const pending = pendingPermission(session);
-    if (!pending || pending.kind !== 'permission') return;
+  // Decide the SPECIFIC gate the operator clicked (its requestId), not "the first pending one". With
+  // concurrent tool calls several gates can be open at once; resolving the first-pending would apply the
+  // click to the wrong request — the operator clicks one gate and a different one resolves. Threading the
+  // requestId (like onAnswer / onHandover already do) keeps each gate independently actionable.
+  function onDecide(requestId: string, behavior: 'allow' | 'deny'): void {
     decide(
       sessionId,
       behavior === 'allow'
-        ? { requestId: pending.requestId, behavior: 'allow' }
-        : { requestId: pending.requestId, behavior: 'deny' },
+        ? { requestId, behavior: 'allow' }
+        : { requestId, behavior: 'deny' },
     );
   }
 
@@ -145,8 +147,8 @@
         <Transcript
           entries={session.entries}
           offline={session.status === 'offline_paused'}
-          onapprove={() => onDecide('allow')}
-          onreject={() => onDecide('deny')}
+          onapprove={(requestId) => onDecide(requestId, 'allow')}
+          onreject={(requestId) => onDecide(requestId, 'deny')}
           onanswer={onAnswer}
           onhandover={onHandover}
         />

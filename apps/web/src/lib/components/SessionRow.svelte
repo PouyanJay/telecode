@@ -25,8 +25,14 @@
     <StatusDot tone={display.tone} label={display.label} pulse={display.pulse} />
   </span>
   <span class="titlecell">
+    <!-- At most one origin mark: a session is either adopted from the user's own Claude Code ("on device")
+         or a forked continuation of another (a free-form handover they took over). A continuation is always
+         a launch, so the two never overlap. Marking it here makes a chained session read as chained in the
+         list, not only inside the session view. -->
     {#if isAdopted}
       <Pill label="on device" />
+    {:else if row.isContinuation}
+      <Pill label="continuation" />
     {/if}
     <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
   </span>
