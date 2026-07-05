@@ -37,6 +37,11 @@
   // dismissed so it stays hidden until a NEW notice (different text) arrives.
   let dismissedNotice = $state<string | null>(null);
   const showNotice = $derived(session.notice !== null && session.notice !== dismissedNotice);
+  // Same pattern for a delivery failure (relay.error): the user's action went nowhere — say so.
+  let dismissedDeliveryError = $state<string | null>(null);
+  const showDeliveryError = $derived(
+    session.deliveryError !== null && session.deliveryError !== dismissedDeliveryError,
+  );
 
   const display = $derived(SESSION_DISPLAY[session.status]);
   const isBusy = $derived(
@@ -128,6 +133,13 @@
         <a class="continued-from" href={`/sessions/${parentSessionId}`}>
           ← Continued from an adopted session
         </a>
+      {/if}
+      {#if known && showDeliveryError && session.deliveryError}
+        <SessionNotice
+          message={session.deliveryError}
+          tone="danger"
+          ondismiss={() => (dismissedDeliveryError = session.deliveryError)}
+        />
       {/if}
       {#if known && showNotice && session.notice}
         <SessionNotice

@@ -1,5 +1,6 @@
 import {
   agentHandoverPayloadSchema,
+  relayErrorPayloadSchema,
   agentMessagePayloadSchema,
   agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
@@ -95,6 +96,12 @@ export interface SessionState {
    */
   readonly notice: string | null;
   /**
+   * A delivery failure for the user's LAST action on this session (`relay.error`, e.g. the device is
+   * offline): the action was reverted to pending and must be retried. One-shot like `notice` — cleared
+   * the moment any other frame arrives (the channel demonstrably works again).
+   */
+  readonly deliveryError: string | null;
+  /**
    * The adopted session this one continues (free-form handover, Journey 4), or null when unchained. Set
    * from the daemon's `session.chained` for a forked continuation, so the child can link back to its parent.
    */
@@ -107,6 +114,7 @@ export const initialSessionState: SessionState = {
   entries: [],
   seq: 0,
   notice: null,
+  deliveryError: null,
   parentSessionId: null,
 };
 
@@ -116,6 +124,7 @@ export function startingState(): SessionState {
     sessionId: null,
     status: 'starting',
     entries: [],
+    deliveryError: null,
     seq: 0,
     notice: null,
     parentSessionId: null,
@@ -182,13 +191,57 @@ function closeOpenGates(entries: readonly TranscriptEntry[]): readonly Transcrip
   return changed ? next : entries;
 }
 
+/**
+ * The user's last action never reached the daemon (`relay.error`): revert whatever was optimistically
+ * in-flight back to pending — an undelivered approval must read as still-asked, never as decided.
+ */
+function revertInFlightActions(entries: readonly TranscriptEntry[]): readonly TranscriptEntry[] {
+  let changed = false;
+  const next = entries.map((entry) => {
+    if (
+      entry.kind === 'permission' &&
+      (entry.decision === 'approving' || entry.decision === 'rejecting')
+    ) {
+      changed = true;
+      return { ...entry, decision: 'pending' as const };
+    }
+    if (entry.kind === 'question' && entry.answer === 'answering') {
+      changed = true;
+      return { ...entry, answer: 'pending' as const };
+    }
+    if (entry.kind === 'handover' && entry.state === 'submitting') {
+      changed = true;
+      return { ...entry, state: 'pending' as const };
+    }
+    return entry;
+  });
+  return changed ? next : entries;
+}
+
 /** Fold one inbound relay frame into the session state. Unknown/invalid frames are ignored. */
 export function applyEnvelope(state: SessionState, envelope: Envelope): SessionState {
+  // Handled BEFORE the in-flight confirm below: the failed action must be REVERTED, not confirmed.
+  if (envelope.type === 'relay.error') {
+    const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
+    if (!parsed.success) return state;
+    const isTerminal = state.status === 'done' || state.status === 'error';
+    return {
+      ...state,
+      entries: revertInFlightActions(state.entries),
+      status: isTerminal ? state.status : 'offline_paused',
+      deliveryError:
+        "This device is offline — your last action wasn't delivered. Retry when it reconnects.",
+    };
+  }
   const entries = confirmInFlightActions(state.entries);
   // A notice is a one-shot cue; any frame other than `agent.notice` means the session moved on → clear it.
   const notice = envelope.type === 'agent.notice' ? state.notice : null;
+  // Any successfully delivered frame proves the channel works again → the delivery error is stale.
+  const deliveryError = null;
   const base =
-    entries === state.entries && notice === state.notice ? state : { ...state, entries, notice };
+    entries === state.entries && notice === state.notice && deliveryError === state.deliveryError
+      ? state
+      : { ...state, entries, notice, deliveryError };
 
   switch (envelope.type) {
     case 'agent.notice': {
@@ -385,6 +438,7 @@ export function applyEnvelope(state: SessionState, envelope: Envelope): SessionS
         entries,
         seq: entries.length,
         notice: null, // a backfilled reopen carries no live notice
+        deliveryError: null, // a successful backfill proves the channel works
         parentSessionId: base.parentSessionId,
       };
     }
