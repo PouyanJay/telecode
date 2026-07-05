@@ -19,6 +19,7 @@ import {
   sessionLaunchPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
+  WS_CLOSE_UNAUTHORIZED,
   type AdoptSettings,
   type AdoptStatePayload,
   type AgentQuestionItem,
@@ -35,6 +36,7 @@ import {
 } from '@telecode/protocol';
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
+import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { type HookEvent } from './adopt/hook-event';
 import { buildHandoverFallbackPrompt } from './adopt/handover-fallback-prompt';
@@ -116,6 +118,13 @@ export interface DaemonOptions {
    * tests inject small values for speed.
    */
   readonly reconnect?: { readonly baseMs?: number; readonly maxMs?: number };
+  /**
+   * Invoked when the relay rejects the device token as unauthorized (close 4001) on a *reconnect* — i.e.
+   * the device was revoked while the daemon was running. The daemon stops redialing the dead token; the
+   * composition root re-pairs. (On the *first* connect, `start()` rejects with {@link DaemonUnauthorizedError}
+   * instead, so the caller can react before the daemon is considered up.)
+   */
+  readonly onUnauthorized?: () => void;
   /**
    * Adopt externally-started Claude Code sessions (opt-in). When set, the daemon listens on a local Unix
    * socket for the `telecode hook` bridge: it announces each discovered session to the relay
@@ -1009,6 +1018,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * failed initial dial. An unexpected `close` schedules a redial — the daemon recovers its own link.
    */
   function openConnection(onReady: () => void, onFirstError?: (err: unknown) => void): void {
+    // `onFirstError` is passed only on the very first dial (from `start()`); reconnects omit it. So its
+    // presence is what distinguishes an initial-connect rejection (reject `start()`) from a revocation
+    // that surfaced later on a reconnect (fire `onUnauthorized`).
     const ws = new WebSocket(options.relayUrl);
     socket = ws;
     // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
@@ -1022,9 +1034,18 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
     ws.once('open', () => ws.send(helloFrame()));
     ws.once('error', (err: unknown) => onFirstError?.(err));
-    ws.once('close', () => {
+    ws.once('close', (code: number) => {
       // An intentional stop() is terminal; an unexpected drop redials so the daemon stays reachable.
       if (stopped) return;
+      // A 4001 means the relay rejected our device token (revoked/invalid). Redialing the same dead token
+      // would loop forever — stop, and route to re-pairing: reject the first connect, or signal a
+      // revocation that surfaced on a reconnect. The composition root clears the credentials and re-pairs.
+      if (code === WS_CLOSE_UNAUTHORIZED) {
+        stopped = true;
+        if (onFirstError) onFirstError(new DaemonUnauthorizedError());
+        else options.onUnauthorized?.();
+        return;
+      }
       scheduleReconnect(onReady);
     });
   }

@@ -1,6 +1,8 @@
 export { createDaemon } from './daemon';
 export type { Daemon, DaemonOptions } from './daemon';
 
+export { DaemonUnauthorizedError } from './daemon-unauthorized-error';
+
 export { pairDevice } from './pairing';
 export type { PairDeviceOptions, DeviceCredentials } from './pairing';
 

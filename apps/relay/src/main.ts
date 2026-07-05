@@ -43,6 +43,9 @@ const tokenEncryptionKey = process.env.TOKEN_ENCRYPTION_KEY;
 const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
 const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
 const vapidSubject = process.env.VAPID_SUBJECT ?? 'mailto:admin@telecode.local';
+// Where pairing codes are entered — the daemon prints this in its "Go to … and enter <code>" prompt.
+// Without APP_URL it falls back to the local dev app, which is wrong on a hosted relay.
+const appUrl = process.env.APP_URL?.replace(/\/+$/, '');
 
 const dbHandle = databaseUrl ? createDb(databaseUrl, log) : undefined;
 const authEnabled = Boolean(dbHandle && channelTokenSecret && serviceSecret);
@@ -164,6 +167,7 @@ log.info({ infra_controls_enabled: Boolean(infraScaler) }, 'relay: infra control
 const app = await buildRelay({
   logger: log,
   ...(trustProxy ? { trustProxy } : {}),
+  ...(appUrl ? { verificationUri: `${appUrl}/activate` } : {}),
   bodyLimit,
   maxConnectionsPerIp,
   telemetry,

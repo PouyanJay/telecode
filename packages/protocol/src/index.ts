@@ -33,6 +33,8 @@ export type { KeyPair, SealedMessage } from './crypto';
 
 export { ProtocolError } from './errors';
 
+export { WS_CLOSE_UNAUTHORIZED } from './ws-close-codes';
+
 export { requireCiphertext, parsePlaintext } from './envelope-crypto';
 export type { EncryptedEnvelopeFields } from './envelope-crypto';
 

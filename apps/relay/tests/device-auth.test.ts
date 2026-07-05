@@ -23,6 +23,7 @@ import { buildRelay } from '../src/relay';
  */
 const DATABASE_URL = process.env.DATABASE_URL;
 const SERVICE_SECRET = 'svc-secret-device-test';
+const VERIFICATION_URI = 'https://app.example.test/activate';
 
 interface CodeResponse {
   user_code: string;
@@ -65,6 +66,7 @@ describe('device pairing: persisted, server-derived approval + daemon token auth
 
     app = await buildRelay({
       logger: pino({ level: 'silent' }),
+      verificationUri: VERIFICATION_URI,
       auth: {
         service: createAuthService({ db: handle, channelTokenSecret: 'chan-secret' }),
         serviceSecret: SERVICE_SECRET,
@@ -87,6 +89,15 @@ describe('device pairing: persisted, server-derived approval + daemon token auth
       "insert into users (provider, provider_user_id) values ('dev', 'pair') returning id",
     );
     userId = u.rows[0]!.id;
+  });
+
+  it('returns the configured verification_uri in the device code (so the daemon prompt is correct)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/device/code',
+      payload: { name: 'laptop' },
+    });
+    expect(res.json<{ verification_uri: string }>().verification_uri).toBe(VERIFICATION_URI);
   });
 
   it('persists a device on server-derived approval and stores only the token hash', async () => {

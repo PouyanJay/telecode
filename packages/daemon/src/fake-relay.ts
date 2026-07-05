@@ -1,4 +1,9 @@
-import { makeEnvelope, parseEnvelope, type Envelope } from '@telecode/protocol';
+import {
+  makeEnvelope,
+  parseEnvelope,
+  WS_CLOSE_UNAUTHORIZED,
+  type Envelope,
+} from '@telecode/protocol';
 import { WebSocketServer, type WebSocket as RelaySocket } from 'ws';
 
 /**
@@ -16,10 +21,16 @@ export interface FakeRelay {
   waitForHello(): Promise<void>;
   /** Drop the current daemon connection (simulates a transient network loss), forcing it to reconnect. */
   dropConnection(): void;
+  /** Reject subsequent `hello`s by closing with 4001 (simulates a revoked/invalid device token). */
+  rejectHellos(): void;
   close(): Promise<void>;
 }
 
-export async function startFakeRelay(userId: string, deviceId: string): Promise<FakeRelay> {
+export async function startFakeRelay(
+  userId: string,
+  deviceId: string,
+  options: { rejectHello?: boolean } = {},
+): Promise<FakeRelay> {
   const server = new WebSocketServer({ port: 0 });
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const address = server.address();
@@ -27,6 +38,7 @@ export async function startFakeRelay(userId: string, deviceId: string): Promise<
   const url = `ws://127.0.0.1:${address.port}`;
 
   let socket: RelaySocket | null = null;
+  let rejectHello = options.rejectHello ?? false;
   const buffered: Envelope[] = [];
   const waiters: { predicate: (e: Envelope) => boolean; resolve: (e: Envelope) => void }[] = [];
   let helloWaiters: (() => void)[] = [];
@@ -47,6 +59,10 @@ export async function startFakeRelay(userId: string, deviceId: string): Promise<
         return;
       }
       if (envelope.type === 'hello') {
+        if (rejectHello) {
+          conn.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
+          return;
+        }
         conn.send(
           JSON.stringify(makeEnvelope({ type: 'hello.ack', userId, deviceId, payload: {} })),
         );
@@ -87,6 +103,9 @@ export async function startFakeRelay(userId: string, deviceId: string): Promise<
     dropConnection(): void {
       socket?.close();
       socket = null;
+    },
+    rejectHellos(): void {
+      rejectHello = true;
     },
     close(): Promise<void> {
       return new Promise((resolve) => server.close(() => resolve()));
