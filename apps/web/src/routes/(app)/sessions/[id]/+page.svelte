@@ -7,6 +7,7 @@
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, type SessionState } from '$lib/session';
+  import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
     answer,
@@ -23,7 +24,11 @@
   let { data }: { data: PageData } = $props();
   // Reactive so navigating /sessions/A → /sessions/B (same route, no remount) re-targets + re-subscribes.
   const sessionId = $derived(data.sessionId);
-  const device = $derived(data.devices[0] ?? null);
+  // The session's OWN device (from its registry row) — not the first paired one, which mislabeled every
+  // session on a second machine. Null when its device was revoked: no name is better than a wrong name.
+  const device = $derived(
+    resolveSessionDevice({ sessionId, sessions: data.sessions, devices: data.devices }),
+  );
 
   const known = $derived($liveSessions.has(sessionId));
   const session: SessionState = $derived($liveSessions.get(sessionId) ?? initialSessionState);
@@ -64,10 +69,11 @@
   }
 
   // Re-attach once the channel is live (and again after any reconnect): the daemon backfills the
-  // transcript via session.history. Reopen is a reconnect, never a restart. The shared connection itself
-  // is opened by the app-shell layout.
+  // transcript via session.history, and the relay replays its cached frames either way. Not gated on the
+  // resolved device — a session whose device was revoked still deserves the cache replay, and without a
+  // paired device no connection exists in the first place.
   $effect(() => {
-    if ($connectionState === 'connected' && device) {
+    if ($connectionState === 'connected') {
       subscribe(sessionId);
     }
   });
