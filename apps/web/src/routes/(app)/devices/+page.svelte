@@ -3,6 +3,7 @@
   import { Button, Panel } from '@telecode/ui';
 
   import PageHeader from '$lib/components/PageHeader.svelte';
+  import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import { deviceStatus } from '$lib/devices';
   import { connectionState } from '$lib/session-store';
   import type { ActionData, PageData } from './$types';
@@ -31,7 +32,10 @@
       <p class="error" role="alert">{form.error}</p>
     {/if}
 
-    {#if data.devices.length === 0}
+    {#if data.registryError}
+      <!-- Error ≠ empty: an outage must never read as "no devices paired". -->
+      <RegistryErrorNotice />
+    {:else if data.devices.length === 0}
       <div class="empty">
         <p class="eyebrow">No devices paired</p>
         <p class="sub">Pair a machine to run agents on it.</p>

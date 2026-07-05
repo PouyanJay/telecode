@@ -16,14 +16,21 @@ export const load: LayoutServerLoad = async ({ locals, cookies }) => {
     redirect(303, '/signin');
   }
   const token = getSessionToken(cookies);
-  const [devices, repoList, sessions] = token
+  const [deviceResult, repoList, sessionResult] = token
     ? await Promise.all([listDevices(token), listRepos(token), listSessions(token)])
-    : [[], { connected: false, repos: [] }, []];
+    : [
+        { ok: true, items: [] },
+        { connected: false, repos: [] },
+        { ok: true, items: [] },
+      ];
   return {
     user: locals.user,
-    devices,
+    devices: deviceResult.items,
     githubConnected: repoList.connected,
     repos: repoList.repos,
-    sessions,
+    sessions: sessionResult.items,
+    // Error ≠ empty: when the relay couldn't be read, pages must show an outage state — never the
+    // "no devices paired" onboarding that makes a healthy fleet look deleted.
+    registryError: !deviceResult.ok || !sessionResult.ok,
   };
 };

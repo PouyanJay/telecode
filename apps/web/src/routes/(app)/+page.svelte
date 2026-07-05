@@ -3,6 +3,7 @@
 
   import Onboarding from '$lib/components/Onboarding.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
+  import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import SessionGroupHeader from '$lib/components/SessionGroupHeader.svelte';
   import SessionRow from '$lib/components/SessionRow.svelte';
   import { deviceStatus } from '$lib/devices';
@@ -84,7 +85,10 @@
   <title>Sessions · telecode</title>
 </svelte:head>
 
-{#if !device}
+{#if data.registryError}
+  <!-- Error ≠ empty: a relay outage must never render the "pair your first device" onboarding. -->
+  <RegistryErrorNotice />
+{:else if !device}
   <div class="onboard-scroll">
     <Onboarding steps={onboardingSteps} />
   </div>

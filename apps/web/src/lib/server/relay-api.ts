@@ -107,30 +107,48 @@ export async function getRelayUser(sessionToken: string): Promise<RelayUser | nu
   };
 }
 
-/** List the user's active paired devices (session-token authed). Empty on any error. */
-export async function listDevices(sessionToken: string): Promise<RelayDevice[]> {
-  const res = await fetch(`${RELAY_HTTP_URL}/me/devices`, {
-    headers: { authorization: `Bearer ${sessionToken}` },
-  });
-  if (!res.ok) {
-    return [];
+/**
+ * A relay registry read that keeps failure distinguishable from emptiness (error ≠ empty): `ok: false`
+ * means the relay couldn't be reached / errored — the UI must show an error state, never "you have
+ * nothing". `items` is always safe to render (empty on failure).
+ */
+export interface RelayListResult<T> {
+  readonly ok: boolean;
+  readonly items: T[];
+}
+
+/** List the user's active paired devices (session-token authed). */
+export async function listDevices(sessionToken: string): Promise<RelayListResult<RelayDevice>> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/devices`, {
+      headers: { authorization: `Bearer ${sessionToken}` },
+    });
+    if (!res.ok) {
+      return { ok: false, items: [] };
+    }
+    const body = (await res.json()) as {
+      devices: {
+        id: string;
+        name: string;
+        os: string | null;
+        last_seen_at: string | null;
+        public_key: string | null;
+      }[];
+    };
+    return {
+      ok: true,
+      items: body.devices.map((device) => ({
+        id: device.id,
+        name: device.name,
+        os: device.os,
+        lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
+        publicKey: device.public_key ?? null,
+      })),
+    };
+  } catch {
+    // Relay unreachable — a failure the caller must surface, not an empty account.
+    return { ok: false, items: [] };
   }
-  const body = (await res.json()) as {
-    devices: {
-      id: string;
-      name: string;
-      os: string | null;
-      last_seen_at: string | null;
-      public_key: string | null;
-    }[];
-  };
-  return body.devices.map((device) => ({
-    id: device.id,
-    name: device.name,
-    os: device.os,
-    lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
-    publicKey: device.public_key ?? null,
-  }));
 }
 
 /** The outcome of a revoke attempt — `notFound` distinguishes "already gone" from a transient failure. */
@@ -153,39 +171,47 @@ export async function revokeDevice(sessionToken: string, deviceId: string): Prom
   }
 }
 
-/** List the user's sessions, newest-first (session-token authed). Empty on any error. */
-export async function listSessions(sessionToken: string): Promise<RelaySession[]> {
-  const res = await fetch(`${RELAY_HTTP_URL}/me/sessions`, {
-    headers: { authorization: `Bearer ${sessionToken}` },
-  });
-  if (!res.ok) {
-    return [];
+/** List the user's sessions, newest-first (session-token authed). */
+export async function listSessions(sessionToken: string): Promise<RelayListResult<RelaySession>> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/sessions`, {
+      headers: { authorization: `Bearer ${sessionToken}` },
+    });
+    if (!res.ok) {
+      return { ok: false, items: [] };
+    }
+    const body = (await res.json()) as {
+      sessions: {
+        id: string;
+        device_id: string;
+        title: string | null;
+        status: SessionStatusName;
+        origin?: SessionOrigin;
+        parent_session_id?: string | null;
+        created_at: string;
+        updated_at: string;
+        ended_at: string | null;
+      }[];
+    };
+    return {
+      ok: true,
+      items: body.sessions.map((session) => ({
+        id: session.id,
+        deviceId: session.device_id,
+        title: session.title,
+        status: session.status,
+        // Default to `launched` so a relay that predates the origin field degrades cleanly.
+        origin: session.origin ?? 'launched',
+        parentSessionId: session.parent_session_id ?? null,
+        createdAt: new Date(session.created_at),
+        updatedAt: new Date(session.updated_at),
+        endedAt: session.ended_at ? new Date(session.ended_at) : null,
+      })),
+    };
+  } catch {
+    // Relay unreachable — a failure the caller must surface, not an empty account.
+    return { ok: false, items: [] };
   }
-  const body = (await res.json()) as {
-    sessions: {
-      id: string;
-      device_id: string;
-      title: string | null;
-      status: SessionStatusName;
-      origin?: SessionOrigin;
-      parent_session_id?: string | null;
-      created_at: string;
-      updated_at: string;
-      ended_at: string | null;
-    }[];
-  };
-  return body.sessions.map((session) => ({
-    id: session.id,
-    deviceId: session.device_id,
-    title: session.title,
-    status: session.status,
-    // Default to `launched` so a relay that predates the origin field degrades cleanly.
-    origin: session.origin ?? 'launched',
-    parentSessionId: session.parent_session_id ?? null,
-    createdAt: new Date(session.created_at),
-    updatedAt: new Date(session.updated_at),
-    endedAt: session.ended_at ? new Date(session.ended_at) : null,
-  }));
 }
 
 /** A GitHub repo the user can launch a session against (for the launch picker). */
