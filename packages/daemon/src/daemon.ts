@@ -1558,27 +1558,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
     if (knownId === undefined) return {};
     if (event.stop_hook_active === true) return {};
-    // Honor the CURRENT adoption policy: offering a handover launches a NEW telecode-owned session, so a repo
-    // the user has since denylisted (or adoption turned off) must not get an offer — even though the session
-    // was tracked before that change. Denied → stay out; the session keeps running via Claude Code locally.
-    if (!isAdoptionAllowed(adoptConfig, event.cwd)) return {};
-    if (!isFreeFormQuestion(event.last_assistant_message)) return {};
-    // Don't stack a second offer while a gate/offer is already showing for this session.
-    if (recordFor(knownId).status === 'awaiting_input') return {};
-    const question = (event.last_assistant_message ?? '').trim();
-    if (cipher.enabled) cipher.establish(knownId); // idempotent; the mirror + offer must encrypt under E2E
-    // Pull the turn's latest transcript lines in before summarizing, so the handover summary reflects the
-    // most recent context (a `Stop` fires after the last turn, which no `PreToolUse` may have mirrored yet).
-    // Fail-closed: an unreadable transcript skips the offer (the session simply stays running locally).
+    // Mirror the turn's final transcript on EVERY Stop. A turn's tail — the assistant's last message after
+    // the final `PreToolUse` (or an entire text-only reply, which fires no PreToolUse at all) — is otherwise
+    // never captured, so it goes MISSING from the telecode view. This runs regardless of the handover path
+    // below. E2E: establish the key first so the streamed entries encrypt. Fail-soft: an unreadable transcript
+    // is logged and skipped (the session keeps running locally).
+    if (cipher.enabled) cipher.establish(knownId);
     try {
       await mirrorTranscript(knownId, event.transcript_path);
     } catch (err) {
       log.warn(
         { err, deviceId: options.deviceId, sessionId: knownId },
-        'daemon: transcript mirror failed in Stop hook — skipping the handover offer',
+        'daemon: transcript mirror failed on Stop',
       );
       return {};
     }
+
+    // Free-form handover offer (Journey 4): only when the turn ended asking a free-form question AND the
+    // policy still allows it — a repo since denylisted (or adoption turned off) must not get an offer, even
+    // though the session was tracked before that change. Don't stack an offer while one is already showing.
+    if (!isAdoptionAllowed(adoptConfig, event.cwd)) return {};
+    if (!isFreeFormQuestion(event.last_assistant_message)) return {};
+    if (recordFor(knownId).status === 'awaiting_input') return {};
+    const question = (event.last_assistant_message ?? '').trim();
     // Deterministic "what the session was doing" summary from the mirrored transcript — no extra model call.
     const summary = buildHandoverSummary(recordFor(knownId).transcript);
     const requestId = randomUUID();
