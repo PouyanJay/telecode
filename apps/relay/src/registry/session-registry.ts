@@ -1,5 +1,5 @@
 import { type SessionOrigin, type SessionStatusName } from '@telecode/protocol';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
 import { sessions } from '../db/schema';
@@ -55,6 +55,12 @@ export interface SessionRegistry {
   markAwaitingInput(input: { userId: string; sessionId: string }): Promise<void>;
   /** Mark a session terminal (`done`/`error`) with an end timestamp. No-op if the row isn't the user's. */
   markEnded(input: { userId: string; sessionId: string; status: 'done' | 'error' }): Promise<void>;
+  /**
+   * End (mark `done`) every non-terminal session for a device — called when the device is revoked. A revoked
+   * device never reconnects, so the per-connection `session.reconcile` can never retire these; without this
+   * they linger as phantom `running`/`awaiting_input` rows in the dashboard forever. Returns how many ended.
+   */
+  endSessionsForDevice(input: { userId: string; deviceId: string }): Promise<number>;
 }
 
 export function createSessionRegistry(db: DbHandle): SessionRegistry {
@@ -141,6 +147,29 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
           .update(sessions)
           .set({ status, endedAt: now, updatedAt: now })
           .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
+      });
+    },
+
+    async endSessionsForDevice({ userId, deviceId }): Promise<number> {
+      const now = new Date();
+      return withUserContext(db, userId, async (scoped) => {
+        const ended = await scoped
+          .update(sessions)
+          .set({ status: 'done', endedAt: now, updatedAt: now })
+          .where(
+            and(
+              eq(sessions.userId, userId),
+              eq(sessions.deviceId, deviceId),
+              // EVERY non-terminal status. Unlike `session.reconcile` — which deliberately skips `starting`
+              // so a fast-reconnecting daemon can still accept a just-forwarded launch — a revoked device is
+              // gone for good (no daemon will ever reconnect on its token), so a `starting` or `offline_paused`
+              // session on it can never progress and must be ended too. (`offline_paused` isn't persisted by
+              // the relay today, but is listed so a revoked device is fully cleared if that ever changes.)
+              inArray(sessions.status, ['starting', 'running', 'awaiting_input', 'offline_paused']),
+            ),
+          )
+          .returning({ id: sessions.id });
+        return ended.length;
       });
     },
   };

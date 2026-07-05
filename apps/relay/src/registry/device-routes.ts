@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { type AuthService } from '../auth/auth-service';
 import { requireUser } from '../auth/require-auth';
 import { type DeviceRegistry } from './device-registry';
+import { type SessionRegistry } from './session-registry';
 
 /**
  * Web → relay device endpoints, session-token authed (the same bearer the web reads from its httpOnly
@@ -18,6 +19,9 @@ export function registerDeviceRoutes(
   app: FastifyInstance,
   auth: AuthService,
   registry: DeviceRegistry,
+  /** When provided, revoking a device also ends its non-terminal sessions (they can never reconcile once
+   *  the device is gone). Optional so the auth-less/echo relay path stays unaffected. */
+  sessionRegistry?: SessionRegistry,
 ): void {
   app.get('/me/devices', async (request, reply) => {
     const userId = await requireUser(request, reply, auth);
@@ -50,7 +54,24 @@ export function registerDeviceRoutes(
       );
       return reply.code(404).send({ error: 'device_not_found' });
     }
-    request.log.info({ userId, deviceId: params.data.id }, 'device revoked');
+    // A revoked device is gone for good — end its still-running/awaiting sessions so they don't linger as
+    // phantom rows no daemon will ever reconcile (the per-connection reconcile only reaches a device that
+    // reconnects). Best-effort: a failure here must not fail the revoke itself.
+    let endedSessions = 0;
+    if (sessionRegistry) {
+      try {
+        endedSessions = await sessionRegistry.endSessionsForDevice({
+          userId,
+          deviceId: params.data.id,
+        });
+      } catch (err) {
+        request.log.warn(
+          { err, userId, deviceId: params.data.id },
+          'device revoke: could not end sessions',
+        );
+      }
+    }
+    request.log.info({ userId, deviceId: params.data.id, endedSessions }, 'device revoked');
     return reply.code(204).send();
   });
 }

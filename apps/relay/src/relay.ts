@@ -719,7 +719,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // The web lists the user's devices (to pick the channel its browser watches) and revokes them
     // (session-token authed; RLS-scoped to the owner).
     if (deviceRegistry) {
-      registerDeviceRoutes(app, options.auth.service, deviceRegistry);
+      registerDeviceRoutes(app, options.auth.service, deviceRegistry, sessionRegistry);
     }
     // Operator-only infra controls (scale-to-zero toggles). Registered only when configured (Azure env);
     // every request is gated to the operator allowlist inside the routes.
