@@ -17,6 +17,7 @@ import {
   sessionKeyPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionOriginSchema,
+  sessionReconcilePayloadSchema,
   userMessagePayloadSchema,
   viewerPresencePayloadSchema,
 } from './session';
@@ -634,5 +635,29 @@ describe('viewerPresencePayloadSchema (relay → daemon viewer presence)', () =>
   it('rejects a missing or non-boolean online', () => {
     expect(viewerPresencePayloadSchema.safeParse({}).success).toBe(false);
     expect(viewerPresencePayloadSchema.safeParse({ online: 'yes' }).success).toBe(false);
+  });
+});
+
+describe('sessionReconcilePayloadSchema (daemon → relay reconciliation)', () => {
+  it('validates a list of held session ids (including empty — the daemon holds nothing)', () => {
+    expect(sessionReconcilePayloadSchema.parse({ heldSessionIds: ['a', 'b'] })).toEqual({
+      heldSessionIds: ['a', 'b'],
+    });
+    expect(sessionReconcilePayloadSchema.parse({ heldSessionIds: [] })).toEqual({
+      heldSessionIds: [],
+    });
+  });
+
+  it('rejects a missing list or non-string / empty-string ids', () => {
+    expect(sessionReconcilePayloadSchema.safeParse({}).success).toBe(false);
+    expect(sessionReconcilePayloadSchema.safeParse({ heldSessionIds: [1, 2] }).success).toBe(false);
+    expect(sessionReconcilePayloadSchema.safeParse({ heldSessionIds: [''] }).success).toBe(false);
+  });
+
+  it('accepts a large list — a busy daemon can hold many sessions (no upper bound)', () => {
+    const many = Array.from({ length: 500 }, (_, i) => `s${i}`);
+    expect(
+      sessionReconcilePayloadSchema.parse({ heldSessionIds: many }).heldSessionIds,
+    ).toHaveLength(500);
   });
 });

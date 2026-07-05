@@ -10,6 +10,7 @@ import {
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
   sessionEndedPayloadSchema,
+  sessionReconcilePayloadSchema,
   WS_CLOSE_UNAUTHORIZED,
   type Envelope,
 } from '@telecode/protocol';
@@ -417,7 +418,73 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
   }
 
+  /**
+   * Reconcile the registry against what the daemon actually holds (`session.reconcile`, sent on every
+   * (re)connect). Retire — mark `done` — any non-terminal session for this device the daemon no longer has,
+   * clearing the phantom `awaiting_input`/`running` rows a revoke/restart leaves behind (they otherwise
+   * resurrect on every dashboard refresh), and tell watching browsers so a live dashboard clears without one.
+   * `'starting'` is deliberately NOT retired: a session just launched + forwarded to the daemon but not yet
+   * accepted would be wrongly killed on a fast reconnect — a genuinely orphaned `starting` is already failed
+   * by the offline-daemon launch path. Session ids are cleartext routing metadata (never a payload) — E2E-safe.
+   */
+  async function reconcileSessions(
+    envelope: Envelope,
+    channel: string,
+    registry: SessionRegistry,
+  ): Promise<void> {
+    const parsed = sessionReconcilePayloadSchema.safeParse(envelope.payload);
+    if (!parsed.success) {
+      log.warn({ channel }, 'relay: dropped session.reconcile with invalid payload');
+      return;
+    }
+    const held = new Set(parsed.data.heldSessionIds);
+    const rows = await registry.listByUser(envelope.user_id);
+    const stale = rows.filter(
+      (row) =>
+        row.deviceId === envelope.device_id &&
+        !held.has(row.id) &&
+        (row.status === 'running' || row.status === 'awaiting_input'),
+    );
+    // Retire the stale rows concurrently — independent DB writes; one failure must not block the rest.
+    const results = await Promise.allSettled(
+      stale.map(async (row) => {
+        // Mark `done`, not `error`: the session wasn't failing — it was abandoned during a revoke/restart.
+        // `done` is the closest available terminal state (there is no distinct "lost" status); the browser
+        // renders both terminal states as ended, moving the phantom out of "awaiting" into recent.
+        await registry.markEnded({ userId: envelope.user_id, sessionId: row.id, status: 'done' });
+        // Tell watching browsers so a live dashboard clears the phantom without a refresh. Relay-generated
+        // control frame: cleartext `status` (the relay holds no session key), read off the field.
+        broadcastToBrowsers(
+          channel,
+          JSON.stringify(
+            makeEnvelope({
+              type: 'session.ended',
+              userId: envelope.user_id,
+              deviceId: envelope.device_id,
+              sessionId: row.id,
+              status: 'done',
+              payload: { status: 'done' },
+            }),
+          ),
+        );
+      }),
+    );
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    const retired = stale.length - failed;
+    if (retired > 0) log.info({ channel, retired }, 'relay: reconciled stale sessions');
+    else log.debug({ channel }, 'relay: session reconciliation — nothing stale');
+    if (failed > 0) {
+      // A row that failed to retire stays stale and is retried on the next reconnect.
+      log.warn({ channel, failed }, 'relay: some stale sessions could not be retired');
+    }
+  }
+
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
+    // Session reconciliation is a relay-internal control frame — act on it, never forward it to browsers.
+    if (envelope.type === 'session.reconcile') {
+      if (sessionRegistry) await reconcileSessions(envelope, channel, sessionRegistry);
+      return;
+    }
     // Adopted sessions: the daemon discovered a Claude Code session the user started themselves and
     // announces it (no id yet). The relay mints an `origin='external'` row — daemon-initiated registration,
     // the mirror of a browser `session.launch` — then ACKs the daemon with the minted id (so it can pair

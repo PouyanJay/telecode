@@ -173,6 +173,18 @@ export type DevicePresencePayload = z.infer<typeof devicePresencePayloadSchema>;
 export const viewerPresencePayloadSchema = z.object({ online: z.boolean() });
 export type ViewerPresencePayload = z.infer<typeof viewerPresencePayloadSchema>;
 
+/**
+ * Payload for `session.reconcile` (daemon → relay): the ids of the sessions the daemon currently holds in
+ * memory. Sent on every (re)registration so the relay can retire any OTHER non-terminal session for the
+ * device that is stale in the registry (a session left `awaiting_input`/`running` when the device was
+ * revoked or the daemon restarted and no longer holds it). Session ids only — cleartext routing metadata,
+ * never a session payload (E2E-safe).
+ */
+export const sessionReconcilePayloadSchema = z.object({
+  heldSessionIds: z.array(z.string().min(1)),
+});
+export type SessionReconcilePayload = z.infer<typeof sessionReconcilePayloadSchema>;
+
 /** Payload for `agent.message` (daemon → web): a chunk of streamed agent text. */
 export const agentMessagePayloadSchema = z.object({ text: z.string() });
 export type AgentMessagePayload = z.infer<typeof agentMessagePayloadSchema>;

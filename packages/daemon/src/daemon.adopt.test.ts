@@ -673,6 +673,52 @@ describe('daemon: viewer presence resets on reconnect (no stale gating)', () => 
   });
 });
 
+describe('daemon: session reconciliation on (re)connect', () => {
+  it('reports the held session ids on connect + reconnect so the relay can retire stale ones', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-reconcile-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+    });
+    await daemon.start();
+    try {
+      // A fresh daemon holds nothing yet — but it STILL sends a reconcile (empty list), so the relay can
+      // retire every stale row for the device on a cold start.
+      const first = await relay.waitForFrame((e) => e.type === 'session.reconcile');
+      expect((first.payload as { heldSessionIds: string[] }).heldSessionIds).toEqual([]);
+
+      // Adopt a session (now held in memory), then force a reconnect → the next reconcile includes it.
+      const evt = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      await evt;
+
+      // waitForHello is a sufficient barrier: the daemon sends the reconcile right after receiving hello.ack,
+      // over the same socket, and FakeRelay buffers it until consumed — so no timing wait is needed. (The
+      // first, empty reconcile was already consumed above, so this awaits the post-reconnect one.)
+      relay.dropConnection();
+      await relay.waitForHello();
+      const afterReconnect = await relay.waitForFrame((e) => e.type === 'session.reconcile');
+      expect((afterReconnect.payload as { heldSessionIds: string[] }).heldSessionIds).toContain(
+        TELECODE_SESSION,
+      );
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('daemon: an unanswered adopted question fails closed (no hook-socket deadlock)', () => {
   it('settles a pending question when the daemon stops, instead of hanging', async () => {
     const relay = await startFakeRelay(USER, DEVICE);
