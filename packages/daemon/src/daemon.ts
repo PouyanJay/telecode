@@ -1507,10 +1507,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
   async function handleSessionEndHook(event: HookEvent): Promise<unknown> {
     const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
     if (knownId !== undefined) {
+      // Establish the key BEFORE mirroring so the streamed session.history (and the session.ended below) both
+      // encrypt under E2E — consistent with the PreToolUse + Stop hooks. Idempotent. (A session ending without
+      // a prior Stop would otherwise mirror its final lines in cleartext.)
+      if (cipher.enabled) cipher.establish(knownId);
       await mirrorTranscript(knownId, event.transcript_path);
       const status = recordFor(knownId).status;
       if (status !== 'done' && status !== 'error') {
-        if (cipher.enabled) cipher.establish(knownId); // idempotent; session.ended must encrypt under E2E
         setStatus(knownId, 'done');
         sendForSession(adoptedSource(knownId), 'session.ended', { status: 'done' });
         log.info(
@@ -1574,9 +1577,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return {};
     }
 
-    // Free-form handover offer (Journey 4): only when the turn ended asking a free-form question AND the
-    // policy still allows it — a repo since denylisted (or adoption turned off) must not get an offer, even
-    // though the session was tracked before that change. Don't stack an offer while one is already showing.
+    // Free-form handover offer (Journey 4). The mirror above is intentionally unconditional (an already-
+    // adopted session keeps flowing regardless of a mid-session policy change); only the OFFER is gated here:
+    // launching a handover starts a NEW telecode-owned session, so a repo the user has since denylisted (or
+    // adoption turned off) must not get one. And don't stack an offer while one is already showing.
     if (!isAdoptionAllowed(adoptConfig, event.cwd)) return {};
     if (!isFreeFormQuestion(event.last_assistant_message)) return {};
     if (recordFor(knownId).status === 'awaiting_input') return {};
