@@ -89,6 +89,28 @@ describe('relay: viewer presence (relay → daemon)', () => {
     browser.close();
   });
 
+  it('re-asserts the watching viewer to a daemon that RECONNECTS mid-watch (no stale ungating)', async () => {
+    // Approval-reliability T8 pin: the daemon resets its viewer flag to "not watching" on every redial,
+    // so if the relay failed to re-assert on the SECOND hello, adopted tools would silently stop being
+    // gated after any network blip. The full cycle: daemon up → browser watches → daemon drops →
+    // daemon reconnects → its fresh registration must carry viewer online.
+    const deviceId = 'device-viewer-reconnect';
+    const daemon = await connectDaemon(relayUrl, userId, deviceId);
+    const online = waitForEnvelope(daemon, viewerOnline);
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    await online;
+
+    daemon.close(); // network blip
+    const { socket, presence } = await connectDaemonAwaitingViewerPresence(
+      relayUrl,
+      userId,
+      deviceId,
+    );
+    expect(isOnline(await presence)).toBe(true);
+    socket.close();
+    browser.close();
+  });
+
   it('tells a freshly-connected daemon no viewer is present when it connects cold', async () => {
     const deviceId = 'device-viewer-cold';
     const { socket, presence } = await connectDaemonAwaitingViewerPresence(
