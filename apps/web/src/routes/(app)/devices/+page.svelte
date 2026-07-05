@@ -5,7 +5,7 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import { deviceStatus } from '$lib/devices';
-  import { connectionState } from '$lib/session-store';
+  import { connectionState, watchedDaemonOnline } from '$lib/session-store';
   import type { ActionData, PageData } from './$types';
 
   /**
@@ -49,6 +49,7 @@
               lastSeenAt: device.lastSeenAt,
               isWatched: i === 0,
               connection: $connectionState,
+              daemonOnline: $watchedDaemonOnline,
             })}
             <li class="row hairline-b">
               <span class="dot" data-tone={status.tone} aria-hidden="true"></span>

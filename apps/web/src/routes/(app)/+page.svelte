@@ -11,7 +11,11 @@
   import { buildOnboardingSteps } from '$lib/onboarding';
   import { pairingInstructions } from '$lib/pairing-instructions';
   import { buildSessionRows, groupSessions, sessionCounts } from '$lib/session-groups';
-  import { connectionState, sessions as liveSessions } from '$lib/session-store';
+  import {
+    connectionState,
+    sessions as liveSessions,
+    watchedDaemonOnline,
+  } from '$lib/session-store';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -34,8 +38,12 @@
   const devicesOnline = $derived(
     data.devices.filter(
       (d, i) =>
-        deviceStatus({ lastSeenAt: d.lastSeenAt, isWatched: i === 0, connection: $connectionState })
-          .online,
+        deviceStatus({
+          lastSeenAt: d.lastSeenAt,
+          isWatched: i === 0,
+          connection: $connectionState,
+          daemonOnline: $watchedDaemonOnline,
+        }).online,
     ).length,
   );
 

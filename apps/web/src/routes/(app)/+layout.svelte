@@ -15,6 +15,7 @@
     connectionState,
     ensureConnection,
     sessions as liveSessions,
+    watchedDaemonOnline,
   } from '$lib/session-store';
   import {
     DEFAULT_SIDEBAR_WIDTH,
@@ -88,6 +89,7 @@
     user={data.user}
     devices={data.devices}
     connection={$connectionState}
+    daemonOnline={$watchedDaemonOnline}
     {sessionTotal}
     onlaunch={openLaunchDrawer}
   />
