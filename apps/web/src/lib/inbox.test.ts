@@ -96,6 +96,21 @@ describe('buildInboxAsks', () => {
     expect(asks[2]).toMatchObject({ sessionId: 's1', requestId: 'h1', question: 'Continue here?' });
   });
 
+  it('lists every pending gate of one session as its own card (concurrent tool calls)', () => {
+    let s1 = sessionWithGate('s1', NOW - 60_000);
+    s1 = applyEnvelope(
+      s1,
+      frame('s1', 'agent.permission_request', {
+        requestId: 'req-second',
+        toolName: 'Write',
+        input: { path: 'a.txt' },
+      }),
+      NOW - 30_000,
+    );
+    const asks = buildInboxAsks({ live: liveWith(['s1', s1]), titleOf, deviceNameOf });
+    expect(asks.map((a) => a.requestId)).toEqual(['req-s1', 'req-second']);
+  });
+
   it('keeps an in-flight decision visible (spinner state) but drops resolved ones', () => {
     const resolved = applyEnvelope(
       sessionWithGate('s1', NOW),

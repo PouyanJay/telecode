@@ -412,6 +412,28 @@ describe('daemon E2E variants (Task 11)', () => {
  * had NO content key, so a subscribe used to get no `session.key` at all and — worse — a CLEARTEXT
  * history backfill through the relay (E2E invariant #5 violation).
  */
+describe('daemon E2E: subscribe never mints keys for unknown sessions (bounded)', () => {
+  it('answers an unknown-id subscribe with a cleartext offline record and NO session.key', async () => {
+    const ids = mkIds();
+    const daemonKp = await generateKeyPair();
+    const relay = await startE2eDaemon(
+      ids.userId,
+      ids.deviceId,
+      daemonKp,
+      fakeAdapter([{ type: 'message', text: 'hi' }]),
+    );
+    const browser = await generateKeyPair();
+
+    const history = relay.waitForFrame(ofType('session.history', ids.sessionId));
+    sendSubscribe(relay, ids, encodeKey(browser.publicKey));
+    const reply = await history;
+    // Unknown session: an honest offline record. Its CLEARTEXT reply (empty nonce) is the proof no
+    // content key was minted — sendForSession encrypts whenever a session key exists.
+    expect(reply.nonce).toBe('');
+    expect(reply.payload).toMatchObject({ status: 'offline_paused', entries: [] });
+  });
+});
+
 describe('daemon E2E: key delivery on subscribe for a restored session', () => {
   it(
     're-keys and encrypts the backfill after a restart (no cleartext history, no missing key)',

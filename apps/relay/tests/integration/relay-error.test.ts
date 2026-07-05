@@ -84,6 +84,37 @@ describe('relay: relay.error for frames sent while the daemon is offline', () =>
     daemon.close();
   });
 
+  it('sends no relay.error for a session-less frame (device-scoped types stay fire-and-forget)', async () => {
+    const deviceId = 'device-offline-sessionless';
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    const frames: Envelope[] = [];
+    browser.on('message', (raw: Buffer) => {
+      frames.push(JSON.parse(raw.toString()) as Envelope);
+    });
+    browser.send(
+      JSON.stringify(makeEnvelope({ type: 'adopt.config', userId, deviceId, payload: {} })),
+    );
+    // Barrier: a session-scoped control gets its error reply AFTER the adopt.config was processed
+    // (same-socket FIFO), proving no error was emitted for the session-less frame.
+    const errorReply = waitForEnvelope(browser, relayError('sess-barrier'));
+    browser.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.control',
+          userId,
+          deviceId,
+          sessionId: 'sess-barrier',
+          payload: { action: 'interrupt' },
+        }),
+      ),
+    );
+    await errorReply;
+    const errorFrames = frames.filter((f) => f.type === 'relay.error');
+    expect(errorFrames).toHaveLength(1);
+    expect(errorFrames[0]!.session_id).toBe('sess-barrier');
+    browser.close();
+  });
+
   it('a subscribe to an offline daemon still gets the error alongside any cache replay', async () => {
     const deviceId = 'device-offline-subscribe';
     const browser = await connectBrowser(relayUrl, userId, deviceId);
