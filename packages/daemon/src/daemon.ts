@@ -820,6 +820,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
         reconnectAttempts = 0;
         log.info({ deviceId: options.deviceId }, 'daemon: registered with relay');
         onReady();
+        // Reconcile the registry: tell the relay which sessions we still hold so it can retire any OTHERS
+        // left stale (a revoke/restart leaves `running`/`awaiting_input` rows the daemon no longer has —
+        // otherwise they show as phantom "awaiting" in the dashboard and resurrect on every refresh). Sent
+        // on every (re)registration; cleartext session ids only.
+        socket?.send(reconcileFrame());
         return;
       }
       case 'echo': {
@@ -1034,6 +1039,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
           role: 'daemon',
           ...(options.deviceToken !== undefined ? { token: options.deviceToken } : {}),
         },
+      }),
+    );
+  }
+
+  /**
+   * The `session.reconcile` frame: the ids of the sessions this daemon currently holds in memory. The relay
+   * retires any OTHER non-terminal session for this device — clearing stale `running`/`awaiting_input` rows
+   * a revoke/restart left behind (the daemon persists only terminal sessions across a restart, so a lost
+   * running/awaiting one is genuinely gone). Cleartext routing metadata (session ids only), E2E-safe.
+   */
+  function reconcileFrame(): string {
+    return JSON.stringify(
+      makeEnvelope({
+        type: 'session.reconcile',
+        userId: options.userId,
+        deviceId: options.deviceId,
+        payload: { heldSessionIds: [...sessionRecords.keys()] },
       }),
     );
   }

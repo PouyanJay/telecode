@@ -10,6 +10,7 @@ import {
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
   sessionEndedPayloadSchema,
+  sessionReconcilePayloadSchema,
   WS_CLOSE_UNAUTHORIZED,
   type Envelope,
 } from '@telecode/protocol';
@@ -418,6 +419,54 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
+    // Session reconciliation (daemon → relay): on every (re)connect the daemon reports the sessions it still
+    // holds. Retire any OTHER non-terminal session for this device left stale in the registry — a
+    // `running`/`awaiting_input` row from before a revoke/restart that the daemon no longer has (otherwise it
+    // lingers as a phantom "awaiting" that resurrects on every dashboard refresh). Session ids are cleartext
+    // routing metadata (never the agent payload), so this is E2E-safe.
+    if (envelope.type === 'session.reconcile' && sessionRegistry) {
+      const parsed = sessionReconcilePayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) {
+        log.warn({ channel }, 'relay: dropped session.reconcile with invalid payload');
+        return;
+      }
+      const held = new Set(parsed.data.heldSessionIds);
+      const rows = await sessionRegistry.listByUser(envelope.user_id);
+      const stale = rows.filter(
+        (row) =>
+          row.deviceId === envelope.device_id &&
+          !held.has(row.id) &&
+          (row.status === 'starting' ||
+            row.status === 'running' ||
+            row.status === 'awaiting_input'),
+      );
+      for (const row of stale) {
+        await sessionRegistry.markEnded({
+          userId: envelope.user_id,
+          sessionId: row.id,
+          status: 'done',
+        });
+        // Tell watching browsers so a live dashboard clears the phantom without needing a refresh. Relay-
+        // generated control frame: cleartext `status` (the relay holds no session key), read off the field.
+        broadcastToBrowsers(
+          channel,
+          JSON.stringify(
+            makeEnvelope({
+              type: 'session.ended',
+              userId: envelope.user_id,
+              deviceId: envelope.device_id,
+              sessionId: row.id,
+              status: 'done',
+              payload: { status: 'done' },
+            }),
+          ),
+        );
+      }
+      if (stale.length > 0) {
+        log.info({ channel, retired: stale.length }, 'relay: reconciled stale sessions');
+      }
+      return;
+    }
     // Adopted sessions: the daemon discovered a Claude Code session the user started themselves and
     // announces it (no id yet). The relay mints an `origin='external'` row — daemon-initiated registration,
     // the mirror of a browser `session.launch` — then ACKs the daemon with the minted id (so it can pair

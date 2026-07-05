@@ -76,6 +76,11 @@ export const MESSAGE_TYPES = [
   // approval when someone is actually there to give it — otherwise the daemon defers to Claude Code's own
   // local prompt, never freezing a session the user is driving locally. Relay-generated cleartext metadata.
   'viewer.presence',
+  // session reconciliation (daemon -> relay): on every (re)connect the daemon reports the sessions it
+  // actually still holds, so the relay can retire (mark ended) any other non-terminal session for that
+  // device left stale in the registry — e.g. a session that was `awaiting_input` when the device was
+  // revoked or the daemon restarted. Cleartext routing metadata (session ids only), no session payload.
+  'session.reconcile',
 ] as const;
 
 export const messageTypeSchema = z.enum(MESSAGE_TYPES);
