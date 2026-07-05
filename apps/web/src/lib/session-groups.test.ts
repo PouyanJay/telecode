@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import type { SessionStatus } from './session';
-import { groupSessions, sessionCounts, type SessionRow } from './session-groups';
+import { initialSessionState, type SessionStatus } from './session';
+import {
+  buildSessionRows,
+  groupSessions,
+  sessionCounts,
+  type SessionRow,
+} from './session-groups';
 
 function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
   return {
@@ -70,5 +75,107 @@ describe('sessionCounts', () => {
       row('b', 'offline_paused', '2026-06-29T10:00:00Z'),
     ]);
     expect(counts).toEqual({ running: 0, awaiting: 0 });
+  });
+});
+
+describe('buildSessionRows', () => {
+  const NOW = new Date('2026-07-05T12:00:00Z');
+  const registry = [
+    {
+      id: 's-reg',
+      title: 'refactor relay',
+      status: 'starting' as const,
+      deviceId: 'dev-1',
+      origin: 'launched' as const,
+      parentSessionId: null,
+      createdAt: new Date('2026-07-05T10:00:00Z'),
+    },
+  ];
+  const deviceNameOf = (deviceId: string): string | null =>
+    deviceId === 'dev-1' ? 'macbook' : null;
+
+  it('overlays live status onto the persisted registry row', () => {
+    const live = new Map([['s-reg', { ...initialSessionState, status: 'running' as const }]]);
+    const rows = buildSessionRows({
+      registry,
+      live,
+      deviceNameOf,
+      watchedDeviceName: 'macbook',
+      now: NOW,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 's-reg', status: 'running', deviceName: 'macbook' });
+  });
+
+  it('keeps the registry status when the live state is idle (no frames yet)', () => {
+    const live = new Map([['s-reg', { ...initialSessionState }]]);
+    const rows = buildSessionRows({
+      registry,
+      live,
+      deviceNameOf,
+      watchedDeviceName: null,
+      now: NOW,
+    });
+    expect(rows[0]).toMatchObject({ id: 's-reg', status: 'starting', title: 'refactor relay' });
+  });
+
+  it('appends a live-only session (launched this visit) attributed to the watched device', () => {
+    const live = new Map([
+      [
+        's-live',
+        {
+          ...initialSessionState,
+          status: 'running' as const,
+          entries: [{ kind: 'user' as const, id: 'e1', text: 'fix the pairing race' }],
+        },
+      ],
+    ]);
+    const rows = buildSessionRows({
+      registry,
+      live,
+      deviceNameOf,
+      watchedDeviceName: 'macbook',
+      now: NOW,
+    });
+    const liveRow = rows.find((r) => r.id === 's-live');
+    expect(liveRow).toMatchObject({
+      status: 'running',
+      title: 'fix the pairing race',
+      deviceName: 'macbook',
+      origin: 'launched',
+      isContinuation: false,
+      createdAt: NOW,
+    });
+  });
+
+  it('marks a continuation from either the registry link or a live session.chained frame', () => {
+    const chainedRegistry = [{ ...registry[0]!, id: 's-child', parentSessionId: 's-parent' }];
+    const liveChained = new Map([
+      ['s-live-child', { ...initialSessionState, status: 'running' as const, parentSessionId: 'p' }],
+    ]);
+    const rows = buildSessionRows({
+      registry: chainedRegistry,
+      live: liveChained,
+      deviceNameOf,
+      watchedDeviceName: null,
+      now: NOW,
+    });
+    expect(rows.find((r) => r.id === 's-child')?.isContinuation).toBe(true);
+    expect(rows.find((r) => r.id === 's-live-child')?.isContinuation).toBe(true);
+  });
+
+  it('feeds sessionCounts so every surface reports the same awaiting/running numbers', () => {
+    const live = new Map([
+      ['s-reg', { ...initialSessionState, status: 'awaiting_input' as const }],
+      ['s-live', { ...initialSessionState, status: 'running' as const }],
+    ]);
+    const rows = buildSessionRows({
+      registry,
+      live,
+      deviceNameOf,
+      watchedDeviceName: null,
+      now: NOW,
+    });
+    expect(sessionCounts(rows)).toEqual({ running: 1, awaiting: 1 });
   });
 });

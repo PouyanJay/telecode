@@ -10,8 +10,7 @@
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildOnboardingSteps } from '$lib/onboarding';
   import { pairingInstructions } from '$lib/pairing-instructions';
-  import type { SessionState } from '$lib/session';
-  import { groupSessions, sessionCounts, type SessionRow as Row } from '$lib/session-groups';
+  import { buildSessionRows, groupSessions, sessionCounts } from '$lib/session-groups';
   import { connectionState, sessions as liveSessions } from '$lib/session-store';
   import type { PageData } from './$types';
 
@@ -19,47 +18,16 @@
 
   const device = $derived(data.devices[0] ?? null);
 
-  function deviceName(deviceId: string): string | null {
-    return data.devices.find((d) => d.id === deviceId)?.name ?? null;
-  }
-
-  function firstPrompt(entries: SessionState['entries']): string | undefined {
-    return entries.find((e) => e.kind === 'user')?.text;
-  }
-
-  // The persisted registry list (survives reloads) overlaid with live status from the channel; sessions
-  // launched this visit but not yet in the registry are appended. Grouping/sorting is done by groupSessions.
-  const rows = $derived.by<Row[]>(() => {
-    const byId = new Map<string, Row>();
-    for (const s of data.sessions) {
-      byId.set(s.id, {
-        id: s.id,
-        title: s.title,
-        status: s.status,
-        deviceName: deviceName(s.deviceId),
-        origin: s.origin,
-        isContinuation: s.parentSessionId !== null,
-        createdAt: s.createdAt,
-      });
-    }
-    for (const [id, state] of $liveSessions) {
-      const existing = byId.get(id);
-      const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
-      const title = existing?.title ?? firstPrompt(state.entries) ?? null;
-      byId.set(id, {
-        id,
-        title,
-        status,
-        deviceName: existing?.deviceName ?? device?.name ?? null,
-        // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
-        origin: existing?.origin ?? 'launched',
-        // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
-        isContinuation: (existing?.isContinuation ?? false) || state.parentSessionId !== null,
-        createdAt: existing?.createdAt ?? new Date(),
-      });
-    }
-    return [...byId.values()];
-  });
+  // The persisted registry overlaid with live status — built by the ONE shared merge (buildSessionRows),
+  // the same source the system bar counts from, so the two surfaces can never disagree.
+  const rows = $derived(
+    buildSessionRows({
+      registry: data.sessions,
+      live: $liveSessions,
+      deviceNameOf: (deviceId) => data.devices.find((d) => d.id === deviceId)?.name ?? null,
+      watchedDeviceName: device?.name ?? null,
+    }),
+  );
 
   const groups = $derived(groupSessions(rows));
   const counts = $derived(sessionCounts(rows));
