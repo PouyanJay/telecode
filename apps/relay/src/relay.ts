@@ -867,8 +867,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           }),
         ),
       );
-      // Presence (Phase 4 Task 3): a (re)registering daemon tells watching browsers to resume; a browser
-      // that connected while its device is offline is told so, so its live session list reflects reality.
+      // Presence (Phase 4 Task 3): a (re)registering daemon tells watching browsers to resume. A
+      // connecting browser always gets one presence snapshot — online or offline — so it renders the
+      // device's real state instead of assuming (honesty pass T2; it used to get a frame only when the
+      // daemon was absent, leaving a cold tab with no positive confirmation).
       if (role === 'daemon') {
         broadcastToBrowsers(channel, presenceFrame(envelope.user_id, envelope.device_id, true));
         // Tell the freshly-(re)connected daemon whether an operator is already watching, so its adopted-
@@ -878,8 +880,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
           envelope.device_id,
           (browsers.get(channel)?.size ?? 0) > 0,
         );
-      } else if (!daemons.has(channel)) {
-        socket.send(presenceFrame(envelope.user_id, envelope.device_id, false));
+      } else {
+        socket.send(presenceFrame(envelope.user_id, envelope.device_id, daemons.has(channel)));
       }
     }
 

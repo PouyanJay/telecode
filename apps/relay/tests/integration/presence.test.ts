@@ -97,7 +97,9 @@ describe('relay: device presence (Phase 4 Task 3)', () => {
     await beatApp.close();
   });
 
-  it('does not send a cold browser an offline frame when its daemon is already online', async () => {
+  it('tells a cold browser the device is ONLINE when its daemon is already registered (snapshot)', async () => {
+    // Honesty pass T2: a browser used to get NO presence frame in this case and had to assume — now every
+    // cold-connecting browser receives exactly one presence snapshot so it never guesses.
     const deviceId = 'device-already-online';
     const daemon = await connectDaemon(relayUrl, userId, deviceId); // daemon online first
 
@@ -108,19 +110,41 @@ describe('relay: device presence (Phase 4 Task 3)', () => {
     });
     const frames: Envelope[] = [];
     ws.on('message', (raw: Buffer) => frames.push(parseEnvelope(JSON.parse(raw.toString()))));
+    const online = waitForEnvelope(ws, onlineFrame);
     ws.send(
       JSON.stringify(
         makeEnvelope({ type: 'hello', userId, deviceId, payload: { role: 'browser' } }),
       ),
     );
-    await waitForEnvelope(ws, (e) => e.type === 'hello.ack');
-    // The relay sends the ack BEFORE its presence decision, so the ack alone isn't a barrier. Send an
-    // echo and wait for the relay to forward it to the online daemon: same-socket ordering guarantees the
-    // relay finished this browser's hello (presence decision included) first, so any stray presence frame
-    // is already in `frames`. No timing wait.
+    await online;
+    // Exactly one snapshot — no duplicate or contradictory presence frames. The echo round-trip through
+    // the daemon is the ordering barrier proving the relay finished this browser's hello.
     sendEcho(ws, userId, deviceId, 'barrier');
     await waitForEnvelope(daemon, (e) => e.type === 'echo');
-    expect(frames.some(presenceOf)).toBe(false);
+    expect(frames.filter(presenceOf)).toHaveLength(1);
+    expect(frames.filter(presenceOf).every(isOnline)).toBe(true);
     ws.close();
+    daemon.close();
+  });
+
+  it('the offline snapshot still arrives when a second browser joins an offline channel', async () => {
+    // Regression guard: the snapshot is per-browser, not per-channel — a browser joining AFTER another
+    // one still gets its own offline frame.
+    const deviceId = 'device-second-browser';
+    const first = await connectBrowser(relayUrl, userId, deviceId);
+    const second = new WebSocket(relayUrl);
+    await new Promise<void>((resolve, reject) => {
+      second.once('open', () => resolve());
+      second.once('error', reject);
+    });
+    const presence = waitForEnvelope(second, presenceOf);
+    second.send(
+      JSON.stringify(
+        makeEnvelope({ type: 'hello', userId, deviceId, payload: { role: 'browser' } }),
+      ),
+    );
+    expect(isOnline(await presence)).toBe(false);
+    first.close();
+    second.close();
   });
 });
