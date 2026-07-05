@@ -273,6 +273,11 @@ function buildDaemon(creds: StoredCredentials): Daemon {
     worktreeManager,
     repoManager,
     sessionStore,
+    // Gate timeout override (ms); unset → the daemon's 30-minute default, <= 0 disables.
+    ...(process.env.TELECODE_GATE_TIMEOUT_MS !== undefined &&
+    Number.isFinite(Number(process.env.TELECODE_GATE_TIMEOUT_MS))
+      ? { gateTimeoutMs: Number(process.env.TELECODE_GATE_TIMEOUT_MS) }
+      : {}),
     ...(defaultRepoPath ? { defaultRepoPath } : {}),
     ...(isAdoptEnabled
       ? {
