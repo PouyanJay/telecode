@@ -262,6 +262,11 @@ const hookSocketPath = join(telecodeHome, 'run', 'hook.sock');
 const adoptConfigPath = join(telecodeHome, 'adopt-config.json');
 // Rebuilt on each (re-)launch so a re-pair uses the fresh credentials + token.
 function buildDaemon(creds: StoredCredentials): Daemon {
+  const rawGateTimeout = process.env.TELECODE_GATE_TIMEOUT_MS;
+  const gateTimeoutOverrideMs =
+    rawGateTimeout !== undefined && Number.isFinite(Number(rawGateTimeout))
+      ? Number(rawGateTimeout)
+      : undefined;
   return createDaemon({
     relayUrl: relayWsUrl,
     userId: creds.userId,
@@ -274,10 +279,7 @@ function buildDaemon(creds: StoredCredentials): Daemon {
     repoManager,
     sessionStore,
     // Gate timeout override (ms); unset → the daemon's 30-minute default, <= 0 disables.
-    ...(process.env.TELECODE_GATE_TIMEOUT_MS !== undefined &&
-    Number.isFinite(Number(process.env.TELECODE_GATE_TIMEOUT_MS))
-      ? { gateTimeoutMs: Number(process.env.TELECODE_GATE_TIMEOUT_MS) }
-      : {}),
+    ...(gateTimeoutOverrideMs !== undefined ? { gateTimeoutMs: gateTimeoutOverrideMs } : {}),
     ...(defaultRepoPath ? { defaultRepoPath } : {}),
     ...(isAdoptEnabled
       ? {

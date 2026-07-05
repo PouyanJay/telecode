@@ -21,6 +21,8 @@ import { startFakeRelay, type FakeRelay } from './fake-relay';
  * (the pre-timeout behavior).
  */
 const silent = pino({ level: 'silent' });
+/** Short enough for fast tests; every wait below is event-driven (frames), never a wall-clock sleep. */
+const TEST_GATE_TIMEOUT_MS = 250;
 const daemons: Daemon[] = [];
 const relays: FakeRelay[] = [];
 
@@ -68,7 +70,7 @@ describe('daemon: permission gate timeout', () => {
       userId,
       deviceId,
       [{ type: 'tool_use', toolName: 'Bash', input: { command: 'rm -rf /' } }],
-      250,
+      TEST_GATE_TIMEOUT_MS,
     );
     const sid = randomUUID();
 
@@ -98,39 +100,61 @@ describe('daemon: permission gate timeout', () => {
       userId,
       deviceId,
       [{ type: 'tool_use', toolName: 'Bash', input: { command: 'echo ok' } }],
-      250,
+      TEST_GATE_TIMEOUT_MS,
     );
-    const sid = randomUUID();
+    const decided = randomUUID();
 
     relay.send(
       makeEnvelope({
         type: 'session.launch',
         userId,
         deviceId,
-        sessionId: sid,
+        sessionId: decided,
         payload: { prompt: 'run it' },
       }),
     );
-    const request = await relay.waitForFrame(ofType('agent.permission_request', sid));
+    const request = await relay.waitForFrame(ofType('agent.permission_request', decided));
     const { requestId } = (request.payload ?? {}) as { requestId: string };
     relay.send(
       makeEnvelope({
         type: 'permission.decision',
         userId,
         deviceId,
-        sessionId: sid,
+        sessionId: decided,
         payload: { requestId, behavior: 'allow' },
       }),
     );
-    await relay.waitForFrame(ofType('session.ended', sid));
+    await relay.waitForFrame(ofType('session.ended', decided));
 
-    // Well past the timeout, the approved verdict must stand — no late deny overwrote it.
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Event-driven "a full timeout window elapsed" barrier: a SECOND gated session, launched after
+    // the decision above, is left unanswered — its own timer (armed later than the first one would
+    // have fired) times out and pushes its deny. A leaked timer on the decided session would have
+    // fired before this. No wall-clock sleeps (TDD no-timing-tests rule).
+    const sentinel = randomUUID();
     relay.send(
-      makeEnvelope({ type: 'session.subscribe', userId, deviceId, sessionId: sid, payload: {} }),
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sentinel,
+        payload: { prompt: 'never answered' },
+      }),
     );
-    const backfill = await relay.waitForFrame(ofType('session.history', sid));
+    await relay.waitForFrame(ofType('agent.permission_request', sentinel));
+    await relay.waitForFrame(ofType('session.history', sentinel));
+
+    relay.send(
+      makeEnvelope({
+        type: 'session.subscribe',
+        userId,
+        deviceId,
+        sessionId: decided,
+        payload: {},
+      }),
+    );
+    const backfill = await relay.waitForFrame(ofType('session.history', decided));
     const history = sessionHistoryPayloadSchema.parse(backfill.payload);
+    // The timely approval stands — no late deny overwrote it.
     expect(permissionEntry(history.entries)?.decision).toBe('allow');
     expect(history.entries.some((e) => e.kind === 'tool')).toBe(true);
   });
@@ -156,8 +180,8 @@ describe('daemon: permission gate timeout', () => {
       }),
     );
     await relay.waitForFrame(ofType('agent.permission_request', sid));
-    // Give a would-be timer ample room, then confirm the gate is still pending (no pushed deny).
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // No wait needed: with the timer disabled nothing was armed. A regression that armed a 0ms timer
+    // would push its deny before this subscribe round-trip completes, failing the asserts below.
     relay.send(
       makeEnvelope({ type: 'session.subscribe', userId, deviceId, sessionId: sid, payload: {} }),
     );

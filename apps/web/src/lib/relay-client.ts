@@ -254,24 +254,28 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       return;
     }
     const result = await cipher.tryDecrypt(envelope);
-    // Key self-healing: an ENCRYPTED frame we hold no key for means the session's key was missed (the
-    // classic case: this browser subscribed inside the adopted-session announce window, before the
-    // daemon established the key). Re-subscribe — once per session until a key arrives — so the daemon
-    // re-delivers the key and an encrypted backfill. Without this the session stays undecryptable and
-    // a decision would go out cleartext into a keyed daemon, which drops it (a stuck gate).
     const sessionId = envelope.session_id;
-    if (
-      !result.decrypted &&
-      cipher.enabled &&
-      sessionId !== undefined &&
-      envelope.nonce !== '' &&
-      typeof envelope.payload === 'string' &&
-      !pendingKeyRequests.has(sessionId)
-    ) {
+    if (!result.decrypted && sessionId !== undefined && needsKeyRecovery(envelope, sessionId)) {
       pendingKeyRequests.add(sessionId);
       sendSubscribe(sessionId);
     }
     options.onEvent(result.decrypted ? { ...envelope, payload: result.payload } : envelope);
+  }
+
+  /**
+   * Key self-healing: an ENCRYPTED frame we hold no key for means the session's key was missed (the
+   * classic case: this browser subscribed inside the adopted-session announce window, before the
+   * daemon established the key). Re-subscribe — once per session until a key arrives — so the daemon
+   * re-delivers the key and an encrypted backfill. Without this the session stays undecryptable and
+   * a decision would go out cleartext into a keyed daemon, which drops it (a stuck gate).
+   */
+  function needsKeyRecovery(envelope: Envelope, sessionId: string): boolean {
+    return (
+      cipher.enabled &&
+      envelope.nonce !== '' &&
+      typeof envelope.payload === 'string' &&
+      !pendingKeyRequests.has(sessionId)
+    );
   }
 
   openSocket();

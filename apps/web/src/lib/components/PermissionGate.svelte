@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { Button } from '@telecode/ui';
+  import { Button, Spinner } from '@telecode/ui';
 
   import { buildFileDiff } from '$lib/diff';
   import type { TranscriptEntry } from '$lib/session';
 
   import Code from './Code.svelte';
   import DiffView from './DiffView.svelte';
+  import RejectNoteForm from './RejectNoteForm.svelte';
 
   /**
    * The human-in-the-loop gate (enterprise-ui §7): the agent has paused on a consequential tool and is
@@ -32,16 +33,8 @@
   // anything else falls back to the raw, monospace input.
   const diff = $derived(buildFileDiff(entry.toolName, entry.input));
 
-  // Deny-with-note: the note reveal is per-gate local state; a plain Reject needs no note.
-  let noting = $state(false);
-  let note = $state('');
-
-  function rejectWithNote(): void {
-    const message = note.trim();
-    onreject(message === '' ? undefined : message);
-    noting = false;
-    note = '';
-  }
+  // Deny-with-note: whether the shared note reveal is open; a plain Reject needs no note.
+  let isNoting = $state(false);
 </script>
 
 <section class="gate" data-state={entry.decision} aria-label="Permission request">
@@ -57,37 +50,24 @@
   {/if}
 
   {#if entry.decision === 'pending'}
-    {#if noting}
-      <div class="note-form">
-        <!-- svelte-ignore a11y_autofocus — the reveal is the operator's own click; focus follows intent. -->
-        <textarea
-          class="note-input"
-          rows="2"
-          placeholder="Tell the agent why, or what to do instead…"
-          bind:value={note}
-          autofocus
-          onkeydown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') rejectWithNote();
-            if (e.key === 'Escape') (noting = false), (note = '');
-          }}
-        ></textarea>
-        <div class="actions">
-          <Button variant="danger" size="sm" onclick={rejectWithNote}>Reject with note</Button>
-          <Button variant="ghost" size="sm" onclick={() => ((noting = false), (note = ''))}>
-            Cancel
-          </Button>
-        </div>
-      </div>
+    {#if isNoting}
+      <RejectNoteForm
+        onsubmit={(message) => {
+          onreject(message);
+          isNoting = false;
+        }}
+        oncancel={() => (isNoting = false)}
+      />
     {:else}
       <div class="actions">
         <Button variant="primary" onclick={onapprove}>Approve</Button>
         <Button variant="secondary" onclick={() => onreject()}>Reject</Button>
-        <Button variant="ghost" onclick={() => (noting = true)}>Reject with note…</Button>
+        <Button variant="ghost" onclick={() => (isNoting = true)}>Reject with note…</Button>
       </div>
     {/if}
   {:else if isInFlight}
     <p class="status-line" role="status">
-      <span class="spinner" aria-hidden="true"></span>
+      <Spinner />
       {entry.decision === 'approving' ? 'Approving…' : 'Rejecting…'}
     </p>
   {:else}
@@ -138,28 +118,6 @@
     display: flex;
     gap: var(--space-2);
   }
-  .note-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-  .note-input {
-    width: 100%;
-    resize: vertical;
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-md);
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-sans);
-    font-size: var(--text-sm);
-    line-height: var(--lh-base);
-  }
-  .note-input:focus-visible {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--focus-ring);
-  }
   .status-line {
     display: inline-flex;
     align-items: center;
@@ -179,24 +137,5 @@
   }
   .resolved[data-decision='rejected'] {
     color: var(--text-muted);
-  }
-  .spinner {
-    width: 12px;
-    height: 12px;
-    flex: none;
-    border: 2px solid currentcolor;
-    border-right-color: transparent;
-    border-radius: var(--radius-full);
-    animation: spin 0.6s linear infinite;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .spinner {
-      animation: none;
-    }
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

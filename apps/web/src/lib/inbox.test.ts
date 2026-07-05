@@ -1,8 +1,9 @@
 import { makeEnvelope, type Envelope } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { buildInboxAsks, waitingLabel } from './inbox';
-import { applyEnvelope, startingState, type SessionState } from './session';
+import { buildInboxAsks } from './inbox';
+import { applyEnvelope, markDeciding, startingState, type SessionState } from './session';
+import { waitingLabel } from './waiting-label';
 
 /**
  * The needs-you inbox (approval-reliability T6): every pending ask across the watched channel's live
@@ -111,7 +112,14 @@ describe('buildInboxAsks', () => {
     expect(asks.map((a) => a.requestId)).toEqual(['req-s1', 'req-second']);
   });
 
-  it('keeps an in-flight decision visible (spinner state) but drops resolved ones', () => {
+  it('keeps an in-flight decision visible as its spinner state', () => {
+    const deciding = markDeciding(sessionWithGate('s1', NOW), 'req-s1', 'allow');
+    const asks = buildInboxAsks({ live: liveWith(['s1', deciding]), titleOf, deviceNameOf });
+    expect(asks).toHaveLength(1);
+    expect(asks[0]).toMatchObject({ kind: 'permission', decision: 'approving' });
+  });
+
+  it('drops resolved asks (the session settled them)', () => {
     const resolved = applyEnvelope(
       sessionWithGate('s1', NOW),
       frame('s1', 'session.ended', { status: 'done' }),

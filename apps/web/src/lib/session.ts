@@ -200,6 +200,8 @@ function closeOpenGates(entries: readonly TranscriptEntry[]): readonly Transcrip
 /**
  * The user's last action never reached the daemon (`relay.error`): revert whatever was optimistically
  * in-flight back to pending — an undelivered approval must read as still-asked, never as decided.
+ * Deliberately blanket (ignores `regarding`): the channel to this session's device is down, so EVERY
+ * in-flight action on it went nowhere, whichever one the error frame happened to name.
  */
 function revertInFlightActions(entries: readonly TranscriptEntry[]): readonly TranscriptEntry[] {
   let changed = false;

@@ -39,10 +39,11 @@
     }
   });
 
-  // One shared clock for the waiting pills (30s resolution — minutes-level display).
+  // One shared clock for the waiting pills (30s resolution — the labels are minutes-level).
+  const INBOX_CLOCK_INTERVAL_MS = 30_000;
   let now = $state(Date.now());
   $effect(() => {
-    const timer = setInterval(() => (now = Date.now()), 30_000);
+    const timer = setInterval(() => (now = Date.now()), INBOX_CLOCK_INTERVAL_MS);
     return () => clearInterval(timer);
   });
 

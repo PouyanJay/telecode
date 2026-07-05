@@ -225,8 +225,7 @@ describe('key self-healing: re-subscribe on a keyless encrypted frame', () => {
     conn.close();
   });
 
-  it('never re-subscribes for cleartext frames or when E2E is off', async () => {
-    // Cleartext frame (nonce '') on an E2E-capable connection: nothing to heal.
+  it('never re-subscribes for a cleartext frame (nothing to heal)', async () => {
     const daemonKp = await generateKeyPair();
     const e2e = connectWithFakes({
       daemonPublicKey: encodeKey(daemonKp.publicKey),
@@ -252,8 +251,9 @@ describe('key self-healing: re-subscribe on a keyless encrypted frame', () => {
     await flush();
     expect(subscribesFor(s1, 'sess-clear')).toBe(0);
     e2e.conn.close();
+  });
 
-    // A pre-E2E connection (no daemon key) must never self-heal — there is no key to fetch.
+  it('never re-subscribes when E2E is off (there is no key to fetch)', async () => {
     const clear = connectWithFakes();
     const s2 = clear.sockets[0]!;
     s2.fireOpen();

@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { Button } from '@telecode/ui';
+  import { Button, Spinner } from '@telecode/ui';
 
   import type { InboxAsk } from '$lib/inbox';
-  import { waitingLabel } from '$lib/inbox';
   import { summarizeTool } from '$lib/tool-summary';
+  import { waitingLabel } from '$lib/waiting-label';
+
+  import RejectNoteForm from './RejectNoteForm.svelte';
 
   /**
    * One pending ask in the needs-you inbox (enterprise-ui §7): the operator can settle an approval
@@ -31,21 +33,12 @@
   } as const;
 
   const waiting = $derived(waitingLabel(ask.askedAt, now));
-  const inFlight = $derived(
+  const isInFlight = $derived(
     ask.kind === 'permission' && (ask.decision === 'approving' || ask.decision === 'rejecting'),
   );
 
-  // Deny-with-note reveal (same interaction as the in-session gate).
-  let noting = $state(false);
-  let note = $state('');
-
-  function rejectWithNote(): void {
-    if (ask.kind !== 'permission') return;
-    const message = note.trim();
-    onreject(ask.sessionId, ask.requestId, message === '' ? undefined : message);
-    noting = false;
-    note = '';
-  }
+  // Deny-with-note: whether the shared note reveal is open (same interaction as the in-session gate).
+  let isNoting = $state(false);
 </script>
 
 <article class="ask" aria-label={EYEBROWS[ask.kind]}>
@@ -64,32 +57,19 @@
       <span class="tool">{ask.toolName}</span>
       {summarizeTool(ask.toolName, ask.input)}
     </p>
-    {#if inFlight}
+    {#if isInFlight}
       <p class="status-line" role="status">
-        <span class="spinner" aria-hidden="true"></span>
+        <Spinner />
         {ask.decision === 'approving' ? 'Approving…' : 'Rejecting…'}
       </p>
-    {:else if noting}
-      <div class="note-form">
-        <!-- svelte-ignore a11y_autofocus — the reveal is the operator's own click; focus follows intent. -->
-        <textarea
-          class="note-input"
-          rows="2"
-          placeholder="Tell the agent why, or what to do instead…"
-          bind:value={note}
-          autofocus
-          onkeydown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') rejectWithNote();
-            if (e.key === 'Escape') (noting = false), (note = '');
-          }}
-        ></textarea>
-        <div class="actions">
-          <Button variant="danger" size="sm" onclick={rejectWithNote}>Reject with note</Button>
-          <Button variant="ghost" size="sm" onclick={() => ((noting = false), (note = ''))}>
-            Cancel
-          </Button>
-        </div>
-      </div>
+    {:else if isNoting}
+      <RejectNoteForm
+        onsubmit={(message) => {
+          onreject(ask.sessionId, ask.requestId, message);
+          isNoting = false;
+        }}
+        oncancel={() => (isNoting = false)}
+      />
     {:else}
       <div class="actions">
         <Button variant="primary" size="sm" onclick={() => onapprove(ask.sessionId, ask.requestId)}>
@@ -98,7 +78,7 @@
         <Button variant="secondary" size="sm" onclick={() => onreject(ask.sessionId, ask.requestId)}>
           Reject
         </Button>
-        <Button variant="ghost" size="sm" onclick={() => (noting = true)}>Reject with note…</Button>
+        <Button variant="ghost" size="sm" onclick={() => (isNoting = true)}>Reject with note…</Button>
         <a class="open" href="/sessions/{ask.sessionId}">Open session →</a>
       </div>
     {/if}
@@ -220,28 +200,6 @@
     color: var(--text);
     text-decoration: underline;
   }
-  .note-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-  .note-input {
-    width: 100%;
-    resize: vertical;
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-md);
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-sans);
-    font-size: var(--text-base);
-    line-height: var(--lh-base);
-  }
-  .note-input:focus-visible {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--focus-ring);
-  }
   .status-line {
     display: inline-flex;
     align-items: center;
@@ -249,24 +207,5 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
-  }
-  .spinner {
-    width: 12px;
-    height: 12px;
-    flex: none;
-    border: 2px solid currentcolor;
-    border-right-color: transparent;
-    border-radius: var(--radius-full);
-    animation: spin 0.6s linear infinite;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .spinner {
-      animation: none;
-    }
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>
