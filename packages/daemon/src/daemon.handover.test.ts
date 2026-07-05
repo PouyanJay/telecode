@@ -357,6 +357,66 @@ describe('daemon: free-form handover & resume', () => {
     expect(summary).toContain('Assistant: I scaffolded the routes.');
   });
 
+  it('mirrors the turn on a NORMAL Stop (not just a handover) so the response tail is not lost', async () => {
+    await start(createFakeAgentAdapter([]));
+    const transcriptPath = join(dir, 'transcript.jsonl');
+    // Initial transcript: a user prompt + an assistant message. The adopting PreToolUse mirrors up to here.
+    await writeFile(
+      transcriptPath,
+      `${[
+        JSON.stringify({
+          type: 'user',
+          message: { role: 'user', content: 'Refactor the parser.' },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'Working on it.' }] },
+        }),
+      ].join('\n')}\n`,
+    );
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // The turn's FINAL message — appended after the last PreToolUse. On a normal (non-question) Stop this
+    // tail would be lost without the fix (the Stop handler used to mirror only when offering a handover).
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Done — parser refactored.' }],
+        },
+      })}\n`,
+      { flag: 'a' },
+    );
+
+    // A plain statement (not a free-form question) → no handover offer, but the transcript must still mirror.
+    await hookRpc(
+      socketPath,
+      stopEvent('Done — parser refactored.', { transcript_path: transcriptPath }),
+    );
+
+    // The daemon streams the updated transcript (session.history); the frame carrying the final line proves
+    // the Stop mirrored. Without the fix no such frame is sent and this times out.
+    const history = await relay.waitForFrame(
+      (e) =>
+        e.type === 'session.history' &&
+        ((e.payload as { entries?: { text?: string }[] }).entries ?? []).some(
+          (entry) => entry.text === 'Done — parser refactored.',
+        ),
+    );
+    expect(history.session_id).toBe(PARENT_SESSION);
+  });
+
   it('sends the agent.handover offer as ciphertext to the relay (invariant #5)', async () => {
     const keyPair = await generateKeyPair();
     await start(createFakeAgentAdapter([]), {
