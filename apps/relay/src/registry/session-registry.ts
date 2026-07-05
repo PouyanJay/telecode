@@ -160,7 +160,12 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             and(
               eq(sessions.userId, userId),
               eq(sessions.deviceId, deviceId),
-              inArray(sessions.status, ['starting', 'running', 'awaiting_input']),
+              // EVERY non-terminal status. Unlike `session.reconcile` — which deliberately skips `starting`
+              // so a fast-reconnecting daemon can still accept a just-forwarded launch — a revoked device is
+              // gone for good (no daemon will ever reconnect on its token), so a `starting` or `offline_paused`
+              // session on it can never progress and must be ended too. (`offline_paused` isn't persisted by
+              // the relay today, but is listed so a revoked device is fully cleared if that ever changes.)
+              inArray(sessions.status, ['starting', 'running', 'awaiting_input', 'offline_paused']),
             ),
           )
           .returning({ id: sessions.id });
