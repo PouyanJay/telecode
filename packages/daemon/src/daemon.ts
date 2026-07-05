@@ -870,15 +870,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // that doesn't hold it (e.g. after a restart) can't backfill — report it not-live so the UI
         // falls back to the registry status instead of showing a phantom transcript.
         const sessionId = envelope.session_id;
-        // E2E reconnect: re-deliver the session key to the (possibly new) browser pubkey it announced, so
-        // it can decrypt the backfilled history that follows. Subscribe itself stays cleartext (`{}`).
-        if (
-          cipher.enabled &&
-          envelope.sender_public_key !== undefined &&
-          sessionId !== undefined &&
-          cipher.isEncrypted(sessionId)
-        ) {
-          deliverKey(envelope, envelope.sender_public_key);
+        // E2E (re)keying: deliver the session key to the browser pubkey it announced, so it can decrypt
+        // the backfilled history that follows. For a session the daemon KNOWS but has no key for yet —
+        // a restored session after a restart, or an adopted one whose announce beat its establish —
+        // mint the key now (idempotent): a subscribe must never be answered with a cleartext backfill,
+        // and a keyless browser must never be left unable to decrypt a live gate (the "dropped
+        // permission.decision" stuck-approval bug). Unknown ids never mint keys (bounded).
+        if (cipher.enabled && envelope.sender_public_key !== undefined && sessionId !== undefined) {
+          if (!cipher.isEncrypted(sessionId) && sessionRecords.has(sessionId)) {
+            cipher.establish(sessionId);
+          }
+          if (cipher.isEncrypted(sessionId)) {
+            deliverKey(envelope, envelope.sender_public_key);
+          }
         }
         const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
         log.info(

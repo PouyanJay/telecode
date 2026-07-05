@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   deriveSharedKey,
@@ -17,11 +20,12 @@ import {
   type MessageType,
 } from '@telecode/protocol';
 import { pino } from 'pino';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createFakeAgentAdapter, type AgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
+import { createSessionStore } from './sessions/session-store';
 
 /**
  * Browser-side E2E simulation over WebCrypto (Phase 4) — mirrors what the real browser cipher does, with
@@ -399,4 +403,101 @@ describe('daemon E2E variants (Task 11)', () => {
     expect(endedFrame.status).toBe('error'); // cleartext status for the relay
     expect(await decryptWithContentKey(endedFrame, contentKey)).toMatchObject({ status: 'error' });
   });
+});
+
+/**
+ * Key re-delivery honesty (approval-reliability T1). A browser subscribing to a session the daemon
+ * KNOWS must always end up able to decrypt: the daemon establishes the content key (idempotent) and
+ * delivers it even when the key does not exist yet. The sharpest case is a restart: restored sessions
+ * had NO content key, so a subscribe used to get no `session.key` at all and — worse — a CLEARTEXT
+ * history backfill through the relay (E2E invariant #5 violation).
+ */
+describe('daemon E2E: key delivery on subscribe for a restored session', () => {
+  it(
+    're-keys and encrypts the backfill after a restart (no cleartext history, no missing key)',
+    { timeout: 15000 },
+    async () => {
+      const ids = mkIds();
+      const daemonKp = await generateKeyPair();
+      const browserKp = await generateKeyPair();
+      const dir = await mkdtemp(join(tmpdir(), 'telecode-e2e-restart-'));
+      try {
+        // Daemon A: run an encrypted session to completion so the transcript persists.
+        const relayA = await startFakeRelay(ids.userId, ids.deviceId);
+        const daemonA = createDaemon({
+          relayUrl: relayA.url,
+          userId: ids.userId,
+          deviceId: ids.deviceId,
+          keyPair: {
+            publicKey: encodeKey(daemonKp.publicKey),
+            privateKey: encodeKey(daemonKp.privateKey),
+          },
+          agentAdapter: fakeAdapter([{ type: 'message', text: 'the secret plan' }]),
+          sessionStore: createSessionStore({ dir }),
+          logger: silent,
+        });
+        await daemonA.start();
+        await launchAndKey(relayA, ids, daemonKp, browserKp, 'run the plan').catch((e: unknown) => {
+          throw new Error(`phase A launch key: ${String(e)}`);
+        });
+        await relayA.waitForFrame(ofType('session.ended', ids.sessionId)).catch((e: unknown) => {
+          throw new Error(`phase A ended: ${String(e)}`);
+        });
+        // The persist is coalesced + async — wait for it to land on disk before "restarting".
+        await vi.waitFor(
+          async () => {
+            expect((await createSessionStore({ dir }).loadAll()).has(ids.sessionId)).toBe(true);
+          },
+          { timeout: 5000, interval: 50 },
+        );
+        await daemonA.stop();
+        await relayA.close();
+
+        // Daemon B: same identity + store, fresh process — restored sessions have no content key yet.
+        const relayB = await startFakeRelay(ids.userId, ids.deviceId);
+        relays.push(relayB);
+        const daemonB = createDaemon({
+          relayUrl: relayB.url,
+          userId: ids.userId,
+          deviceId: ids.deviceId,
+          keyPair: {
+            publicKey: encodeKey(daemonKp.publicKey),
+            privateKey: encodeKey(daemonKp.privateKey),
+          },
+          agentAdapter: fakeAdapter([]),
+          sessionStore: createSessionStore({ dir }),
+          logger: silent,
+        });
+        daemons.push(daemonB);
+        await daemonB.start();
+
+        // A (new) browser reopens the session: it must receive a session.key AND an ENCRYPTED backfill.
+        const browser2 = await generateKeyPair();
+        const keyFrame = relayB.waitForFrame(ofType('session.key', ids.sessionId));
+        const historyFrame = relayB.waitForFrame(ofType('session.history', ids.sessionId));
+        sendSubscribe(relayB, ids, encodeKey(browser2.publicKey));
+
+        const contentKey = await unwrapContentKey(
+          await keyFrame.catch((e: unknown) => {
+            throw new Error(`phase B key: ${String(e)}`);
+          }),
+          daemonKp.publicKey,
+          browser2.privateKey,
+        );
+        const history = await historyFrame.catch((e: unknown) => {
+          throw new Error(`phase B history: ${String(e)}`);
+        });
+        // The backfill must be ciphertext — a restored session's transcript must never transit cleartext.
+        expect(history.nonce).not.toBe('');
+        const opened = (await decryptWithContentKey(history, contentKey)) as {
+          status: string;
+          entries: { kind: string; text?: string }[];
+        };
+        expect(opened.status).toBe('done');
+        expect(opened.entries.some((e) => e.text === 'the secret plan')).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

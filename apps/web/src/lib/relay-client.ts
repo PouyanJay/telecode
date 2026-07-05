@@ -42,6 +42,8 @@ export interface RelayConnectionOptions {
   readonly getChannelToken: () => Promise<string>;
   /** The watched device's X25519 public key (base64) for E2E; null/undefined keeps the channel cleartext. */
   readonly daemonPublicKey?: string | null;
+  /** Test seam: the browser identity keypair source (defaults to the IndexedDB-persisted identity). */
+  readonly keyPairFactory?: Parameters<typeof createBrowserSessionCipher>[1];
   readonly onStatus: (status: ConnectionStatus) => void;
   /** Every inbound session frame (everything except the `hello.ack` handshake and `session.key`). */
   readonly onEvent: (envelope: Envelope) => void;
@@ -89,7 +91,9 @@ export interface RelayConnection {
 export function createRelayConnection(options: RelayConnectionOptions): RelayConnection {
   const createSocket = options.createSocket ?? ((url: string) => new WebSocket(url));
   const getChannelToken = options.getChannelToken;
-  const cipher = createBrowserSessionCipher(options.daemonPublicKey);
+  const cipher = options.keyPairFactory
+    ? createBrowserSessionCipher(options.daemonPublicKey, options.keyPairFactory)
+    : createBrowserSessionCipher(options.daemonPublicKey);
   let socket: WebSocket | null = null;
   // Reconnect state: an unexpected drop auto-redials (reopen is a reconnect — architecture invariant #7);
   // an intentional close() does not. `hasConnected` distinguishes the first handshake from a reconnect so
@@ -140,6 +144,23 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       return buildFrame(type, { sessionId, payload: sealed.payload, nonce: sealed.nonce });
     }
     return buildFrame(type, { sessionId, payload });
+  }
+
+  // Sessions with a key re-request in flight (self-healing): asked once, cleared when the key lands.
+  const pendingKeyRequests = new Set<string>();
+
+  /** Subscribe to a session, announcing this browser's pubkey so the daemon (re-)delivers its key. */
+  function sendSubscribe(sessionId: string): void {
+    enqueueSend(async () => {
+      // Subscribe stays cleartext (`{}`) — it carries no secret — but announces the browser pubkey so
+      // the daemon re-delivers the content key for this (possibly reopened) browser.
+      const senderPublicKey = await cipher.publicKey();
+      return buildFrame('session.subscribe', {
+        sessionId,
+        payload: {},
+        ...(senderPublicKey !== undefined ? { senderPublicKey } : {}),
+      });
+    });
   }
 
   /** Dial the relay and wire one socket's lifecycle. Called on first connect and on every reconnect. */
@@ -215,6 +236,8 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     if (envelope.type === 'session.key') {
       // Transport message: store the content key, never surface it to the UI.
       await cipher.receiveKey(envelope);
+      // The key landed — a future loss for this session may self-heal again (see below).
+      if (envelope.session_id !== undefined) pendingKeyRequests.delete(envelope.session_id);
       return;
     }
     if (envelope.type === 'adopt.state') {
@@ -231,6 +254,23 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       return;
     }
     const result = await cipher.tryDecrypt(envelope);
+    // Key self-healing: an ENCRYPTED frame we hold no key for means the session's key was missed (the
+    // classic case: this browser subscribed inside the adopted-session announce window, before the
+    // daemon established the key). Re-subscribe — once per session until a key arrives — so the daemon
+    // re-delivers the key and an encrypted backfill. Without this the session stays undecryptable and
+    // a decision would go out cleartext into a keyed daemon, which drops it (a stuck gate).
+    const sessionId = envelope.session_id;
+    if (
+      !result.decrypted &&
+      cipher.enabled &&
+      sessionId !== undefined &&
+      envelope.nonce !== '' &&
+      typeof envelope.payload === 'string' &&
+      !pendingKeyRequests.has(sessionId)
+    ) {
+      pendingKeyRequests.add(sessionId);
+      sendSubscribe(sessionId);
+    }
     options.onEvent(result.decrypted ? { ...envelope, payload: result.payload } : envelope);
   }
 
@@ -251,16 +291,7 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       });
     },
     subscribe(sessionId: string): void {
-      enqueueSend(async () => {
-        // Subscribe stays cleartext (`{}`) — it carries no secret — but announces the browser pubkey so
-        // the daemon re-delivers the content key for this (possibly reopened) browser.
-        const senderPublicKey = await cipher.publicKey();
-        return buildFrame('session.subscribe', {
-          sessionId,
-          payload: {},
-          ...(senderPublicKey !== undefined ? { senderPublicKey } : {}),
-        });
-      });
+      sendSubscribe(sessionId);
     },
     sendUserMessage(sessionId: string, text: string): void {
       enqueueSend(() => sessionFrame('user.message', sessionId, { text }));
