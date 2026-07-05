@@ -13,7 +13,7 @@ import {
   type AgentRunResult,
 } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
-import { startFakeRelay, type FakeRelay } from './fake-relay';
+import { markViewerPresent, startFakeRelay, type FakeRelay } from './fake-relay';
 
 /**
  * Free-form handover & resume, end-to-end through the daemon (Journey 4 walking skeleton): an adopted
@@ -74,25 +74,6 @@ async function adopt(relay: FakeRelay, socketPath: string): Promise<void> {
   });
   ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
   await first;
-}
-
-/**
- * Tell the daemon a browser is watching (relay `viewer.presence`), so a consequential tool is held for a
- * remote approval rather than deferred to the local prompt. The echo round-trip is an in-order barrier.
- */
-async function markViewerPresent(relay: FakeRelay): Promise<void> {
-  relay.send(
-    makeEnvelope({
-      type: 'viewer.presence',
-      userId: USER,
-      deviceId: DEVICE,
-      payload: { online: true },
-    }),
-  );
-  relay.send(
-    makeEnvelope({ type: 'echo', userId: USER, deviceId: DEVICE, payload: { text: 'barrier' } }),
-  );
-  await relay.waitForFrame((e) => e.type === 'echo.reply');
 }
 
 describe('daemon: free-form handover & resume', () => {
@@ -396,7 +377,7 @@ describe('daemon: free-form handover & resume', () => {
   it('does not offer a handover while a permission gate is already pending', async () => {
     await start(createFakeAgentAdapter([]));
     await adopt(relay, socketPath);
-    await markViewerPresent(relay); // a browser is watching, so the consequential tool is gated remotely
+    await markViewerPresent(relay, USER, DEVICE); // a browser is watching → the consequential tool is gated
 
     // A consequential tool blocks on the approval gate → the session is awaiting_input.
     const gate = hookRpc(socketPath, {

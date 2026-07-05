@@ -399,6 +399,17 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       });
       log.info({ channel, sessionId: envelope.session_id }, 'relay: session resumed');
     }
+    // Presence frames are relay-generated routing metadata (`viewer.presence` relay→daemon, `device.presence`
+    // relay→browser) — never legitimately browser-originated. Drop them so an authenticated browser can't
+    // forge a `viewer.presence` to flip the daemon's adopted-session gating: the relay is the sole authority
+    // on whether anyone is watching.
+    if (envelope.type === 'viewer.presence' || envelope.type === 'device.presence') {
+      log.warn(
+        { channel, type: envelope.type },
+        'relay: dropped a relay-internal frame from a browser',
+      );
+      return;
+    }
     if (daemon) {
       daemon.send(text);
     } else {

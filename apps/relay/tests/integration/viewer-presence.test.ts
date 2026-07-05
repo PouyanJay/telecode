@@ -1,6 +1,6 @@
 import type { AddressInfo } from 'node:net';
 
-import { makeEnvelope, type Envelope } from '@telecode/protocol';
+import { makeEnvelope, viewerPresencePayloadSchema, type Envelope } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { pino } from 'pino';
 import WebSocket from 'ws';
@@ -16,7 +16,8 @@ import { connectBrowser, connectDaemon, waitForEnvelope } from '../_helpers/ws';
  * session). Registry-less relay — pure routing metadata the relay generates itself, so this needs no Postgres.
  */
 const isViewerPresence = (e: Envelope): boolean => e.type === 'viewer.presence';
-const isOnline = (e: Envelope): boolean => (e.payload as { online: boolean }).online;
+// Parse via the schema (not a cast) so the test also proves the relay emits a well-formed viewer.presence.
+const isOnline = (e: Envelope): boolean => viewerPresencePayloadSchema.parse(e.payload).online;
 // Polarity-specific predicates: a daemon connecting cold receives a `viewer.presence(false)` at
 // registration, so a transition assertion must match the exact polarity, not just the type.
 const viewerOnline = (e: Envelope): boolean => isViewerPresence(e) && isOnline(e);

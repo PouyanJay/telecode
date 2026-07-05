@@ -9,14 +9,15 @@ import { adoptedGateDecision } from './adopted-gate-decision';
  * own checks).
  */
 describe('adoptedGateDecision', () => {
-  it('defers wholesale in the modes Claude Code never prompts in (bypass / auto / dontAsk)', () => {
-    for (const mode of ['bypassPermissions', 'auto', 'dontAsk']) {
+  it.each(['bypassPermissions', 'auto', 'dontAsk'])(
+    'defers wholesale in %s mode (Claude Code never prompts, so telecode must not either)',
+    (mode) => {
       expect(adoptedGateDecision('Bash', mode)).toBe('defer');
       expect(adoptedGateDecision('Edit', mode)).toBe('defer');
       expect(adoptedGateDecision('Read', mode)).toBe('defer');
       expect(adoptedGateDecision('AskUserQuestion', mode)).toBe('defer');
-    }
-  });
+    },
+  );
 
   it('gates consequential tools under default mode, allows read-only ones', () => {
     expect(adoptedGateDecision('Bash', 'default')).toBe('gate');
