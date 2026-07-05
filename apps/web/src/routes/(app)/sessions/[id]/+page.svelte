@@ -91,12 +91,13 @@
   // concurrent tool calls several gates can be open at once; resolving the first-pending would apply the
   // click to the wrong request — the operator clicks one gate and a different one resolves. Threading the
   // requestId (like onAnswer / onHandover already do) keeps each gate independently actionable.
-  function onDecide(requestId: string, behavior: 'allow' | 'deny'): void {
+  function onDecide(requestId: string, behavior: 'allow' | 'deny', message?: string): void {
     decide(
       sessionId,
       behavior === 'allow'
         ? { requestId, behavior: 'allow' }
-        : { requestId, behavior: 'deny' },
+        : // A rejection note rides the protocol's deny message — the agent reads it as guidance.
+          { requestId, behavior: 'deny', ...(message !== undefined ? { message } : {}) },
     );
   }
 
@@ -168,7 +169,7 @@
           entries={session.entries}
           offline={session.status === 'offline_paused'}
           onapprove={(requestId) => onDecide(requestId, 'allow')}
-          onreject={(requestId) => onDecide(requestId, 'deny')}
+          onreject={(requestId, message) => onDecide(requestId, 'deny', message)}
           onanswer={onAnswer}
           onhandover={onHandover}
         />

@@ -19,13 +19,29 @@
     entry,
     onapprove,
     onreject,
-  }: { entry: PermissionEntry; onapprove: () => void; onreject: () => void } = $props();
+  }: {
+    entry: PermissionEntry;
+    onapprove: () => void;
+    /** Reject the tool; `message` (when the operator wrote a note) is relayed to the agent as guidance. */
+    onreject: (message?: string) => void;
+  } = $props();
 
   const inputJson = $derived(JSON.stringify(entry.input, null, 2));
   const isInFlight = $derived(entry.decision === 'approving' || entry.decision === 'rejecting');
   // A file-mutating tool shows its proposed change as a diff (the signature human-in-the-loop view);
   // anything else falls back to the raw, monospace input.
   const diff = $derived(buildFileDiff(entry.toolName, entry.input));
+
+  // Deny-with-note: the note reveal is per-gate local state; a plain Reject needs no note.
+  let noting = $state(false);
+  let note = $state('');
+
+  function rejectWithNote(): void {
+    const message = note.trim();
+    onreject(message === '' ? undefined : message);
+    noting = false;
+    note = '';
+  }
 </script>
 
 <section class="gate" data-state={entry.decision} aria-label="Permission request">
@@ -41,10 +57,34 @@
   {/if}
 
   {#if entry.decision === 'pending'}
-    <div class="actions">
-      <Button variant="primary" onclick={onapprove}>Approve</Button>
-      <Button variant="secondary" onclick={onreject}>Reject</Button>
-    </div>
+    {#if noting}
+      <div class="note-form">
+        <!-- svelte-ignore a11y_autofocus — the reveal is the operator's own click; focus follows intent. -->
+        <textarea
+          class="note-input"
+          rows="2"
+          placeholder="Tell the agent why, or what to do instead…"
+          bind:value={note}
+          autofocus
+          onkeydown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') rejectWithNote();
+            if (e.key === 'Escape') (noting = false), (note = '');
+          }}
+        ></textarea>
+        <div class="actions">
+          <Button variant="danger" size="sm" onclick={rejectWithNote}>Reject with note</Button>
+          <Button variant="ghost" size="sm" onclick={() => ((noting = false), (note = ''))}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    {:else}
+      <div class="actions">
+        <Button variant="primary" onclick={onapprove}>Approve</Button>
+        <Button variant="secondary" onclick={() => onreject()}>Reject</Button>
+        <Button variant="ghost" onclick={() => (noting = true)}>Reject with note…</Button>
+      </div>
+    {/if}
   {:else if isInFlight}
     <p class="status-line" role="status">
       <span class="spinner" aria-hidden="true"></span>
@@ -97,6 +137,28 @@
   .actions {
     display: flex;
     gap: var(--space-2);
+  }
+  .note-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .note-input {
+    width: 100%;
+    resize: vertical;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: var(--lh-base);
+  }
+  .note-input:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--focus-ring);
   }
   .status-line {
     display: inline-flex;

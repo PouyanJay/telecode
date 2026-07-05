@@ -27,7 +27,7 @@
     /** The device is offline — degrades a pending free-form handover to its "answer at your device" state. */
     offline?: boolean;
     onapprove: (requestId: string) => void;
-    onreject: (requestId: string) => void;
+    onreject: (requestId: string, message?: string) => void;
     onanswer: (requestId: string, answers: QuestionAnswerItem[]) => void;
     onhandover: (requestId: string, answerText: string) => void;
   } = $props();
@@ -74,7 +74,7 @@
         <PermissionGate
           {entry}
           onapprove={() => onapprove(entry.requestId)}
-          onreject={() => onreject(entry.requestId)}
+          onreject={(message) => onreject(entry.requestId, message)}
         />
       {:else if entry.kind === 'question'}
         <QuestionGate {entry} onanswer={(answers) => onanswer(entry.requestId, answers)} />
