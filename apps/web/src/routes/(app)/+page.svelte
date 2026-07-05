@@ -1,19 +1,23 @@
 <script lang="ts">
   import { Button } from '@telecode/ui';
 
+  import InboxCard from '$lib/components/InboxCard.svelte';
   import Onboarding from '$lib/components/Onboarding.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import SessionGroupHeader from '$lib/components/SessionGroupHeader.svelte';
   import SessionRow from '$lib/components/SessionRow.svelte';
   import { deviceStatus } from '$lib/devices';
+  import { buildInboxAsks } from '$lib/inbox';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildOnboardingSteps } from '$lib/onboarding';
   import { pairingInstructions } from '$lib/pairing-instructions';
   import { buildSessionRows, groupSessions, sessionCounts } from '$lib/session-groups';
   import {
     connectionState,
+    decide,
     sessions as liveSessions,
+    subscribe,
     watchedDaemonOnline,
   } from '$lib/session-store';
   import type { PageData } from './$types';
@@ -21,6 +25,53 @@
   let { data }: { data: PageData } = $props();
 
   const device = $derived(data.devices[0] ?? null);
+
+  // Bring every awaiting session live so its pending asks are actionable from the inbox (the daemon
+  // backfills each via session.history). Once-per-session (the set), not once-per-render.
+  const requestedSubscribes = new Set<string>();
+  $effect(() => {
+    if ($connectionState !== 'connected') return;
+    for (const s of data.sessions) {
+      if (s.status === 'awaiting_input' && !requestedSubscribes.has(s.id)) {
+        requestedSubscribes.add(s.id);
+        subscribe(s.id);
+      }
+    }
+  });
+
+  // One shared clock for the waiting pills (30s resolution — the labels are minutes-level).
+  const INBOX_CLOCK_INTERVAL_MS = 30_000;
+  let now = $state(Date.now());
+  $effect(() => {
+    const timer = setInterval(() => (now = Date.now()), INBOX_CLOCK_INTERVAL_MS);
+    return () => clearInterval(timer);
+  });
+
+  const asks = $derived(
+    buildInboxAsks({
+      live: $liveSessions,
+      titleOf: (id) => data.sessions.find((s) => s.id === id)?.title ?? null,
+      deviceNameOf: (id) => {
+        const row = data.sessions.find((s) => s.id === id);
+        return row
+          ? (data.devices.find((d) => d.id === row.deviceId)?.name ?? null)
+          : (device?.name ?? null);
+      },
+    }),
+  );
+  // Awaiting sessions whose asks aren't live yet (subscribe still in flight) fall back to plain rows.
+  const askSessionIds = $derived(new Set(asks.map((a) => a.sessionId)));
+
+  function onInboxApprove(sessionId: string, requestId: string): void {
+    decide(sessionId, { requestId, behavior: 'allow' });
+  }
+  function onInboxReject(sessionId: string, requestId: string, message?: string): void {
+    decide(sessionId, {
+      requestId,
+      behavior: 'deny',
+      ...(message !== undefined ? { message } : {}),
+    });
+  }
 
   // The persisted registry overlaid with live status — built by the ONE shared merge (buildSessionRows),
   // the same source the system bar counts from, so the two surfaces can never disagree.
@@ -97,10 +148,19 @@
       </div>
     {:else}
       <div class="list">
-        {#if groups.awaiting.length > 0}
-          <SessionGroupHeader label="Needs your decision" />
+        {#if asks.length > 0 || groups.awaiting.length > 0}
+          <SessionGroupHeader label="Needs you" />
+          {#if asks.length > 0}
+            <ul class="asks" role="list" aria-live="polite">
+              {#each asks as ask (`${ask.sessionId}:${ask.requestId}`)}
+                <li>
+                  <InboxCard {ask} {now} onapprove={onInboxApprove} onreject={onInboxReject} />
+                </li>
+              {/each}
+            </ul>
+          {/if}
           <ul class="rows" role="list">
-            {#each groups.awaiting as row (row.id)}
+            {#each groups.awaiting.filter((row) => !askSessionIds.has(row.id)) as row (row.id)}
               <li><SessionRow {row} /></li>
             {/each}
           </ul>
@@ -180,6 +240,14 @@
     list-style: none;
     margin: 0;
     padding: 0;
+  }
+  .asks {
+    list-style: none;
+    margin: 0 0 var(--space-2);
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 
   .empty {

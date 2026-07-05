@@ -1,14 +1,18 @@
 <script lang="ts">
   /**
-   * A non-blocking "needs attention" banner for an adopted session (enterprise-ui, Journey 3). It surfaces
-   * Claude Code's own `Notification` text (e.g. the session went idle waiting for input) — a soft cue, not a
-   * gate, so it is dismissible and uses the amber accent as a scalpel (the "awaiting input" signal colour).
-   * The reducer clears the notice the moment the session next moves, so this is inherently transient.
+   * A non-blocking banner for a session (enterprise-ui). `attention` (default) surfaces Claude Code's
+   * own `Notification` text (e.g. the session went idle) in the amber "awaiting input" signal colour;
+   * `danger` surfaces a failure the user must know about (e.g. an undelivered action). A soft cue, not a
+   * gate — dismissible, and the reducer clears it the moment the session next moves.
    */
-  let { message, ondismiss }: { message: string; ondismiss: () => void } = $props();
+  let {
+    message,
+    tone = 'attention',
+    ondismiss,
+  }: { message: string; tone?: 'attention' | 'danger'; ondismiss: () => void } = $props();
 </script>
 
-<div class="notice" role="status">
+<div class="notice" data-tone={tone} role={tone === 'danger' ? 'alert' : 'status'}>
   <span class="dot" aria-hidden="true"></span>
   <p class="msg">{message}</p>
   <button class="dismiss" type="button" onclick={ondismiss} aria-label="Dismiss this notice">
@@ -26,12 +30,19 @@
     border-bottom: 1px solid var(--border);
     border-left: 2px solid var(--accent);
   }
+  .notice[data-tone='danger'] {
+    background: var(--danger-soft);
+    border-left-color: var(--danger);
+  }
   .dot {
     width: 8px;
     height: 8px;
     flex: none;
     border-radius: var(--radius-full);
     background: var(--accent);
+  }
+  .notice[data-tone='danger'] .dot {
+    background: var(--danger);
   }
   .msg {
     flex: 1;

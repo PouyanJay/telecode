@@ -461,3 +461,70 @@ describe('session reducer: free-form handover (Journey 4)', () => {
     expect(handover?.kind === 'handover' && handover.state).toBe('pending');
   });
 });
+
+describe('session reducer: relay.error (undelivered action, approval-reliability T4)', () => {
+  function withPendingGate(): SessionState {
+    return fold([
+      frame('session.started', {}),
+      frame('agent.permission_request', {
+        requestId: 'req-1',
+        toolName: 'Bash',
+        input: { command: 'echo hi' },
+      }),
+    ]);
+  }
+
+  it('reverts an in-flight decision to pending and surfaces the delivery error', () => {
+    const deciding = markDeciding(withPendingGate(), 'req-1', 'allow');
+    const after = applyEnvelope(
+      deciding,
+      frame('relay.error', { code: 'device_offline', regarding: 'permission.decision' }),
+    );
+    const entry = after.entries.find((e) => e.kind === 'permission');
+    expect(entry && 'decision' in entry ? entry.decision : undefined).toBe('pending');
+    expect(after.deliveryError).not.toBeNull();
+    expect(after.status).toBe('offline_paused');
+  });
+
+  it('reverts an in-flight question answer and handover takeover to pending', () => {
+    let state = fold([
+      frame('session.started', {}),
+      frame('agent.question', { requestId: 'q-1', questions: [DB_QUESTION] }),
+      frame('agent.handover', { requestId: 'h-1', question: 'Continue?', summary: '' }),
+    ]);
+    state = markAnswering(state, 'q-1', [{ selectedLabels: ['Postgres'] }]);
+    state = markHandoverSubmitting(state, 'h-1', 'yes, do it');
+    const after = applyEnvelope(
+      state,
+      frame('relay.error', { code: 'device_offline', regarding: 'question.answer' }),
+    );
+    const question = after.entries.find((e) => e.kind === 'question');
+    const handover = after.entries.find((e) => e.kind === 'handover');
+    expect(question && 'answer' in question ? question.answer : undefined).toBe('pending');
+    expect(handover && 'state' in handover ? handover.state : undefined).toBe('pending');
+  });
+
+  it('keeps a terminal status terminal (only the error is surfaced)', () => {
+    const done = applyEnvelope(withPendingGate(), frame('session.ended', { status: 'done' }));
+    const after = applyEnvelope(
+      done,
+      frame('relay.error', { code: 'device_offline', regarding: 'user.message' }),
+    );
+    expect(after.status).toBe('done');
+    expect(after.deliveryError).not.toBeNull();
+  });
+
+  it('clears the delivery error the moment any other frame arrives (the channel works again)', () => {
+    const errored = applyEnvelope(
+      withPendingGate(),
+      frame('relay.error', { code: 'device_offline', regarding: 'user.message' }),
+    );
+    const recovered = applyEnvelope(errored, frame('agent.message', { text: 'back online' }));
+    expect(recovered.deliveryError).toBeNull();
+  });
+
+  it('ignores a malformed relay.error payload', () => {
+    const state = withPendingGate();
+    expect(applyEnvelope(state, frame('relay.error', { nope: true }))).toBe(state);
+  });
+});

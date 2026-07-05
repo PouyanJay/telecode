@@ -164,6 +164,18 @@ export const devicePresencePayloadSchema = z.object({ online: z.boolean() });
 export type DevicePresencePayload = z.infer<typeof devicePresencePayloadSchema>;
 
 /**
+ * Payload for `relay.error` (relay → web): a browser frame could not be delivered. `code` names why
+ * (only `device_offline` today); `regarding` is the message type of the frame that failed, so the UI
+ * can un-spin exactly the action that went nowhere (a decision, an answer, a follow-up…) instead of
+ * pretending it was acted on. Relay-generated cleartext routing metadata — never a session payload.
+ */
+export const relayErrorPayloadSchema = z.object({
+  code: z.enum(['device_offline']),
+  regarding: z.string().min(1),
+});
+export type RelayErrorPayload = z.infer<typeof relayErrorPayloadSchema>;
+
+/**
  * Payload for `viewer.presence` (relay → daemon): the mirror of `device.presence`. Whether ANY browser is
  * currently connected on the daemon's channel. The relay sends it when the browser count crosses 0↔1 (and
  * once on daemon registration), so the daemon knows whether a remote operator is present to approve a tool

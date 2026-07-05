@@ -70,6 +70,9 @@ import { type WorktreeManager } from './sessions/worktree-manager';
 /** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
 const HANDOVER_TITLE_PREVIEW_CHARS = 60;
 
+/** Default gate timeout: long enough to reach a phone, short enough to never strand a turn overnight. */
+const DEFAULT_GATE_TIMEOUT_MS = 30 * 60_000;
+
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
  * reaches in), announces itself for `(userId, deviceId)`, and supervises work for that
@@ -93,6 +96,13 @@ export interface DaemonOptions {
   readonly keyPair?: { readonly publicKey: string; readonly privateKey: string };
   /** Agent runtime. Defaults to the real Claude Agent SDK adapter; tests inject a fake. */
   readonly agentAdapter?: AgentAdapter;
+  /**
+   * How long a permission gate (or adopted-session question) may wait for an operator decision before
+   * the daemon settles it itself — deny for a gate, fail-closed for a question — so an unanswered
+   * approval can never block an agent turn forever. Watching browsers are un-stuck via a pushed
+   * `session.history`. Defaults to 30 minutes; `<= 0` disables the timer. Env: `TELECODE_GATE_TIMEOUT_MS`.
+   */
+  readonly gateTimeoutMs?: number;
   /**
    * Cuts a git worktree per session (Phase 2). When provided, a session that resolves a repo runs in its
    * own worktree cwd so parallel agents never clobber each other's files. Omitted falls back to the
@@ -207,21 +217,28 @@ export function createDaemon(options: DaemonOptions): Daemon {
       .catch((err: unknown) => log.error({ err }, 'daemon: failed to send a frame'));
   }
 
+  // A gate with no decision must never block a turn forever (approval-reliability T2).
+  const gateTimeoutMs = options.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
+  interface PendingPermission {
+    sessionId: string | undefined;
+    resolve: (decision: PermissionDecision) => void;
+    /** The gate-timeout timer (absent when timeouts are disabled); cleared on any other settle. */
+    timer?: ReturnType<typeof setTimeout>;
+  }
+  interface PendingQuestion {
+    sessionId: string | undefined;
+    resolve: (answers: QuestionAnswerItem[] | null) => void;
+    timer?: ReturnType<typeof setTimeout>;
+  }
   // Tool requests the agent is blocked on, keyed by the correlation id we send to the browser; each is
   // resolved when its matching `permission.decision` returns. Single-session in Phase 1, but keyed so it
   // stays correct as sessions multiply.
   // Carries the owning `sessionId` alongside the resolver so end/interrupt can settle a session's gates.
-  const pendingPermissions = new Map<
-    string,
-    { sessionId: string | undefined; resolve: (decision: PermissionDecision) => void }
-  >();
+  const pendingPermissions = new Map<string, PendingPermission>();
   // Adopted-session questions the hook is blocked on (Journey 2), keyed by the same correlation id we send
   // to the browser; each resolves when its `question.answer` returns. `null` settles it fail-closed (the
   // daemon is stopping, or the turn was interrupted/ended) so the hook defers to Claude Code's own picker.
-  const pendingQuestions = new Map<
-    string,
-    { sessionId: string | undefined; resolve: (answers: QuestionAnswerItem[] | null) => void }
-  >();
+  const pendingQuestions = new Map<string, PendingQuestion>();
   // Free-form handover offers awaiting the user's answer (Journey 4), keyed by the correlation id sent to
   // the browser as `agent.handover`. Unlike `pendingPermissions`/`pendingQuestions` this is NOT a blocking
   // gate (the `Stop` hook already returned — the external process is idle): it is action-context storage so a
@@ -404,6 +421,71 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
+   * Arm the gate timeout for a pending permission/question. After `gateTimeoutMs`, `settle` runs — it
+   * returns true when it actually settled a still-pending gate — and watchers then get a PUSHED
+   * `session.history`: they took no action, so nothing else would ever tell them the gate resolved.
+   * The caller stores the returned timer on ITS pending entry, so every other settle path clears it.
+   * `<= 0` disables (returns undefined).
+   */
+  function armGateTimeout(
+    source: Envelope,
+    settle: () => boolean,
+  ): ReturnType<typeof setTimeout> | undefined {
+    if (gateTimeoutMs <= 0) return undefined;
+    const timer = setTimeout(() => {
+      if (settle()) {
+        sendForSession(source, 'session.history', historyPayloadFor(source.session_id));
+      }
+    }, gateTimeoutMs);
+    // Never hold the process open for a distant gate deadline.
+    timer.unref();
+    return timer;
+  }
+
+  /**
+   * Record a permission gate's verdict on its transcript entry and resume the session — the one shape
+   * shared by the manual `permission.decision` path and the gate timeout.
+   */
+  function settlePermissionEntry(
+    sessionId: string | undefined,
+    requestId: string,
+    verdict: 'allow' | 'deny',
+  ): void {
+    if (sessionId === undefined) return;
+    const entry = sessionRecords
+      .get(sessionId)
+      ?.transcript.find(
+        (e): e is Extract<SessionHistoryEntry, { kind: 'permission' }> =>
+          e.kind === 'permission' && e.requestId === requestId,
+      );
+    if (entry) entry.decision = verdict;
+    setStatus(sessionId, 'running');
+  }
+
+  /**
+   * Record a question's answers (when given) on its transcript entry and resume the session — shared by
+   * the manual `question.answer` path and the question timeout (which records nothing: the wire derives
+   * pending from missing `answers`, so an expired ask stays honestly as-asked).
+   */
+  function settleQuestionEntry(
+    sessionId: string | undefined,
+    requestId: string,
+    answers?: QuestionAnswerItem[],
+  ): void {
+    if (sessionId === undefined) return;
+    if (answers !== undefined) {
+      const entry = sessionRecords
+        .get(sessionId)
+        ?.transcript.find(
+          (e): e is Extract<SessionHistoryEntry, { kind: 'question' }> =>
+            e.kind === 'question' && e.requestId === requestId,
+        );
+      if (entry) entry.answers = answers;
+    }
+    setStatus(sessionId, 'running');
+  }
+
+  /**
    * The human-in-the-loop gate: decide whether a tool the agent wants to run may proceed. Telecode's
    * own policy ({@link classifyTool}) is authoritative — a read-only tool auto-runs (no prompt, no
    * round-trip), while every consequential tool is forwarded to the browser as `agent.permission_request`
@@ -438,7 +520,27 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
     setStatus(source.session_id, 'awaiting_input');
     return new Promise<PermissionDecision>((resolve) => {
-      pendingPermissions.set(requestId, { sessionId: source.session_id, resolve });
+      const pending: PendingPermission = { sessionId: source.session_id, resolve };
+      pendingPermissions.set(requestId, pending);
+      const timer = armGateTimeout(source, () => {
+        if (!pendingPermissions.delete(requestId)) return false;
+        settlePermissionEntry(pending.sessionId, requestId, 'deny');
+        log.warn(
+          {
+            deviceId: options.deviceId,
+            sessionId: pending.sessionId,
+            requestId,
+            tool: request.toolName,
+          },
+          'daemon: permission gate timed out — denied',
+        );
+        resolve({
+          behavior: 'deny',
+          message: 'No operator decided in time — denied automatically by the gate timeout.',
+        });
+        return true;
+      });
+      if (timer) pending.timer = timer;
       log.info(
         {
           deviceId: options.deviceId,
@@ -470,7 +572,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
     record(source.session_id, { kind: 'question', requestId, questions });
     setStatus(source.session_id, 'awaiting_input');
     return new Promise<QuestionAnswerItem[] | null>((resolve) => {
-      pendingQuestions.set(requestId, { sessionId: source.session_id, resolve });
+      const pending: PendingQuestion = { sessionId: source.session_id, resolve };
+      pendingQuestions.set(requestId, pending);
+      const timer = armGateTimeout(source, () => {
+        if (!pendingQuestions.delete(requestId)) return false;
+        settleQuestionEntry(pending.sessionId, requestId);
+        log.warn(
+          { deviceId: options.deviceId, sessionId: pending.sessionId, requestId },
+          'daemon: question timed out — deferring to the local picker',
+        );
+        resolve(null);
+        return true;
+      });
+      if (timer) pending.timer = timer;
       log.info(
         { deviceId: options.deviceId, sessionId: source.session_id, requestId },
         'daemon: question relayed to browser',
@@ -504,6 +618,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
       if (entry) entry.decision = 'deny';
       pendingPermissions.delete(requestId);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.resolve({ behavior: 'deny', message: reason });
     }
     // Release any adopted-session question the hook is blocked on for this session — same deadlock guard as
@@ -512,6 +627,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     for (const [requestId, pending] of pendingQuestions) {
       if (pending.sessionId !== sessionId) continue;
       pendingQuestions.delete(requestId);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.resolve(null);
     }
     const abort = sessionAborts.get(sessionId);
@@ -870,15 +986,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // that doesn't hold it (e.g. after a restart) can't backfill — report it not-live so the UI
         // falls back to the registry status instead of showing a phantom transcript.
         const sessionId = envelope.session_id;
-        // E2E reconnect: re-deliver the session key to the (possibly new) browser pubkey it announced, so
-        // it can decrypt the backfilled history that follows. Subscribe itself stays cleartext (`{}`).
-        if (
-          cipher.enabled &&
-          envelope.sender_public_key !== undefined &&
-          sessionId !== undefined &&
-          cipher.isEncrypted(sessionId)
-        ) {
-          deliverKey(envelope, envelope.sender_public_key);
+        // E2E (re)keying: deliver the session key to the browser pubkey it announced, so it can decrypt
+        // the backfilled history that follows. For a session the daemon KNOWS but has no key for yet —
+        // a restored session after a restart, or an adopted one whose announce beat its establish —
+        // mint the key now (idempotent): a subscribe must never be answered with a cleartext backfill,
+        // and a keyless browser must never be left unable to decrypt a live gate (the "dropped
+        // permission.decision" stuck-approval bug). Unknown ids never mint keys (bounded).
+        if (cipher.enabled && envelope.sender_public_key !== undefined && sessionId !== undefined) {
+          if (!cipher.isEncrypted(sessionId) && sessionRecords.has(sessionId)) {
+            cipher.establish(sessionId);
+          }
+          if (cipher.isEncrypted(sessionId)) {
+            deliverKey(envelope, envelope.sender_public_key);
+          }
         }
         const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
         log.info(
@@ -913,19 +1033,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
           return;
         }
         pendingPermissions.delete(decision.data.requestId);
+        if (pending.timer) clearTimeout(pending.timer);
         // Record the verdict on the gate so a later backfill shows it decided, and resume the session.
-        // In-place on the daemon's own mutable record (single-threaded; no await between find and write).
-        const sessionId = envelope.session_id;
-        if (sessionId !== undefined) {
-          const entry = sessionRecords
-            .get(sessionId)
-            ?.transcript.find(
-              (e): e is Extract<SessionHistoryEntry, { kind: 'permission' }> =>
-                e.kind === 'permission' && e.requestId === decision.data.requestId,
-            );
-          if (entry) entry.decision = decision.data.behavior;
-          setStatus(sessionId, 'running');
-        }
+        settlePermissionEntry(envelope.session_id, decision.data.requestId, decision.data.behavior);
         log.info(
           {
             deviceId: options.deviceId,
@@ -959,18 +1069,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
           return;
         }
         pendingQuestions.delete(answer.data.requestId);
+        if (pending.timer) clearTimeout(pending.timer);
         // Record the answer on the question entry so a later backfill shows it answered, then resume.
-        const sessionId = envelope.session_id;
-        if (sessionId !== undefined) {
-          const entry = sessionRecords
-            .get(sessionId)
-            ?.transcript.find(
-              (e): e is Extract<SessionHistoryEntry, { kind: 'question' }> =>
-                e.kind === 'question' && e.requestId === answer.data.requestId,
-            );
-          if (entry) entry.answers = answer.data.answers;
-          setStatus(sessionId, 'running');
-        }
+        settleQuestionEntry(envelope.session_id, answer.data.requestId, answer.data.answers);
         log.info(
           { deviceId: options.deviceId, requestId: answer.data.requestId },
           'daemon: question answered',
@@ -1770,13 +1871,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
       // Unblock any in-flight turns waiting on a human decision (incl. an adopted session's hook, which is
       // blocking the hook socket) so their runs finish instead of hanging on a closed socket. Settle BEFORE
       // stopping the hook socket, so a blocked hook gets its response rather than a dropped connection.
-      for (const { resolve } of pendingPermissions.values()) {
+      for (const { resolve, timer } of pendingPermissions.values()) {
+        if (timer) clearTimeout(timer);
         resolve({ behavior: 'deny', message: 'daemon stopping' });
       }
       pendingPermissions.clear();
       // Likewise release any adopted-session question the hook is blocked on — `null` fails it closed so the
       // hook defers to Claude Code's local picker (never auto-answered). Same J1 deadlock guard as above.
-      for (const { resolve } of pendingQuestions.values()) {
+      for (const { resolve, timer } of pendingQuestions.values()) {
+        if (timer) clearTimeout(timer);
         resolve(null);
       }
       pendingQuestions.clear();

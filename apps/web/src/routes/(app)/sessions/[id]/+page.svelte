@@ -37,6 +37,11 @@
   // dismissed so it stays hidden until a NEW notice (different text) arrives.
   let dismissedNotice = $state<string | null>(null);
   const showNotice = $derived(session.notice !== null && session.notice !== dismissedNotice);
+  // Same pattern for a delivery failure (relay.error): the user's action went nowhere — say so.
+  let dismissedDeliveryError = $state<string | null>(null);
+  const showDeliveryError = $derived(
+    session.deliveryError !== null && session.deliveryError !== dismissedDeliveryError,
+  );
 
   const display = $derived(SESSION_DISPLAY[session.status]);
   const isBusy = $derived(
@@ -86,12 +91,13 @@
   // concurrent tool calls several gates can be open at once; resolving the first-pending would apply the
   // click to the wrong request — the operator clicks one gate and a different one resolves. Threading the
   // requestId (like onAnswer / onHandover already do) keeps each gate independently actionable.
-  function onDecide(requestId: string, behavior: 'allow' | 'deny'): void {
+  function onDecide(requestId: string, behavior: 'allow' | 'deny', message?: string): void {
     decide(
       sessionId,
       behavior === 'allow'
         ? { requestId, behavior: 'allow' }
-        : { requestId, behavior: 'deny' },
+        : // A rejection note rides the protocol's deny message — the agent reads it as guidance.
+          { requestId, behavior: 'deny', ...(message !== undefined ? { message } : {}) },
     );
   }
 
@@ -129,6 +135,13 @@
           ← Continued from an adopted session
         </a>
       {/if}
+      {#if known && showDeliveryError && session.deliveryError}
+        <SessionNotice
+          message={session.deliveryError}
+          tone="danger"
+          ondismiss={() => (dismissedDeliveryError = session.deliveryError)}
+        />
+      {/if}
       {#if known && showNotice && session.notice}
         <SessionNotice
           message={session.notice}
@@ -156,7 +169,7 @@
           entries={session.entries}
           offline={session.status === 'offline_paused'}
           onapprove={(requestId) => onDecide(requestId, 'allow')}
-          onreject={(requestId) => onDecide(requestId, 'deny')}
+          onreject={(requestId, message) => onDecide(requestId, 'deny', message)}
           onanswer={onAnswer}
           onhandover={onHandover}
         />

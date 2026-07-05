@@ -1,4 +1,9 @@
-import { makeEnvelope } from '@telecode/protocol';
+import {
+  encodeKey,
+  generateIdentityKeyPair,
+  generateKeyPair,
+  makeEnvelope,
+} from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createRelayConnection, type ConnectionStatus } from './relay-client';
@@ -155,5 +160,110 @@ describe('relay-client auto-reconnect (Phase 4 Task 1)', () => {
     sockets[0]!.fireClose(); // a close() also surfaces the socket's close event
     await vi.advanceTimersByTimeAsync(11_000);
     expect(sockets.length).toBe(1); // no redial after an intentional teardown
+  });
+});
+
+/**
+ * Key self-healing (approval-reliability T1, web half): an encrypted frame for a session whose content
+ * key this browser doesn't hold means the key was missed (e.g. the browser subscribed inside the
+ * adopted-session announce window, before the daemon established the key). The client re-subscribes —
+ * once per session until a key arrives — which makes the daemon deliver the key + an encrypted
+ * backfill. Without this, the session stays undecryptable and a decision would go out CLEARTEXT into a
+ * keyed daemon (the "dropped permission.decision" stuck-gate bug).
+ */
+describe('key self-healing: re-subscribe on a keyless encrypted frame', () => {
+  // Real timers here (overriding the file-wide fake-timer setup): the subscribe send awaits native
+  // WebCrypto keygen, which needs real event-loop turns — and nothing in these tests uses the backoff.
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
+  const encryptedFrame = (sessionId: string): string =>
+    JSON.stringify(
+      makeEnvelope({
+        type: 'agent.permission_request',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId,
+        payload: 'b64ciphertext',
+        nonce: 'b64nonce',
+      }),
+    );
+
+  const subscribesFor = (socket: FakeSocket, sessionId: string): number =>
+    socket.sent.filter(
+      (f) => f.includes('"session.subscribe"') && f.includes(`"session_id":"${sessionId}"`),
+    ).length;
+
+  it('re-subscribes exactly once per session until its key arrives', async () => {
+    const daemonKp = await generateKeyPair();
+    const { sockets, conn } = connectWithFakes({
+      daemonPublicKey: encodeKey(daemonKp.publicKey),
+      keyPairFactory: () => generateIdentityKeyPair(false),
+    });
+    const s = sockets[0]!;
+    s.fireOpen();
+    await flush();
+    s.fireMessage(helloAck());
+    await flush();
+
+    s.fireMessage(encryptedFrame('sess-keyless'));
+    // The subscribe send awaits the browser keypair (async) — flush the microtask chain generously.
+    await vi.waitFor(() => expect(subscribesFor(s, 'sess-keyless')).toBe(1));
+
+    // More keyless frames for the same session must NOT re-ask (no subscribe storm).
+    s.fireMessage(encryptedFrame('sess-keyless'));
+    s.fireMessage(encryptedFrame('sess-keyless'));
+    await flush();
+    await flush();
+    expect(subscribesFor(s, 'sess-keyless')).toBe(1);
+
+    // A different keyless session asks independently.
+    s.fireMessage(encryptedFrame('sess-other'));
+    await vi.waitFor(() => expect(subscribesFor(s, 'sess-other')).toBe(1));
+
+    conn.close();
+  });
+
+  it('never re-subscribes for a cleartext frame (nothing to heal)', async () => {
+    const daemonKp = await generateKeyPair();
+    const e2e = connectWithFakes({
+      daemonPublicKey: encodeKey(daemonKp.publicKey),
+      keyPairFactory: () => generateIdentityKeyPair(false),
+    });
+    const s1 = e2e.sockets[0]!;
+    s1.fireOpen();
+    await flush();
+    s1.fireMessage(helloAck());
+    await flush();
+    s1.fireMessage(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'agent.message',
+          userId: USER,
+          deviceId: DEVICE,
+          sessionId: 'sess-clear',
+          payload: { text: 'hi' },
+        }),
+      ),
+    );
+    await flush();
+    await flush();
+    expect(subscribesFor(s1, 'sess-clear')).toBe(0);
+    e2e.conn.close();
+  });
+
+  it('never re-subscribes when E2E is off (there is no key to fetch)', async () => {
+    const clear = connectWithFakes();
+    const s2 = clear.sockets[0]!;
+    s2.fireOpen();
+    await flush();
+    s2.fireMessage(helloAck());
+    await flush();
+    s2.fireMessage(encryptedFrame('sess-x'));
+    await flush();
+    await flush();
+    expect(subscribesFor(s2, 'sess-x')).toBe(0);
+    clear.conn.close();
   });
 });

@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { Button } from '@telecode/ui';
+  import { Button, Spinner } from '@telecode/ui';
 
   import { buildFileDiff } from '$lib/diff';
   import type { TranscriptEntry } from '$lib/session';
 
   import Code from './Code.svelte';
   import DiffView from './DiffView.svelte';
+  import RejectNoteForm from './RejectNoteForm.svelte';
 
   /**
    * The human-in-the-loop gate (enterprise-ui §7): the agent has paused on a consequential tool and is
@@ -19,13 +20,21 @@
     entry,
     onapprove,
     onreject,
-  }: { entry: PermissionEntry; onapprove: () => void; onreject: () => void } = $props();
+  }: {
+    entry: PermissionEntry;
+    onapprove: () => void;
+    /** Reject the tool; `message` (when the operator wrote a note) is relayed to the agent as guidance. */
+    onreject: (message?: string) => void;
+  } = $props();
 
   const inputJson = $derived(JSON.stringify(entry.input, null, 2));
   const isInFlight = $derived(entry.decision === 'approving' || entry.decision === 'rejecting');
   // A file-mutating tool shows its proposed change as a diff (the signature human-in-the-loop view);
   // anything else falls back to the raw, monospace input.
   const diff = $derived(buildFileDiff(entry.toolName, entry.input));
+
+  // Deny-with-note: whether the shared note reveal is open; a plain Reject needs no note.
+  let isNoting = $state(false);
 </script>
 
 <section class="gate" data-state={entry.decision} aria-label="Permission request">
@@ -41,13 +50,24 @@
   {/if}
 
   {#if entry.decision === 'pending'}
-    <div class="actions">
-      <Button variant="primary" onclick={onapprove}>Approve</Button>
-      <Button variant="secondary" onclick={onreject}>Reject</Button>
-    </div>
+    {#if isNoting}
+      <RejectNoteForm
+        onsubmit={(message) => {
+          onreject(message);
+          isNoting = false;
+        }}
+        oncancel={() => (isNoting = false)}
+      />
+    {:else}
+      <div class="actions">
+        <Button variant="primary" onclick={onapprove}>Approve</Button>
+        <Button variant="secondary" onclick={() => onreject()}>Reject</Button>
+        <Button variant="ghost" onclick={() => (isNoting = true)}>Reject with note…</Button>
+      </div>
+    {/if}
   {:else if isInFlight}
     <p class="status-line" role="status">
-      <span class="spinner" aria-hidden="true"></span>
+      <Spinner />
       {entry.decision === 'approving' ? 'Approving…' : 'Rejecting…'}
     </p>
   {:else}
@@ -117,24 +137,5 @@
   }
   .resolved[data-decision='rejected'] {
     color: var(--text-muted);
-  }
-  .spinner {
-    width: 12px;
-    height: 12px;
-    flex: none;
-    border: 2px solid currentcolor;
-    border-right-color: transparent;
-    border-radius: var(--radius-full);
-    animation: spin 0.6s linear infinite;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .spinner {
-      animation: none;
-    }
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

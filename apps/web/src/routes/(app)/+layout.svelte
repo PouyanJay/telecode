@@ -4,6 +4,9 @@
   import { browser } from '$app/environment';
   import { env } from '$env/dynamic/public';
 
+  import { page } from '$app/stores';
+
+  import { applyAttentionBadge } from '$lib/attention';
   import LaunchDrawer from '$lib/components/LaunchDrawer.svelte';
   import MobileNav from '$lib/components/MobileNav.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -67,6 +70,14 @@
         daemonPublicKey: device.publicKey,
       });
     }
+  });
+
+  // Tab attention badge: "(N)" title prefix + amber-dot favicon while sessions await a decision.
+  // Re-applied on navigation too ($page dependency) — each page sets its own <title> before effects
+  // run, so the badge always decorates the fresh title instead of fighting it.
+  $effect(() => {
+    void $page.url;
+    if (browser) applyAttentionBadge(document, counts.awaiting);
   });
 
   function openLaunchDrawer(): void {

@@ -156,6 +156,20 @@ const CACHEABLE_TYPES = new Set<string>([
   'session.key',
 ]);
 
+/**
+ * Session-scoped browser actions that get an honest `relay.error` reply when the daemon is offline —
+ * everything a user clicks expecting the device to act. `session.launch` is excluded (it has its own
+ * synthetic `session.ended` failure path) and `echo` stays fire-and-forget (Phase 0 skeleton).
+ */
+const UNDELIVERABLE_REPLY_TYPES: ReadonlySet<string> = new Set([
+  'permission.decision',
+  'question.answer',
+  'handover.answer',
+  'user.message',
+  'session.control',
+  'session.subscribe',
+]);
+
 function channelKey(userId: string, deviceId: string): string {
   return `${userId}:${deviceId}`;
 }
@@ -301,6 +315,45 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     );
   }
 
+  /** A `relay.error` (relay → the sending browser): its frame could not reach the (offline) daemon. */
+  function relayErrorFrame(params: {
+    readonly userId: string;
+    readonly deviceId: string;
+    readonly sessionId: string;
+    readonly regarding: string;
+  }): string {
+    return JSON.stringify(
+      makeEnvelope({
+        type: 'relay.error',
+        userId: params.userId,
+        deviceId: params.deviceId,
+        sessionId: params.sessionId,
+        payload: { code: 'device_offline', regarding: params.regarding },
+      }),
+    );
+  }
+
+  /**
+   * Honest failure (approval-reliability T3): a session-scoped action that reached an offline device is
+   * answered with `relay.error` to the SENDER, so its UI un-spins the exact action — an approval that
+   * went nowhere shows as undelivered, never as acted-on.
+   */
+  function sendUndeliverableReply(envelope: Envelope, replyTo: WebSocket, channel: string): void {
+    if (envelope.session_id === undefined || !UNDELIVERABLE_REPLY_TYPES.has(envelope.type)) return;
+    try {
+      replyTo.send(
+        relayErrorFrame({
+          userId: envelope.user_id,
+          deviceId: envelope.device_id,
+          sessionId: envelope.session_id,
+          regarding: envelope.type,
+        }),
+      );
+    } catch (err) {
+      log.warn({ err, channel }, 'relay: could not send relay.error to the browser');
+    }
+  }
+
   function broadcastToBrowsers(channel: string, frame: string): void {
     const set = browsers.get(channel);
     if (!set) return;
@@ -401,10 +454,35 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       );
       return;
     }
+    // Presence frames are relay-generated routing metadata (`viewer.presence` relay→daemon, `device.presence`
+    // relay→browser) — never legitimately browser-originated. Drop them so an authenticated browser can't
+    // forge a `viewer.presence` to flip the daemon's adopted-session gating: the relay is the sole authority
+    // on whether anyone is watching. `relay.error` is likewise relay-generated only.
+    if (
+      envelope.type === 'viewer.presence' ||
+      envelope.type === 'device.presence' ||
+      envelope.type === 'relay.error'
+    ) {
+      log.warn(
+        { channel, type: envelope.type },
+        'relay: dropped a relay-internal frame from a browser',
+      );
+      return;
+    }
+    if (!daemon) {
+      // Honest failure (approval-reliability T3): a session-scoped action that reaches an offline device
+      // must not vanish into a log line — the SENDER is told, so its UI un-spins the exact action (an
+      // approval that went nowhere shows as undelivered, never as acted-on). Relay-generated cleartext
+      // routing metadata: code + the failed type; no session payload. The registry row is deliberately
+      // NOT flipped to `running` for an undelivered resume action.
+      log.warn({ channel, type: envelope.type }, 'relay: no daemon registered for channel');
+      sendUndeliverableReply(envelope, replyTo, channel);
+      return;
+    }
     // A human action resumes the session — a permission verdict, a `question.answer` (an adopted session's
     // multiple-choice pick), or a `user.message` follow-up that starts a new turn. Flip the row back to
-    // `running` before forwarding (so the persisted status never lags the daemon). Type-only — the relay
-    // stays payload-blind, correct under E2E ciphertext (Phase 3).
+    // `running` before forwarding (so the persisted status never lags the daemon) — only now that the
+    // frame is actually deliverable. Type-only — the relay stays payload-blind under E2E (Phase 3).
     if (
       (envelope.type === 'permission.decision' ||
         envelope.type === 'question.answer' ||
@@ -418,22 +496,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       });
       log.info({ channel, sessionId: envelope.session_id }, 'relay: session resumed');
     }
-    // Presence frames are relay-generated routing metadata (`viewer.presence` relay→daemon, `device.presence`
-    // relay→browser) — never legitimately browser-originated. Drop them so an authenticated browser can't
-    // forge a `viewer.presence` to flip the daemon's adopted-session gating: the relay is the sole authority
-    // on whether anyone is watching.
-    if (envelope.type === 'viewer.presence' || envelope.type === 'device.presence') {
-      log.warn(
-        { channel, type: envelope.type },
-        'relay: dropped a relay-internal frame from a browser',
-      );
-      return;
-    }
-    if (daemon) {
-      daemon.send(text);
-    } else {
-      log.warn({ channel }, 'relay: no daemon registered for channel');
-    }
+    daemon.send(text);
   }
 
   /**
@@ -488,6 +551,20 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
+    // Symmetry with the browser-side guard: presence and relay.error are RELAY-generated routing
+    // metadata. A daemon is trusted for its channel's content, but must not be able to impersonate the
+    // relay's own control frames either.
+    if (
+      envelope.type === 'viewer.presence' ||
+      envelope.type === 'device.presence' ||
+      envelope.type === 'relay.error'
+    ) {
+      log.warn(
+        { channel, type: envelope.type },
+        'relay: dropped a relay-internal frame from a daemon',
+      );
+      return;
+    }
     // Session reconciliation is a relay-internal control frame — act on it, never forward it to browsers.
     if (envelope.type === 'session.reconcile') {
       if (sessionRegistry) await reconcileSessions(envelope, channel, sessionRegistry);

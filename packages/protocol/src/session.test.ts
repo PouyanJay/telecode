@@ -10,6 +10,7 @@ import {
   handoverAnswerPayloadSchema,
   permissionDecisionPayloadSchema,
   questionAnswerPayloadSchema,
+  relayErrorPayloadSchema,
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
@@ -635,6 +636,24 @@ describe('viewerPresencePayloadSchema (relay → daemon viewer presence)', () =>
   it('rejects a missing or non-boolean online', () => {
     expect(viewerPresencePayloadSchema.safeParse({}).success).toBe(false);
     expect(viewerPresencePayloadSchema.safeParse({ online: 'yes' }).success).toBe(false);
+  });
+});
+
+describe('relayErrorPayloadSchema (relay → web delivery failure)', () => {
+  it('accepts a delivery failure with a known code and the failed type', () => {
+    const parsed = relayErrorPayloadSchema.parse({
+      code: 'device_offline',
+      regarding: 'permission.decision',
+    });
+    expect(parsed).toEqual({ code: 'device_offline', regarding: 'permission.decision' });
+  });
+
+  it('rejects an unknown code, a missing regarding, and an empty regarding', () => {
+    expect(relayErrorPayloadSchema.safeParse({ code: 'nope', regarding: 'x' }).success).toBe(false);
+    expect(relayErrorPayloadSchema.safeParse({ code: 'device_offline' }).success).toBe(false);
+    expect(
+      relayErrorPayloadSchema.safeParse({ code: 'device_offline', regarding: '' }).success,
+    ).toBe(false);
   });
 });
 
