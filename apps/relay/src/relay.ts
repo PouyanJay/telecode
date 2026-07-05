@@ -283,6 +283,24 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     );
   }
 
+  /**
+   * A synthetic relay-generated `session.ended` (relay → browsers): a session was retired server-side
+   * (stale-row reconcile, device revoke) with no daemon to announce it. Cleartext `status` — the relay
+   * holds no session key, and browsers read the terminal state off the field.
+   */
+  function sessionEndedFrame(userId: string, deviceId: string, sessionId: string): string {
+    return JSON.stringify(
+      makeEnvelope({
+        type: 'session.ended',
+        userId,
+        deviceId,
+        sessionId,
+        status: 'done',
+        payload: { status: 'done' },
+      }),
+    );
+  }
+
   function broadcastToBrowsers(channel: string, frame: string): void {
     const set = browsers.get(channel);
     if (!set) return;
@@ -452,21 +470,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         // `done` is the closest available terminal state (there is no distinct "lost" status); the browser
         // renders both terminal states as ended, moving the phantom out of "awaiting" into recent.
         await registry.markEnded({ userId: envelope.user_id, sessionId: row.id, status: 'done' });
-        // Tell watching browsers so a live dashboard clears the phantom without a refresh. Relay-generated
-        // control frame: cleartext `status` (the relay holds no session key), read off the field.
-        broadcastToBrowsers(
-          channel,
-          JSON.stringify(
-            makeEnvelope({
-              type: 'session.ended',
-              userId: envelope.user_id,
-              deviceId: envelope.device_id,
-              sessionId: row.id,
-              status: 'done',
-              payload: { status: 'done' },
-            }),
-          ),
-        );
+        // Tell watching browsers so a live dashboard clears the phantom without a refresh.
+        broadcastToBrowsers(channel, sessionEndedFrame(envelope.user_id, envelope.device_id, row.id));
       }),
     );
     const failed = results.filter((r) => r.status === 'rejected').length;
@@ -717,9 +722,21 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       ...(oauthTokenStore ? { tokenStore: oauthTokenStore } : {}),
     });
     // The web lists the user's devices (to pick the channel its browser watches) and revokes them
-    // (session-token authed; RLS-scoped to the owner).
+    // (session-token authed; RLS-scoped to the owner). The revoke cascade reports the session ids it
+    // ended so watching browsers hear about them immediately — same synthetic frame as reconcile.
     if (deviceRegistry) {
-      registerDeviceRoutes(app, options.auth.service, deviceRegistry, sessionRegistry);
+      registerDeviceRoutes(
+        app,
+        options.auth.service,
+        deviceRegistry,
+        sessionRegistry,
+        ({ userId, deviceId, sessionIds }) => {
+          const channel = channelKey(userId, deviceId);
+          for (const sessionId of sessionIds) {
+            broadcastToBrowsers(channel, sessionEndedFrame(userId, deviceId, sessionId));
+          }
+        },
+      );
     }
     // Operator-only infra controls (scale-to-zero toggles). Registered only when configured (Azure env);
     // every request is gated to the operator allowlist inside the routes.

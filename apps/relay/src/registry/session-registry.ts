@@ -58,9 +58,10 @@ export interface SessionRegistry {
   /**
    * End (mark `done`) every non-terminal session for a device — called when the device is revoked. A revoked
    * device never reconnects, so the per-connection `session.reconcile` can never retire these; without this
-   * they linger as phantom `running`/`awaiting_input` rows in the dashboard forever. Returns how many ended.
+   * they linger as phantom `running`/`awaiting_input` rows in the dashboard forever. Returns the ended
+   * session ids so the caller can tell watching browsers (a live dashboard must clear without a refresh).
    */
-  endSessionsForDevice(input: { userId: string; deviceId: string }): Promise<number>;
+  endSessionsForDevice(input: { userId: string; deviceId: string }): Promise<string[]>;
 }
 
 export function createSessionRegistry(db: DbHandle): SessionRegistry {
@@ -150,7 +151,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
       });
     },
 
-    async endSessionsForDevice({ userId, deviceId }): Promise<number> {
+    async endSessionsForDevice({ userId, deviceId }): Promise<string[]> {
       const now = new Date();
       return withUserContext(db, userId, async (scoped) => {
         const ended = await scoped
@@ -169,7 +170,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             ),
           )
           .returning({ id: sessions.id });
-        return ended.length;
+        return ended.map((row) => row.id);
       });
     },
   };

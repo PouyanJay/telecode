@@ -1,9 +1,12 @@
+import type { AddressInfo } from 'node:net';
+
 import { createAuthService, type AuthService } from '../../src/auth/auth-service';
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createDeviceRegistry, type DeviceRegistry } from '../../src/registry/device-registry';
 import { createSessionRegistry, type SessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
+import { connectBrowser, waitForEnvelope } from '../_helpers/ws';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
@@ -236,6 +239,47 @@ describe('relay device listing: GET /me/devices', () => {
     // Another user's session is untouched.
     const bobRows = await sessions.listByUser(bob.userId);
     expect(bobRows.find((s) => s.id === bobRunning)?.status).toBe('running');
+  });
+
+  it('broadcasts session.ended to a watching browser for each session the revoke cascade ends', async () => {
+    // Honesty pass T3: the cascade used to be DB-only — an open dashboard kept showing the revoked
+    // device's sessions as running until a manual refresh. Now it broadcasts the same synthetic
+    // `session.ended` the reconcile path sends, so live UIs clear immediately.
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'watched-revoke',
+      deviceTokenHash: 'hash-watched-revoke',
+    });
+    const running = await sessions.createSession({ userId: alice.userId, deviceId });
+    await sessions.markRunning({ userId: alice.userId, sessionId: running });
+    const awaiting = await sessions.createSession({ userId: alice.userId, deviceId });
+    await sessions.markAwaitingInput({ userId: alice.userId, sessionId: awaiting });
+
+    const relayUrl = `ws://127.0.0.1:${(app.server.address() as AddressInfo).port}/ws`;
+    const browser = await connectBrowser(
+      relayUrl,
+      alice.userId,
+      deviceId,
+      await auth.mintChannelToken(alice.userId),
+    );
+    const endedFrames = Promise.all(
+      [running, awaiting].map((sessionId) =>
+        waitForEnvelope(browser, (e) => e.type === 'session.ended' && e.session_id === sessionId),
+      ),
+    );
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(del.statusCode).toBe(204);
+
+    for (const frame of await endedFrames) {
+      expect((frame.payload as { status: string }).status).toBe('done');
+    }
+    browser.close();
   });
 
   it('cannot revoke another user’s device (RLS-scoped → 404)', async () => {

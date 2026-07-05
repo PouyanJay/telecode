@@ -22,6 +22,9 @@ export function registerDeviceRoutes(
   /** When provided, revoking a device also ends its non-terminal sessions (they can never reconcile once
    *  the device is gone). Optional so the auth-less/echo relay path stays unaffected. */
   sessionRegistry?: SessionRegistry,
+  /** Called with the ids the revoke cascade ended, so the relay can tell watching browsers — a live
+   *  dashboard must clear the revoked device's sessions without a refresh. */
+  onSessionsEnded?: (input: { userId: string; deviceId: string; sessionIds: string[] }) => void,
 ): void {
   app.get('/me/devices', async (request, reply) => {
     const userId = await requireUser(request, reply, auth);
@@ -57,13 +60,16 @@ export function registerDeviceRoutes(
     // A revoked device is gone for good — end its still-running/awaiting sessions so they don't linger as
     // phantom rows no daemon will ever reconcile (the per-connection reconcile only reaches a device that
     // reconnects). Best-effort: a failure here must not fail the revoke itself.
-    let endedSessions = 0;
+    let endedSessionIds: string[] = [];
     if (sessionRegistry) {
       try {
-        endedSessions = await sessionRegistry.endSessionsForDevice({
+        endedSessionIds = await sessionRegistry.endSessionsForDevice({
           userId,
           deviceId: params.data.id,
         });
+        if (endedSessionIds.length > 0) {
+          onSessionsEnded?.({ userId, deviceId: params.data.id, sessionIds: endedSessionIds });
+        }
       } catch (err) {
         request.log.warn(
           { err, userId, deviceId: params.data.id },
@@ -71,7 +77,10 @@ export function registerDeviceRoutes(
         );
       }
     }
-    request.log.info({ userId, deviceId: params.data.id, endedSessions }, 'device revoked');
+    request.log.info(
+      { userId, deviceId: params.data.id, endedSessions: endedSessionIds.length },
+      'device revoked',
+    );
     return reply.code(204).send();
   });
 }
