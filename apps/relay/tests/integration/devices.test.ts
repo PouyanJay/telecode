@@ -2,6 +2,7 @@ import { createAuthService, type AuthService } from '../../src/auth/auth-service
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
 import { createDeviceRegistry, type DeviceRegistry } from '../../src/registry/device-registry';
+import { createSessionRegistry, type SessionRegistry } from '../../src/registry/session-registry';
 import { buildRelay } from '../../src/relay';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
@@ -22,6 +23,7 @@ describe('relay device listing: GET /me/devices', () => {
   let admin: Pool;
   let auth: AuthService;
   let registry: DeviceRegistry;
+  let sessions: SessionRegistry;
   let app: FastifyInstance;
 
   beforeAll(async () => {
@@ -33,11 +35,13 @@ describe('relay device listing: GET /me/devices', () => {
     admin = new Pool({ connectionString: DATABASE_URL });
     auth = createAuthService({ db: handle, channelTokenSecret: CHANNEL_SECRET });
     registry = createDeviceRegistry(handle);
+    sessions = createSessionRegistry(handle);
 
     app = await buildRelay({
       logger: pino({ level: 'silent' }),
       auth: { service: auth, serviceSecret: SERVICE_SECRET },
       deviceRegistry: registry,
+      sessionRegistry: sessions,
     });
     await app.listen({ port: 0, host: '127.0.0.1' });
   });
@@ -170,6 +174,48 @@ describe('relay device listing: GET /me/devices', () => {
       headers: { authorization: `Bearer ${alice.token}` },
     });
     expect(list.json<{ devices: unknown[] }>().devices).toHaveLength(0);
+  });
+
+  it('ends the revoked device’s non-terminal sessions, leaving other devices’ sessions untouched', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'to-revoke',
+      deviceTokenHash: 'hash-rev-cascade',
+    });
+    const keeperId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'keeper',
+      deviceTokenHash: 'hash-keeper',
+    });
+    // On the device being revoked: a running + an awaiting one (must end), plus an already-done one (stays).
+    const running = await sessions.createSession({ userId: alice.userId, deviceId });
+    await sessions.markRunning({ userId: alice.userId, sessionId: running });
+    const awaiting = await sessions.createSession({ userId: alice.userId, deviceId });
+    await sessions.markAwaitingInput({ userId: alice.userId, sessionId: awaiting });
+    const alreadyDone = await sessions.createSession({ userId: alice.userId, deviceId });
+    await sessions.markEnded({ userId: alice.userId, sessionId: alreadyDone, status: 'done' });
+    // On another (kept) device: a running session that must be untouched.
+    const keeperRunning = await sessions.createSession({
+      userId: alice.userId,
+      deviceId: keeperId,
+    });
+    await sessions.markRunning({ userId: alice.userId, sessionId: keeperRunning });
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(del.statusCode).toBe(204);
+
+    const rows = await sessions.listByUser(alice.userId);
+    const statusOf = (id: string): string | undefined => rows.find((s) => s.id === id)?.status;
+    expect(statusOf(running)).toBe('done');
+    expect(statusOf(awaiting)).toBe('done');
+    expect(statusOf(alreadyDone)).toBe('done');
+    // The kept device's session is not touched by revoking a different device.
+    expect(statusOf(keeperRunning)).toBe('running');
   });
 
   it('cannot revoke another user’s device (RLS-scoped → 404)', async () => {
