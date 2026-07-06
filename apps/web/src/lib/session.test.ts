@@ -67,12 +67,18 @@ describe('session reducer', () => {
         requestId: 'req_1',
         toolName: 'Write',
         input: { path: 'x' },
+        diffStat: { added: 3, removed: 1 },
       }),
     ]);
     expect(state.status).toBe('awaiting_input');
     const pending = pendingPermission(state);
     expect(pending?.kind).toBe('permission');
     expect(pending && pending.kind === 'permission' && pending.requestId).toBe('req_1');
+    // The gate's ±lines rides the live frame into the entry (mockup §01-4).
+    expect(pending && pending.kind === 'permission' && pending.diffStat).toEqual({
+      added: 3,
+      removed: 1,
+    });
   });
 
   it('confirms an in-flight approval once the next frame arrives (round-trip, not optimistic)', () => {
@@ -459,7 +465,14 @@ describe('session reducer: free-form handover (Journey 4)', () => {
         status: 'awaiting_input',
         entries: [
           { kind: 'user', text: 'help me set up the db' },
-          { kind: 'permission', requestId: 'p1', toolName: 'Bash', input: {}, decision: 'allow' },
+          {
+            kind: 'permission',
+            requestId: 'p1',
+            toolName: 'Bash',
+            input: {},
+            diffStat: { added: 12, removed: 4 },
+            decision: 'allow',
+          },
           {
             kind: 'question',
             requestId: 'q1',
@@ -476,6 +489,11 @@ describe('session reducer: free-form handover (Journey 4)', () => {
     const question = state.entries[2];
     const handover = state.entries[3];
     expect(permission?.kind === 'permission' && permission.decision).toBe('approved');
+    // The gate's ±lines survives the backfill fold (mockup §01-4) — a reload keeps the badge.
+    expect(permission?.kind === 'permission' && permission.diffStat).toEqual({
+      added: 12,
+      removed: 4,
+    });
     expect(question?.kind === 'question' && question.answer).toBe('answered');
     expect(handover?.kind === 'handover' && handover.state).toBe('pending');
   });

@@ -132,6 +132,31 @@ describe('buildInboxAsks', () => {
     const idle = applyEnvelope(startingState(), frame('s3', 'session.started', {}), NOW);
     expect(buildInboxAsks({ live: liveWith(['s3', idle]), titleOf, deviceNameOf })).toEqual([]);
   });
+
+  it('threads the gate diff stat through to the permission ask (mockup §01-4)', () => {
+    const live = new Map([
+      [
+        's-diff',
+        {
+          ...startingState(),
+          status: 'awaiting_input' as const,
+          entries: [
+            {
+              kind: 'permission' as const,
+              id: 'e1',
+              requestId: 'r1',
+              toolName: 'Write' as const,
+              input: { path: 'a.ts' },
+              diffStat: { added: 12, removed: 4 },
+              decision: 'pending' as const,
+            },
+          ],
+        },
+      ],
+    ]);
+    const asks = buildInboxAsks({ live, titleOf: () => null, deviceNameOf: () => null });
+    expect(asks[0]).toMatchObject({ kind: 'permission', diffStat: { added: 12, removed: 4 } });
+  });
 });
 
 describe('waitingLabel', () => {

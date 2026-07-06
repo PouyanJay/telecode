@@ -1,6 +1,8 @@
 <script lang="ts">
   import { Button, Spinner } from '@telecode/ui';
 
+  import DiffStatBadge from './DiffStatBadge.svelte';
+
   import { buildFileDiff } from '$lib/diff';
   import type { TranscriptEntry } from '$lib/session';
 
@@ -41,6 +43,7 @@
   <header class="head">
     <span class="eyebrow">{entry.decision === 'pending' ? 'AWAITING INPUT' : 'PERMISSION'}</span>
     <code class="name">{entry.toolName}</code>
+    {#if entry.diffStat}<DiffStatBadge stat={entry.diffStat} />{/if}
   </header>
 
   {#if diff}

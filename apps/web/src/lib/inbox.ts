@@ -1,3 +1,4 @@
+import type { DiffStat } from '@telecode/protocol';
 import type { SessionState, TranscriptEntry } from './session';
 
 /**
@@ -19,6 +20,8 @@ export type InboxAsk =
       readonly requestId: string;
       readonly toolName: string;
       readonly input: Record<string, unknown>;
+      /** Rough ±lines for a file-writing tool (mockup §01-4); absent when not computable. */
+      readonly diffStat?: DiffStat;
       /** pending | approving | rejecting — in-flight decisions stay visible as their spinner state. */
       readonly decision: 'pending' | 'approving' | 'rejecting';
       readonly askedAt?: number;
@@ -67,6 +70,7 @@ function permissionAsk(
     requestId: entry.requestId,
     toolName: entry.toolName,
     input: entry.input,
+    ...(entry.diffStat !== undefined ? { diffStat: entry.diffStat } : {}),
     decision: entry.decision,
     ...(entry.at !== undefined ? { askedAt: entry.at } : {}),
   };

@@ -348,6 +348,17 @@ export const sessionRenameBodySchema = z.union([
 export type SessionRenameBody = z.infer<typeof sessionRenameBodySchema>;
 
 /**
+ * A rough ±lines summary for a file-writing tool request (mockup §01-4), computed daemon-side at gate
+ * time so a routine call is decidable straight from the inbox card. Optional everywhere: absent for
+ * tools it doesn't apply to, for pre-diff-stat daemons, and whenever the daemon couldn't compute one.
+ */
+export const diffStatSchema = z.object({
+  added: z.number().int().min(0),
+  removed: z.number().int().min(0),
+});
+export type DiffStat = z.infer<typeof diffStatSchema>;
+
+/**
  * Payload for `agent.permission_request` (daemon → web): a consequential tool call the agent wants to
  * run, paused at the {@link https://docs.claude.com SDK `canUseTool` gate} until a human decides. The
  * `requestId` correlates this request with the human's {@link permissionDecisionPayloadSchema} reply.
@@ -356,6 +367,7 @@ export const agentPermissionRequestPayloadSchema = z.object({
   requestId: z.string().min(1),
   toolName: z.string().min(1),
   input: z.record(z.unknown()),
+  diffStat: diffStatSchema.optional(),
   ts: entryTimestampSchema.optional(),
 });
 export type AgentPermissionRequestPayload = z.infer<typeof agentPermissionRequestPayloadSchema>;
@@ -534,6 +546,7 @@ export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
     requestId: z.string().min(1),
     toolName: z.string().min(1),
     input: z.record(z.unknown()),
+    diffStat: diffStatSchema.optional(),
     decision: z.enum(['pending', 'allow', 'deny']),
     ts: entryTimestampSchema.optional(),
   }),

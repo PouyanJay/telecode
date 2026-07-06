@@ -59,6 +59,41 @@ describe('agentPermissionRequestPayloadSchema', () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it('parses a request carrying a diff stat (T: gate ±lines, mockup §01-4)', () => {
+    const parsed = agentPermissionRequestPayloadSchema.parse({
+      requestId: 'r1',
+      toolName: 'Edit',
+      input: {},
+      diffStat: { added: 12, removed: 4 },
+    });
+    expect(parsed.diffStat).toEqual({ added: 12, removed: 4 });
+  });
+
+  it('keeps the diff stat optional (pre-diff-stat daemons interop)', () => {
+    const parsed = agentPermissionRequestPayloadSchema.parse({
+      requestId: 'r1',
+      toolName: 'Bash',
+      input: {},
+    });
+    expect(parsed.diffStat).toBeUndefined();
+  });
+
+  it('rejects a negative or fractional diff stat (counts only)', () => {
+    for (const diffStat of [
+      { added: -1, removed: 0 },
+      { added: 1.5, removed: 0 },
+    ]) {
+      expect(
+        agentPermissionRequestPayloadSchema.safeParse({
+          requestId: 'r1',
+          toolName: 'Edit',
+          input: {},
+          diffStat,
+        }).success,
+      ).toBe(false);
+    }
+  });
 });
 
 describe('permissionDecisionPayloadSchema', () => {
