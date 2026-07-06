@@ -148,3 +148,26 @@ test('an approval raised on a second device arrives and resolves through its own
   await expect(row).toBeVisible();
   await expect(row).toContainText('DONE');
 });
+
+test('one daemon dropping flips only ITS device offline — the other stays online', async ({
+  page,
+}) => {
+  await signIn(page);
+  const deviceList = page.getByRole('list', { name: 'Paired devices' });
+  await expect(deviceList.getByRole('listitem').filter({ hasText: 'e2e-mac' })).toContainText(
+    'online',
+    { timeout: 10_000 },
+  );
+
+  // The mac's daemon dies (kill, not clean shutdown — like a crashed laptop process).
+  daemons[1]?.kill();
+
+  // Its row flips offline via the live presence frame; the mini's row must not move.
+  await expect(deviceList.getByRole('listitem').filter({ hasText: 'e2e-mac' })).not.toContainText(
+    'online',
+    { timeout: 10_000 },
+  );
+  await expect(deviceList.getByRole('listitem').filter({ hasText: 'e2e-mini' })).toContainText(
+    'online',
+  );
+});
