@@ -2,6 +2,7 @@
   import { Pill, StatusDot } from '@telecode/ui';
 
   import { SESSION_DISPLAY } from '$lib/session-display';
+  import { sessionRepoTag } from '$lib/session-groups';
   import { clockTime } from '$lib/clock-time';
   import { segmentLabel, type ThreadRow } from '$lib/threads';
   import { relativeTime } from '$lib/time';
@@ -22,6 +23,8 @@
   // Sessions telecode adopted from the user's own Claude Code runs (terminal / IDE) are marked, so the
   // operator can tell them from sessions launched here — they're monitored + gated, not telecode-driven.
   const isAdopted = $derived(row.origin === 'external');
+  // The card's repo tag: where the session works, from its decrypted metadata (mock §01).
+  const repoTag = $derived(sessionRepoTag(row));
 </script>
 
 <a class="row hairline-b" class:await={isAwaiting} href="/sessions/{row.id}">
@@ -39,6 +42,9 @@
         {:else if row.isContinuation}
           <Pill label="continuation" />
         {/if}
+      {/if}
+      {#if repoTag}
+        <Pill label={repoTag} />
       {/if}
       <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
     </span>

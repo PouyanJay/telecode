@@ -1,4 +1,10 @@
-import type { SessionMetaPayload, SessionOrigin, SessionStatusName } from '@telecode/protocol';
+import {
+  firstRealPromptText,
+  isInjectedPrompt,
+  type SessionMetaPayload,
+  type SessionOrigin,
+  type SessionStatusName,
+} from '@telecode/protocol';
 
 import type { SessionState, SessionStatus } from './session';
 
@@ -29,6 +35,10 @@ export interface SessionRow {
    * thread row (ux Phase 3). From the registry, or a live `session.chained` frame for a fresh fork.
    */
   readonly parentSessionId: string | null;
+  /** The repo identity from decrypted metadata ('owner/name' or a checkout folder name), if sent. */
+  readonly repo: string | null;
+  /** The session's working directory (decrypted metadata) — the repo-tag fallback source. */
+  readonly cwd: string | null;
   readonly createdAt: Date;
   /**
    * When the session last did something (T7): the registry's `updated_at` — status flips, metadata,
@@ -65,8 +75,41 @@ export interface RegistrySessionRow {
   readonly sealedTitleNonce: string | null;
 }
 
-function firstPrompt(entries: SessionState['entries']): string | undefined {
-  return entries.find((entry) => entry.kind === 'user')?.text;
+/**
+ * The first title candidate that is real — empty values and injected-machinery strings are skipped.
+ * Titles sealed/persisted BEFORE the classifier existed can be tag soup ("<local-command-caveat>…");
+ * filtering at display time heals those rows without rewriting their blobs. A user rename override is
+ * exempt by construction — callers put it ahead of this pick.
+ */
+export function pickDisplayTitle(
+  ...candidates: ReadonlyArray<string | null | undefined>
+): string | null {
+  for (const candidate of candidates) {
+    if (candidate != null && candidate !== '' && !isInjectedPrompt(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The last segment of a path-ish value ('owner/name' or a directory), or null. Splits on both
+ * separators — the browser can't know which OS's daemon produced the path.
+ */
+export function repoTagOf(path: string | null | undefined): string | null {
+  if (path === null || path === undefined) return null;
+  const segment = path
+    .split(/[\\/]+/)
+    .filter((part) => part !== '')
+    .pop();
+  return segment ?? null;
+}
+
+/**
+ * The repo tag a session card wears: the sealed meta's repo identity when the daemon sent one, else
+ * the working directory's basename (adopted sessions run in the repo itself). A launched session's
+ * worktree cwd ends in the session id — only `repo` names it correctly there.
+ */
+export function sessionRepoTag(row: Pick<SessionRow, 'repo' | 'cwd'>): string | null {
+  return repoTagOf(row.repo ?? row.cwd);
 }
 
 /** A persisted registry row as a dashboard row (live overlay happens in {@link mergeLiveRow}). */
@@ -81,13 +124,15 @@ function rowFromRegistry(input: {
     id: session.id,
     // Precedence: the user's rename override (ux Phase 6 T6) beats decrypted metadata, which beats the
     // registry's legacy cleartext title (each is a fresher source than the next).
-    title: titleOverride ?? meta?.title ?? session.title,
+    title: titleOverride ?? pickDisplayTitle(meta?.title, session.title),
     status: session.status,
     deviceId: session.deviceId,
     deviceName: input.deviceNameOf(session.deviceId),
     origin: session.origin,
     isContinuation: session.parentSessionId !== null,
     parentSessionId: session.parentSessionId,
+    repo: meta?.repo ?? null,
+    cwd: meta?.cwd ?? null,
     createdAt: session.createdAt,
     lastActivityAt: session.updatedAt,
   };
@@ -111,9 +156,9 @@ function mergeLiveRow(input: {
   // prompt seen this visit.
   const title =
     input.titleOverride ??
-    input.meta?.title ??
+    pickDisplayTitle(input.meta?.title) ??
     existing?.title ??
-    firstPrompt(state.entries) ??
+    firstRealPromptText(state.entries) ??
     null;
   // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
   const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
@@ -128,6 +173,8 @@ function mergeLiveRow(input: {
     origin: existing?.origin ?? 'launched',
     isContinuation: parentSessionId !== null,
     parentSessionId,
+    repo: input.meta?.repo ?? existing?.repo ?? null,
+    cwd: input.meta?.cwd ?? existing?.cwd ?? null,
     createdAt: existing?.createdAt ?? input.now ?? new Date(),
     // The registry's stamp survives a live overlay — frames alone must not resort the board.
     lastActivityAt: existing?.lastActivityAt ?? input.now ?? new Date(),

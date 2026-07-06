@@ -1,5 +1,6 @@
-import type { DiffStat } from '@telecode/protocol';
+import { firstRealPromptText, type DiffStat } from '@telecode/protocol';
 import type { SessionState, TranscriptEntry } from './session';
+import { pickDisplayTitle } from './session-groups';
 
 /**
  * The needs-you inbox model (approval-reliability T6): every pending ask across the watched channel's
@@ -126,8 +127,7 @@ export function buildInboxAsks(input: {
   for (const [sessionId, state] of input.live) {
     const ctx: AskContext = {
       sessionId,
-      sessionTitle:
-        input.titleOf(sessionId) ?? state.entries.find((e) => e.kind === 'user')?.text ?? null,
+      sessionTitle: pickDisplayTitle(input.titleOf(sessionId), firstRealPromptText(state.entries)),
       deviceName: input.deviceNameOf(sessionId),
     };
     for (const entry of state.entries) {

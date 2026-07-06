@@ -30,6 +30,7 @@ import {
 } from './e2e-harness';
 import { createSessionStore } from './sessions/session-store';
 import { type WorktreeManager } from './sessions/worktree-manager';
+import { type RepoManager } from './sessions/repo-manager';
 
 /**
  * Sealed session metadata (ux Phase 6, T1 walking skeleton). On launch the daemon must emit a
@@ -45,7 +46,11 @@ async function startDaemon(
   ids: E2eIds,
   daemonKp: Awaited<ReturnType<typeof generateKeyPair>>,
   agentAdapter: AgentAdapter,
-  extras: { worktreeManager?: WorktreeManager; defaultRepoPath?: string } = {},
+  extras: {
+    worktreeManager?: WorktreeManager;
+    repoManager?: RepoManager;
+    defaultRepoPath?: string;
+  } = {},
 ): Promise<FakeRelay> {
   const { daemon, relay } = await startE2eDaemon({
     ids,
@@ -94,8 +99,9 @@ describe('daemon session.meta on launch (session-identity T1)', () => {
     expect(JSON.stringify(metaFrame)).not.toContain('Refactor');
 
     const meta = await openMeta(metaFrame, contentKey);
-    // Title = the prompt's first line; the second line must not leak into it.
-    expect(meta.title).toBe('Refactor the auth module');
+    // Title = the whole prompt collapsed to one line, capped at 10 words with an ellipsis — a friendly
+    // phrase, never a raw first line (title-quality contract).
+    expect(meta.title).toBe('Refactor the auth module and also update the tests for…');
     expect(meta.titleSource).toBe('derived');
     expect(meta.permissionMode).toBe('acceptEdits');
     expect(meta.ts).toEqual(expect.any(Number));
@@ -127,6 +133,43 @@ describe('daemon session.meta on launch (session-identity T1)', () => {
       contentKey,
     );
 
+    expect(meta.cwd).toBe(`/worktrees/${ids.sessionId}`);
+    // The worktree cwd ends in the session id, so the repo identity travels separately: the local
+    // checkout's folder name here (the card's repo tag must never be a UUID).
+    expect(meta.repo).toBe('app');
+  });
+
+  it('carries owner/name as the repo identity for a cloned launch repo', async () => {
+    const ids = mkE2eIds();
+    const daemonKp = await generateKeyPair();
+    const browserKp = await generateKeyPair();
+    const worktreeManager: WorktreeManager = {
+      ensureWorktree: (sessionId) =>
+        Promise.resolve({ path: `/worktrees/${sessionId}`, branch: `telecode/${sessionId}` }),
+    };
+    const repoManager: RepoManager = {
+      ensureClone: (repo) => Promise.resolve(`/clones/${repo.owner}/${repo.name}`),
+    };
+    const relay = await startDaemon(
+      ids,
+      daemonKp,
+      createFakeAgentAdapter([], { sessionId: 'sdk-repo' }),
+      { worktreeManager, repoManager },
+    );
+
+    await sendSealedLaunch(relay, ids, daemonKp, browserKp, {
+      prompt: 'run in the cloned repo',
+      repo: { owner: 'me', name: 'telecode', cloneUrl: 'https://example.com/me/telecode.git' },
+    });
+
+    const keyFrame = await relay.waitForFrame(ofType('session.key', ids.sessionId));
+    const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
+    const meta = await openMeta(
+      await relay.waitForFrame(ofType('session.meta', ids.sessionId)),
+      contentKey,
+    );
+
+    expect(meta.repo).toBe('me/telecode');
     expect(meta.cwd).toBe(`/worktrees/${ids.sessionId}`);
   });
 

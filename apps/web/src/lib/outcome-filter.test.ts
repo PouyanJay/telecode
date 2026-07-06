@@ -23,6 +23,8 @@ function row(id: string, status: SessionStatus): SessionRow {
     origin: 'launched',
     isContinuation: false,
     parentSessionId: null,
+    repo: null,
+    cwd: null,
     createdAt: new Date('2026-07-01T00:00:00Z'),
     lastActivityAt: new Date('2026-07-01T00:00:00Z'),
   };

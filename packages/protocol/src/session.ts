@@ -302,6 +302,13 @@ export const sessionMetaPayloadSchema = z.object({
   title: z.string().min(1).max(512).optional(),
   titleSource: titleSourceSchema.optional(),
   cwd: z.string().min(1).max(1024).optional(),
+  /**
+   * The repo identity the session runs against — `owner/name` for a cloned GitHub repo, a local
+   * checkout's directory name otherwise. Carried separately from `cwd` because a worktree cwd ends
+   * in the session id, not the repo (the card's repo tag would otherwise show a UUID). Additive
+   * optional: old peers simply never see it.
+   */
+  repo: z.string().min(1).max(512).optional(),
   model: z.string().min(1).max(128).optional(),
   permissionMode: permissionModeSchema.optional(),
   ts: entryTimestampSchema.optional(),
