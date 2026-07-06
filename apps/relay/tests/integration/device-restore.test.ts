@@ -285,4 +285,53 @@ describe('device-restore grant: re-pairing a revoked device preserves its identi
     const count = await admin.query<{ n: number }>('select count(*)::int as n from devices');
     expect(count.rows[0]?.n).toBe(2);
   });
+
+  it('the lifecycle repeats: revoke → restore → revoke → restore keeps ONE identity (history accrues)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+
+    let token = (await pairDevice(alice.userId, { name: 'mbp' })).device_token;
+    const first = await admin.query<{ id: string }>('select id from devices');
+    const deviceId = first.rows[0]!.id;
+
+    // Two full revoke → restore cycles; each accretes a session onto the same device id.
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      const s = await sessions.createSession({ userId: alice.userId, deviceId });
+      await sessions.markEnded({ userId: alice.userId, sessionId: s, status: 'done' });
+      await revoke(alice.token, deviceId);
+      const restored = await pairDevice(alice.userId, {
+        name: 'mbp',
+        prior_device_token: token,
+      });
+      expect(restored.device_id).toBe(deviceId); // same identity every cycle
+      token = restored.device_token; // the prior token rotated; the next cycle presents the new one
+    }
+
+    // Still exactly one device row, active, with all the accrued history attached.
+    const rows = await admin.query<{ n: number }>('select count(*)::int as n from devices');
+    expect(rows.rows[0]?.n).toBe(1);
+    const history = await sessions.listByUser(alice.userId);
+    expect(history).toHaveLength(2);
+    expect(history.every((h) => h.deviceId === deviceId)).toBe(true);
+  });
+
+  it('restores a device whose sessions the revoke cascade already ended (they stay ended)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const first = await pairDevice(alice.userId, { name: 'mbp' });
+
+    // A running session at revoke time is cascaded to done; restoring the device must not revive it.
+    const running = await sessions.createSession({
+      userId: alice.userId,
+      deviceId: first.device_id,
+    });
+    await sessions.markRunning({ userId: alice.userId, sessionId: running });
+    await revoke(alice.token, first.device_id);
+
+    const restored = await pairDevice(alice.userId, {
+      name: 'mbp',
+      prior_device_token: first.device_token,
+    });
+    expect(restored.device_id).toBe(first.device_id);
+    const history = await sessions.listByUser(alice.userId);
+    expect(history.find((s) => s.id === running)?.status).toBe('done');
+  });
 });
