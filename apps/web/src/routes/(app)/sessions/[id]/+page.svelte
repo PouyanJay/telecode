@@ -11,15 +11,18 @@
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, type SessionState } from '$lib/session';
   import { clockTime } from '$lib/clock-time';
+  import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { lineageOf } from '$lib/lineage';
   import { segmentLabel } from '$lib/threads';
   import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
+  import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
   import {
     answer,
     answerHandover,
     connectionState,
     decide,
+    deviceChannels,
     sendControl,
     sendUserMessage,
     sessionDevices,
@@ -34,6 +37,11 @@
   // The session's OWN device — its registry row, or the live routing map for a session launched
   // this visit (before its row lands). Null when its device was revoked or nothing routed it yet:
   // no name is better than a wrong name.
+  const routedDeviceId = $derived(
+    data.sessions.find((s) => s.id === sessionId)?.deviceId ??
+      $sessionDevices.get(sessionId) ??
+      null,
+  );
   const device = $derived(
     resolveSessionDevice({
       sessionId,
@@ -42,6 +50,21 @@
       liveDeviceId: $sessionDevices.get(sessionId) ?? null,
     }),
   );
+  // Honest placeholder facts (ux Phase 5): is the session's device revoked / online right now?
+  const deviceRevoked = $derived(
+    routedDeviceId !== null && !data.devices.some((d) => d.id === routedDeviceId),
+  );
+  const sessionDeviceOnline = $derived.by(() => {
+    if (!device) return false;
+    const channel = deviceChannelOf($deviceChannels, device.id);
+    const rest = data.devices.find((d) => d.id === device.id)?.online ?? null;
+    return deviceStatus({
+      lastSeenAt: device.lastSeenAt,
+      connection: channel.connection,
+      daemonOnline: channel.daemonOnline,
+      restOnline: rest,
+    }).online;
+  });
 
   const known = $derived($liveSessions.has(sessionId));
   const session: SessionState = $derived($liveSessions.get(sessionId) ?? initialSessionState);
@@ -116,6 +139,27 @@
       }
     }
   });
+
+  // Honest escalation: a healthy restore that stays silent past its deadline stops pretending.
+  // The timer runs only while the placeholder is showing its RESTORING state (device online, no
+  // transcript yet) and resets whenever those facts change.
+  let restoreTimedOut = $state(false);
+  $effect(() => {
+    restoreTimedOut = false;
+    if (known || !sessionDeviceOnline || $connectionState !== 'connected') return;
+    const timer = setTimeout(() => (restoreTimedOut = true), RESTORE_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  });
+
+  const placeholder = $derived(
+    resolvePlaceholder({
+      relayState: $connectionState,
+      deviceName: device?.name ?? null,
+      deviceRevoked,
+      deviceOnline: sessionDeviceOnline,
+      timedOut: restoreTimedOut,
+    }),
+  );
 
   function submitPrompt(text: string): void {
     sendUserMessage(sessionId, text);
@@ -206,15 +250,11 @@
         />
       {/if}
       {#if !known}
+        <!-- The honest pre-transcript placeholder (ux Phase 5): names the actual blocker — relay
+             down / device revoked / device offline (by name) — instead of spinning forever. -->
         <div class="placeholder">
-          <!-- "RELAY OFFLINE", not bare "OFFLINE" — this is the browser↔relay link, a different fact
-               from device presence or a paused session. -->
-          <p class="eyebrow">{$connectionState === 'error' ? 'RELAY OFFLINE' : 'RECONNECTING…'}</p>
-          <p class="sub">
-            {$connectionState === 'error'
-              ? 'The channel is offline. It will restore when the connection returns.'
-              : 'Restoring this session’s transcript.'}
-          </p>
+          <p class="eyebrow">{placeholder.eyebrow}</p>
+          <p class="sub">{placeholder.message}</p>
         </div>
       {:else if session.entries.length === 0}
         <div class="placeholder">
