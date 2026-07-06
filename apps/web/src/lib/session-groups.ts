@@ -13,6 +13,8 @@ export interface SessionRow {
   readonly id: string;
   readonly title: string | null;
   readonly status: SessionStatus;
+  /** The device the session runs on — the registry row's, or the live routing map's (ux Phase 5). */
+  readonly deviceId: string | null;
   readonly deviceName: string | null;
   /** `external` rows are adopted from the user's own Claude Code runs; the dashboard marks them. */
   readonly origin: SessionOrigin;
@@ -46,16 +48,18 @@ function firstPrompt(entries: SessionState['entries']): string | undefined {
 }
 
 /**
- * THE single merge of the persisted registry with the live channel — every surface that shows session
+ * THE single merge of the persisted registry with the live channels — every surface that shows session
  * rows or tallies (dashboard list, system bar, sidebar badge) builds from this one function, so their
  * numbers can never disagree. Registry rows are overlaid with live status; sessions launched this visit
- * but not yet persisted are appended, attributed to the watched device (the only device launches go to).
+ * but not yet persisted are appended, attributed via the store's live routing map (`deviceIdOf` — which
+ * device's channel their frames arrived on, ux Phase 5).
  */
 export function buildSessionRows(input: {
   readonly registry: readonly RegistrySessionRow[];
   readonly live: ReadonlyMap<string, SessionState>;
   readonly deviceNameOf: (deviceId: string) => string | null;
-  readonly watchedDeviceName: string | null;
+  /** The live routing map: which device a not-yet-persisted session's frames arrived on. */
+  readonly deviceIdOf: (sessionId: string) => string | null;
   /** Clock for the createdAt of not-yet-persisted live sessions (injected so the merge stays pure). */
   readonly now?: Date;
 }): SessionRow[] {
@@ -65,6 +69,7 @@ export function buildSessionRows(input: {
       id: session.id,
       title: session.title,
       status: session.status,
+      deviceId: session.deviceId,
       deviceName: input.deviceNameOf(session.deviceId),
       origin: session.origin,
       isContinuation: session.parentSessionId !== null,
@@ -79,11 +84,13 @@ export function buildSessionRows(input: {
     const title = existing?.title ?? firstPrompt(state.entries) ?? null;
     // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
     const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
+    const deviceId = existing?.deviceId ?? input.deviceIdOf(id);
     byId.set(id, {
       id,
       title,
       status,
-      deviceName: existing?.deviceName ?? input.watchedDeviceName,
+      deviceId,
+      deviceName: existing?.deviceName ?? (deviceId ? input.deviceNameOf(deviceId) : null),
       // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
       origin: existing?.origin ?? 'launched',
       isContinuation: parentSessionId !== null,

@@ -20,6 +20,7 @@
     deviceChannels,
     ensureConnections,
     seedSessionDevices,
+    sessionDevices,
     sessions as liveSessions,
   } from '$lib/session-store';
   import {
@@ -49,7 +50,7 @@
         registry: data.sessions,
         live: $liveSessions,
         deviceNameOf: () => null,
-        watchedDeviceName: null,
+        deviceIdOf: (sessionId) => $sessionDevices.get(sessionId) ?? null,
       }),
     ),
   );

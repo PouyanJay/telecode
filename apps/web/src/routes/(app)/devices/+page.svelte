@@ -5,6 +5,7 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import { deviceConsequences, revokeConsequenceText } from '$lib/device-consequences';
+  import { deviceBoardHref, deviceBoardLinkText } from '$lib/device-filter';
   import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { pairingInstructions } from '$lib/pairing-instructions';
   import { deviceChannels, sessions as liveSessions } from '$lib/session-store';
@@ -20,10 +21,20 @@
    */
   let { data, form }: { data: PageData; form: ActionData } = $props();
 
-  // Live status per session id (the demuxed channel), overlaid on the registry for honest counts.
+  // Live status per session id (the demuxed channels), overlaid on the registry for honest counts.
   const liveStatusById = $derived(
     new Map<string, SessionStatus>([...$liveSessions].map(([id, s]) => [id, s.status])),
   );
+
+  // Each device row deep-links its filtered board ("6 sessions · 1 needs you →", plan B4): total
+  // registry rows for the device + how many are blocked on the human (live status overlaid).
+  const boardSummaryOf = $derived((deviceId: string): string => {
+    const rows = data.sessions.filter((s) => s.deviceId === deviceId);
+    const needsYou = rows.filter(
+      (s) => (liveStatusById.get(s.id) ?? s.status) === 'awaiting_input',
+    ).length;
+    return deviceBoardLinkText(rows.length, needsYou);
+  });
 
   let confirmOpen = $state(false);
   let confirming = $state<{ id: string; name: string } | null>(null);
@@ -88,6 +99,9 @@
                 <div class="id">
                   <span class="name" title={device.name}>{device.name}</span>
                   <span class="did mono">{device.id.slice(0, 18)}…</span>
+                  <a class="board-link" href={deviceBoardHref(device.id)}>
+                    {boardSummaryOf(device.id)}
+                  </a>
                 </div>
                 <span class="os mono">{device.os ?? '—'}</span>
                 <span class="seen mono" data-online={status.online}>
@@ -279,6 +293,25 @@
   .did {
     font-size: var(--text-xs);
     color: var(--text-muted);
+  }
+  .board-link {
+    justify-self: start;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+    width: fit-content;
+  }
+  .board-link:hover {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .board-link:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--bg),
+      0 0 0 4px var(--focus-ring);
   }
   .os {
     font-size: var(--text-xs);

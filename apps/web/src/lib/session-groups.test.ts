@@ -8,6 +8,7 @@ function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
     id,
     title: id,
     status,
+    deviceId: 'dev-1',
     deviceName: 'studio-mbp',
     origin: 'launched',
     isContinuation: false,
@@ -89,6 +90,9 @@ describe('buildSessionRows', () => {
   ];
   const deviceNameOf = (deviceId: string): string | null =>
     deviceId === 'dev-1' ? 'macbook' : null;
+  // The live routing map: a session launched this visit arrived on dev-1's channel.
+  const deviceIdOf = (sessionId: string): string | null =>
+    sessionId === 's-live' ? 'dev-1' : null;
 
   it('overlays live status onto the persisted registry row', () => {
     const live = new Map([['s-reg', { ...initialSessionState, status: 'running' as const }]]);
@@ -96,7 +100,7 @@ describe('buildSessionRows', () => {
       registry,
       live,
       deviceNameOf,
-      watchedDeviceName: 'macbook',
+      deviceIdOf,
       now: NOW,
     });
     expect(rows).toHaveLength(1);
@@ -109,7 +113,7 @@ describe('buildSessionRows', () => {
       registry,
       live,
       deviceNameOf,
-      watchedDeviceName: null,
+      deviceIdOf,
       now: NOW,
     });
     expect(rows[0]).toMatchObject({ id: 's-reg', status: 'starting', title: 'refactor relay' });
@@ -130,7 +134,7 @@ describe('buildSessionRows', () => {
       registry,
       live,
       deviceNameOf,
-      watchedDeviceName: 'macbook',
+      deviceIdOf,
       now: NOW,
     });
     const liveRow = rows.find((r) => r.id === 's-live');
@@ -156,7 +160,7 @@ describe('buildSessionRows', () => {
       registry: chainedRegistry,
       live: liveChained,
       deviceNameOf,
-      watchedDeviceName: null,
+      deviceIdOf,
       now: NOW,
     });
     expect(rows.find((r) => r.id === 's-child')?.isContinuation).toBe(true);
@@ -173,7 +177,7 @@ describe('buildSessionRows', () => {
       registry,
       live: liveChained,
       deviceNameOf,
-      watchedDeviceName: null,
+      deviceIdOf,
       now: NOW,
     });
     expect(rows.find((r) => r.id === 's-reg')?.isContinuation).toBe(true);
@@ -185,7 +189,7 @@ describe('buildSessionRows', () => {
       registry: [],
       live,
       deviceNameOf,
-      watchedDeviceName: null,
+      deviceIdOf,
       now: NOW,
     });
     expect(rows).toHaveLength(1);
@@ -201,7 +205,7 @@ describe('buildSessionRows', () => {
       registry,
       live,
       deviceNameOf,
-      watchedDeviceName: null,
+      deviceIdOf,
       now: NOW,
     });
     expect(sessionCounts(rows)).toEqual({ running: 1, awaiting: 1 });
@@ -209,6 +213,8 @@ describe('buildSessionRows', () => {
 });
 
 describe('buildSessionRows variants', () => {
+  const deviceIdOf = (): string | null => null;
+
   it('passes registry rows through untouched when nothing is live', () => {
     const rows = buildSessionRows({
       registry: [
@@ -224,13 +230,14 @@ describe('buildSessionRows variants', () => {
       ],
       live: new Map(),
       deviceNameOf: () => 'macbook',
-      watchedDeviceName: null,
+      deviceIdOf,
     });
     expect(rows).toEqual([
       {
         id: 's-done',
         title: 'shipped',
         status: 'done',
+        deviceId: 'dev-1',
         deviceName: 'macbook',
         origin: 'external',
         isContinuation: false,
@@ -245,7 +252,7 @@ describe('buildSessionRows variants', () => {
       registry: [],
       live: new Map(),
       deviceNameOf: () => null,
-      watchedDeviceName: null,
+      deviceIdOf,
     });
     expect(rows).toEqual([]);
   });

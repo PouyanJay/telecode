@@ -114,6 +114,22 @@ test('an approval raised on a second device arrives and resolves through its own
 }) => {
   await signIn(page);
 
+  // The /devices row deep-links the board scoped to that device (plan B4) …
+  await page.goto('/devices');
+  const miniRow = page.getByRole('listitem').filter({ hasText: 'e2e-mini' });
+  await expect(miniRow.getByRole('link', { name: /needs you →/ })).toBeVisible({
+    timeout: 15_000,
+  });
+  await miniRow.getByRole('link', { name: /needs you →/ }).click();
+  await expect(page).toHaveURL(new RegExp(`\\?device=${deviceMini.deviceId}`));
+
+  // … where the device's chip is the active scope.
+  const chips = page.getByRole('navigation', { name: 'Filter sessions by device' });
+  await expect(chips.getByRole('link', { name: /e2e-mini/ })).toHaveAttribute(
+    'aria-current',
+    'true',
+  );
+
   // The second device's pending approval surfaces in the needs-you inbox: the dashboard
   // auto-subscribes the awaiting registry row, routed to the session's OWN device's channel, and
   // that daemon backfills the pending gate.
