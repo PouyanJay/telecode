@@ -59,7 +59,8 @@
   {#if row.deviceName}
     <span class="device mono">{row.deviceName}</span>
   {/if}
-  <span class="time mono">{relativeTime(row.createdAt)}</span>
+  <!-- Last ACTIVITY, matching the sort key — a week-old but recently-touched thread reads as recent. -->
+  <span class="time mono">{relativeTime(row.lastActivityAt)}</span>
   <span class="chev" aria-hidden="true">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
   </span>

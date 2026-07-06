@@ -5,6 +5,7 @@ import {
   agentMessagePayloadSchema,
   agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
+  type DiffStat,
   agentQuestionPayloadSchema,
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
@@ -66,6 +67,8 @@ export type TranscriptEntry =
       readonly requestId: string;
       readonly toolName: string;
       readonly input: Record<string, unknown>;
+      /** Rough ±lines for a file-writing tool (mockup §01-4); absent when not computable. */
+      readonly diffStat?: DiffStat;
       readonly decision: DecisionState;
       readonly at?: number;
     }
@@ -254,6 +257,7 @@ function mapHistoryEntry(entry: SessionHistoryEntry, id: string): TranscriptEntr
         requestId: entry.requestId,
         toolName: entry.toolName,
         input: entry.input,
+        ...(entry.diffStat !== undefined ? { diffStat: entry.diffStat } : {}),
         decision:
           entry.decision === 'allow'
             ? 'approved'
@@ -389,6 +393,7 @@ export function applyEnvelope(
             requestId: parsed.data.requestId,
             toolName: parsed.data.toolName,
             input: parsed.data.input,
+            ...(parsed.data.diffStat !== undefined ? { diffStat: parsed.data.diffStat } : {}),
             decision: 'pending',
             at: parsed.data.ts ?? now,
           },

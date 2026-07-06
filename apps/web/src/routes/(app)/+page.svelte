@@ -6,6 +6,7 @@
   import DeviceChips from '$lib/components/DeviceChips.svelte';
   import InboxCard from '$lib/components/InboxCard.svelte';
   import Onboarding from '$lib/components/Onboarding.svelte';
+  import OutcomeChips from '$lib/components/OutcomeChips.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import SessionGroupHeader from '$lib/components/SessionGroupHeader.svelte';
@@ -17,6 +18,13 @@
     filterRowsByDevice,
   } from '$lib/device-filter';
   import { appendSessionRows } from '$lib/housekeeping';
+  import {
+    buildOutcomeChips,
+    filterRowsByOutcome,
+    hasMultipleOutcomes,
+    outcomeBoardHref,
+    outcomeFilterFromSearch,
+  } from '$lib/outcome-filter';
   import { createSessionPager } from '$lib/session-pager.svelte';
   import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { buildInboxAsks } from '$lib/inbox';
@@ -157,6 +165,14 @@
 
   const groups = $derived(groupSessions(visibleRows));
   const counts = $derived(sessionCounts(visibleRows));
+
+  // Outcome chips on the ended group (mockup §01-7): URL state (`?outcome=`), composing with the
+  // device scope. Chips tally the UNFILTERED recent group so the way back to All always shows; the
+  // row renders only when 2+ endings coexist (a single-outcome group has nothing to scope).
+  const outcomeFilter = $derived(outcomeFilterFromSearch($page.url.searchParams));
+  const outcomeChips = $derived(buildOutcomeChips(groups.recent));
+  const showOutcomeChips = $derived(hasMultipleOutcomes(outcomeChips));
+  const recentRows = $derived(filterRowsByOutcome(groups.recent, outcomeFilter));
   const devicesOnline = $derived(
     data.devices.filter((d) => {
       const channel = deviceChannelOf($deviceChannels, d.id);
@@ -264,12 +280,28 @@
         {/if}
         {#if groups.recent.length > 0}
           <SessionGroupHeader label="Recent" actionHref="/archived" actionLabel="Archived →" />
+          {#if showOutcomeChips}
+            <OutcomeChips
+              chips={outcomeChips}
+              active={outcomeFilter}
+              search={$page.url.searchParams}
+            />
+          {/if}
+          {#if recentRows.length === 0}
+            <!-- The outcome scope is empty (its last row was archived/deleted) — name the way out. -->
+            <p class="scope-empty">
+              Nothing here anymore.
+              <a href={outcomeBoardHref(null, $page.url.searchParams)} data-sveltekit-noscroll>
+                Show all outcomes
+              </a>
+            </p>
+          {/if}
           <ul class="rows" role="list">
-            {#each groups.recent as row (row.id)}
+            {#each recentRows as row (row.id)}
               <li><SessionRow {row} /></li>
             {/each}
           </ul>
-          {#if pager.cursor !== null && deviceFilter === null}
+          {#if pager.cursor !== null && deviceFilter === null && outcomeFilter === null}
             <!-- More ended sessions exist beyond this page (T7). Hidden while a device chip filters
                  the board — a page fetch is unscoped and would mostly append rows the filter hides. -->
             <div class="load-more">
@@ -357,6 +389,26 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-2);
+  }
+  .scope-empty {
+    margin: 0;
+    padding: var(--space-3) var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+  .scope-empty a {
+    color: var(--accent);
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+  }
+  .scope-empty a:hover {
+    text-decoration: underline;
+  }
+  .scope-empty a:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--bg),
+      0 0 0 4px var(--focus-ring);
   }
   .load-more-error {
     font-size: var(--text-xs);

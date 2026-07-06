@@ -90,6 +90,8 @@ test('the launched session appears in the dashboard list with live status', asyn
   await expect(card).toBeVisible();
   await expect(card.getByRole('link', { name: /Add a hello line to the README/ })).toBeVisible();
   await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible();
+  // The gate's rough ±lines (mockup §01-4) make routine calls decidable straight from the card.
+  await expect(card.getByLabel('1 line added, 0 lines removed')).toBeVisible();
 });
 
 test('reopen = reconnect: the transcript restores after a reload (daemon backfill)', async ({

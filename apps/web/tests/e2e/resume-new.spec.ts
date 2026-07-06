@@ -59,4 +59,35 @@ test('a lost session continues as a NEW linked session from its composer', async
   const strip = page.getByRole('navigation', { name: 'Conversation lineage' });
   await expect(strip).toBeVisible({ timeout: 10_000 });
   await expect(strip).toContainText('SEGMENT 2');
+
+  // Outcome chips (mockup §01-7). The resumed thread above collapsed into its COMPLETED leaf, so
+  // mint a SECOND lost session and leave it unresumed — the board then deterministically holds 2+
+  // endings (COMPLETED + NEEDS RESTART) even on a fresh CI database. Order-tolerant asserts only
+  // (accumulated local sessions vary the counts).
+  const DOOMED = `lose this session again ${Date.now()}`;
+  await page.goto('/');
+  await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
+  await page.getByRole('button', { name: 'Launch session' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Launch session' })).toBeVisible();
+  await page.getByLabel('First instruction').fill(DOOMED);
+  await page.getByRole('button', { name: /Launch on/ }).click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
+  await expect(page.getByLabel('Session details').getByText('NEEDS RESTART')).toBeVisible();
+
+  await page.goto('/');
+  const chips = page.getByRole('navigation', { name: 'Filter ended sessions by outcome' });
+  await expect(chips).toBeVisible({ timeout: 10_000 });
+  await chips.getByRole('link', { name: /NEEDS RESTART/ }).click();
+  await expect(page).toHaveURL(/\?outcome=needs_restart/);
+  await expect(chips.getByRole('link', { name: /NEEDS RESTART/ })).toHaveAttribute(
+    'aria-current',
+    'true',
+  );
+  // The scope keeps the doomed session and hides the completed thread from earlier in this test.
+  await expect(
+    page.getByRole('main').getByRole('link', { name: new RegExp(DOOMED) }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('main').getByRole('link', { name: /pick the work back up/ }),
+  ).toHaveCount(0);
 });

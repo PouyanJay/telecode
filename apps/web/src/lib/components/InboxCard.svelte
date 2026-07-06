@@ -3,6 +3,8 @@
 
   import type { InboxAsk } from '$lib/inbox';
   import { summarizeTool } from '$lib/tool-summary';
+
+  import DiffStatBadge from './DiffStatBadge.svelte';
   import { waitingLabel } from '$lib/waiting-label';
 
   import RejectNoteForm from './RejectNoteForm.svelte';
@@ -56,6 +58,7 @@
     <p class="summary mono">
       <span class="tool">{ask.toolName}</span>
       {summarizeTool(ask.toolName, ask.input)}
+      {#if ask.diffStat}<DiffStatBadge stat={ask.diffStat} />{/if}
     </p>
     {#if isInFlight}
       <p class="status-line" role="status">

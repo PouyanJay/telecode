@@ -53,6 +53,8 @@ const adoptAnnounceTitle = process.env.FAKE_ADOPT_ANNOUNCE;
 const ADOPT_ANNOUNCE_REF = 'auto-adopt';
 
 const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
+// The gate's rough ±lines (mockup §01-4), mirrored like the real daemon computes for Write/Edit.
+const DEFAULT_DIFF_STAT = { added: 1, removed: 0 };
 
 /**
  * Launch prompt that triggers the chained-thread dance (ux Phase 3): the daemon ends the trigger
@@ -224,11 +226,16 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
         requestId,
         toolName: 'Write',
         input: DEFAULT_INPUT,
+        diffStat: DEFAULT_DIFF_STAT,
         decision: 'pending',
       });
       rec.status = 'awaiting_input';
       send('agent.message', { text: 'About to write the change' }, sid);
-      send('agent.permission_request', { requestId, toolName: 'Write', input: DEFAULT_INPUT }, sid);
+      send(
+        'agent.permission_request',
+        { requestId, toolName: 'Write', input: DEFAULT_INPUT, diffStat: DEFAULT_DIFF_STAT },
+        sid,
+      );
       return;
     }
     if (ack.data.clientRef !== CHAIN_PARENT_REF) return;
@@ -343,10 +350,15 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       requestId,
       toolName: 'Write',
       input: DEFAULT_INPUT,
+      diffStat: DEFAULT_DIFF_STAT,
       decision: 'pending',
     });
     rec.status = 'awaiting_input';
-    send('agent.permission_request', { requestId, toolName: 'Write', input: DEFAULT_INPUT }, sid);
+    send(
+      'agent.permission_request',
+      { requestId, toolName: 'Write', input: DEFAULT_INPUT, diffStat: DEFAULT_DIFF_STAT },
+      sid,
+    );
     return;
   }
 

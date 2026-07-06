@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
 import { basename } from 'node:path';
 
 import { pino, type Logger } from 'pino';
 import WebSocket from 'ws';
 
 import {
+  type DiffStat,
   adoptConfigPayloadSchema,
   isSessionEndStatus,
   echoPayloadSchema,
@@ -43,6 +45,7 @@ import {
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
 import { deriveSessionTitle, derivedMetaPatch, resolveLaunchTitle } from './derive-title';
+import { diffStatForTool } from './diff-stat';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { adoptedGateDecision } from './adopt/adopted-gate-decision';
 import { type HookEvent } from './adopt/hook-event';
@@ -630,55 +633,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * The real adapter already forces this same policy via its `PreToolUse` hook; applying it here too makes
    * the in-process test adapter model production and backstops any tool that reaches the gate ungated.
    */
-  function requestPermission(
+  async function requestPermission(
     source: Envelope,
     request: PermissionRequest,
   ): Promise<PermissionDecision> {
-    const mode =
-      source.session_id !== undefined
-        ? (sessionRecords.get(source.session_id)?.permissionMode ?? 'default')
-        : 'default';
-    if (classifyTool(request.toolName, mode) === 'allow') {
-      // A read-only (or mode-permitted) tool — auto-approve without a human gate. The tool itself is still
-      // streamed up as `agent.tool_use` (via the run's onEvent), so the transcript shows that it ran.
-      log.debug(
-        { deviceId: options.deviceId, sessionId: source.session_id, tool: request.toolName },
-        'daemon: tool auto-approved by policy',
-      );
-      return Promise.resolve({ behavior: 'allow' });
-    }
+    const autoApproved = autoApproveByPolicy(source, request);
+    if (autoApproved !== null) return autoApproved;
     const requestId = randomUUID();
-    const ts = now();
-    record(source.session_id, {
-      kind: 'permission',
+    // The gate's one shape — the transcript record and the wire frame must never drift apart.
+    const gate = {
       requestId,
       toolName: request.toolName,
       input: request.input,
-      decision: 'pending',
-      ts,
-    });
+      // A rough ±lines for file-writing tools (mockup §01-4) — enough context to decide routine
+      // calls straight from the inbox card. Best-effort: absent when it can't be computed.
+      ...(await gateDiffStat(request)),
+      ts: now(),
+    };
+    record(source.session_id, { kind: 'permission', ...gate, decision: 'pending' });
     setStatus(source.session_id, 'awaiting_input');
     return new Promise<PermissionDecision>((resolve) => {
       const pending: PendingPermission = { sessionId: source.session_id, resolve };
       pendingPermissions.set(requestId, pending);
-      const timer = armGateTimeout(source, () => {
-        if (!pendingPermissions.delete(requestId)) return false;
-        settlePermissionEntry(pending.sessionId, requestId, 'deny');
-        log.warn(
-          {
-            deviceId: options.deviceId,
-            sessionId: pending.sessionId,
-            requestId,
-            tool: request.toolName,
-          },
-          'daemon: permission gate timed out — denied',
-        );
-        resolve({
-          behavior: 'deny',
-          message: 'No operator decided in time — denied automatically by the gate timeout.',
-        });
-        return true;
-      });
+      const timer = armPermissionTimeout(source, pending, requestId, request.toolName);
       if (timer) pending.timer = timer;
       log.info(
         {
@@ -689,13 +666,77 @@ export function createDaemon(options: DaemonOptions): Daemon {
         },
         'daemon: permission requested',
       );
-      sendForSession(source, 'agent.permission_request', {
-        requestId,
-        toolName: request.toolName,
-        input: request.input,
-        ts,
-      });
+      sendForSession(source, 'agent.permission_request', gate);
     });
+  }
+
+  // The diff-stat read is in the pre-approval critical path: past this size, skip the stat entirely.
+  const MAX_DIFF_STAT_TARGET_BYTES = 512 * 1024;
+
+  /** A read-only (or mode-permitted) tool skips the human gate; null means it must gate. */
+  function autoApproveByPolicy(
+    source: Envelope,
+    request: PermissionRequest,
+  ): PermissionDecision | null {
+    const mode =
+      source.session_id !== undefined
+        ? (sessionRecords.get(source.session_id)?.permissionMode ?? 'default')
+        : 'default';
+    if (classifyTool(request.toolName, mode) !== 'allow') return null;
+    // The tool itself is still streamed up as `agent.tool_use` (via the run's onEvent), so the
+    // transcript shows that it ran.
+    log.debug(
+      { deviceId: options.deviceId, sessionId: source.session_id, tool: request.toolName },
+      'daemon: tool auto-approved by policy',
+    );
+    return { behavior: 'allow' };
+  }
+
+  /** The gate's optional ±lines, as a spreadable fragment (empty when not computable). */
+  async function gateDiffStat(request: PermissionRequest): Promise<{ diffStat?: DiffStat }> {
+    const diffStat = await diffStatForTool(request.toolName, request.input, readFileForDiff);
+    return diffStat !== undefined ? { diffStat } : {};
+  }
+
+  /** Arm the gate timeout: an undecided request denies itself and settles the transcript entry. */
+  function armPermissionTimeout(
+    source: Envelope,
+    pending: PendingPermission,
+    requestId: string,
+    toolName: string,
+  ): ReturnType<typeof setTimeout> | undefined {
+    return armGateTimeout(source, () => {
+      if (!pendingPermissions.delete(requestId)) return false;
+      settlePermissionEntry(pending.sessionId, requestId, 'deny');
+      log.warn(
+        { deviceId: options.deviceId, sessionId: pending.sessionId, requestId, tool: toolName },
+        'daemon: permission gate timed out — denied',
+      );
+      pending.resolve({
+        behavior: 'deny',
+        message: 'No operator decided in time — denied automatically by the gate timeout.',
+      });
+      return true;
+    });
+  }
+
+  /**
+   * Read a gate target for the diff stat. Null = the file doesn't exist (a brand-new Write: all
+   * additions). Anything else that can't be read HONESTLY — too large (the read sits in the
+   * pre-approval path and must never delay the gate or its timeout), binary-ish, permissions —
+   * THROWS, which the caller degrades to "no stat" rather than a wrong one.
+   */
+  async function readFileForDiff(path: string): Promise<string | null> {
+    try {
+      const info = await stat(path);
+      if (info.size > MAX_DIFF_STAT_TARGET_BYTES) {
+        throw new Error('diff-stat target too large');
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+    return await readFile(path, 'utf8');
   }
 
   /**

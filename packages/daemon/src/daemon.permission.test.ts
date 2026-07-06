@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   agentPermissionRequestPayloadSchema,
@@ -167,5 +170,87 @@ describe('approval gate + per-session permission mode', () => {
     await relay.waitForFrame(gate(sid));
     const parked = await history(relay, userId, deviceId, sid);
     expect(parked.status).toBe('awaiting_input');
+  });
+});
+
+describe('gate diff stats (mockup §01-4)', () => {
+  it('an Edit gate carries a ±lines stat on the wire AND in the backfilled entry', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const sessionId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, [
+      {
+        type: 'tool_use',
+        toolName: 'Edit',
+        input: { file_path: 'a.ts', old_string: 'one\ntwo', new_string: 'one\ntwo\nthree\nfour' },
+      },
+    ]);
+    launch(relay, userId, deviceId, sessionId, { prompt: 'edit something' });
+    const frame = await relay.waitForFrame(gate(sessionId));
+    expect(frame.payload).toMatchObject({
+      toolName: 'Edit',
+      diffStat: { added: 2, removed: 0 },
+    });
+
+    // The recorded entry carries it too, so a reopen's backfill keeps the ± on the gate card.
+    const backfill = await history(relay, userId, deviceId, sessionId);
+    const entry = backfill.entries.find((e) => e.kind === 'permission');
+    expect(entry).toMatchObject({ diffStat: { added: 2, removed: 0 } });
+  });
+
+  it('a Write gate stats against the REAL file on disk (the un-injected read path)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-diffstat-'));
+    try {
+      const target = join(dir, 'notes.md');
+      await writeFile(target, 'keep\nreplace me', 'utf8');
+      const userId = randomUUID();
+      const deviceId = randomUUID();
+      const sessionId = randomUUID();
+      const relay = await startDaemon(userId, deviceId, [
+        {
+          type: 'tool_use',
+          toolName: 'Write',
+          input: { file_path: target, content: 'keep\nnew one\nnew two' },
+        },
+      ]);
+      launch(relay, userId, deviceId, sessionId, { prompt: 'write the file' });
+      const frame = await relay.waitForFrame(gate(sessionId));
+      expect(frame.payload).toMatchObject({ diffStat: { added: 2, removed: 1 } });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a Write over a HUGE target skips the stat (the read must never delay the gate)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-diffstat-big-'));
+    try {
+      const target = join(dir, 'big.txt');
+      await writeFile(target, 'x'.repeat(600 * 1024), 'utf8'); // past the 512 KiB cap
+      const userId = randomUUID();
+      const deviceId = randomUUID();
+      const sessionId = randomUUID();
+      const relay = await startDaemon(userId, deviceId, [
+        { type: 'tool_use', toolName: 'Write', input: { file_path: target, content: 'tiny' } },
+      ]);
+      launch(relay, userId, deviceId, sessionId, { prompt: 'overwrite the big file' });
+      const frame = await relay.waitForFrame(gate(sessionId));
+      expect(frame.payload).toMatchObject({ toolName: 'Write' });
+      expect((frame.payload as { diffStat?: unknown }).diffStat).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a non-file tool gate carries NO stat (absent, never zeroes)', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const sessionId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, [
+      { type: 'tool_use', toolName: 'Bash', input: { command: 'ls' } },
+    ]);
+    launch(relay, userId, deviceId, sessionId, { prompt: 'run something' });
+    const frame = await relay.waitForFrame(gate(sessionId));
+    expect(frame.payload).toMatchObject({ toolName: 'Bash' });
+    expect((frame.payload as { diffStat?: unknown }).diffStat).toBeUndefined();
   });
 });
