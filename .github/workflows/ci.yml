@@ -47,6 +47,10 @@ jobs:
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm test
+      # The production build is a gate, not a deploy-time discovery: svelte-check and vitest are
+      # blind to compile-output bugs (e.g. TS stripping emitting invalid JS), which once let a
+      # broken `vite build` merge green and fail only in deploy.yml's image build.
+      - run: pnpm --filter @telecode/web build
 
   e2e:
     runs-on: ubuntu-latest
