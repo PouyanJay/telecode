@@ -207,11 +207,15 @@ describe('daemon: free-form handover & resume', () => {
     await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === CHILD_SESSION);
 
     await vi.waitFor(() =>
-      expect(runCalls).toContainEqual({
-        prompt: 'Use Postgres.',
-        resume: CLAUDE_SESSION,
-        forkSession: true,
-      }),
+      expect(runCalls).toContainEqual(
+        // objectContaining: the fork-resume call may also carry a cwd (the adopted session's) — match
+        // the load-bearing fields, not the exact key set.
+        expect.objectContaining({
+          prompt: 'Use Postgres.',
+          resume: CLAUDE_SESSION,
+          forkSession: true,
+        }),
+      ),
     );
   });
 

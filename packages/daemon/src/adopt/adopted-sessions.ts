@@ -28,6 +28,12 @@ export interface AdoptedSessionManager {
   ensureAdopted(input: AdoptInput): Promise<string>;
   /** Feed the relay's `session.adopted` ACK: bind the `clientRef` (Claude id) to the minted telecode id. */
   resolveAck(clientRef: string, telecodeSessionId: string): void;
+  /**
+   * Seed a Claude→telecode mapping from persisted state (ux Phase 6 T4) so an adopted session that was
+   * announced before a daemon restart is recognized on the next hook event instead of re-announced as a
+   * duplicate card. No announce, no waiter — just the binding.
+   */
+  restore(claudeSessionId: string, telecodeSessionId: string): void;
   /** Whether a `clientRef` is genuinely awaiting an ACK — so a forged/replayed ACK can be ignored. */
   isPending(claudeSessionId: string): boolean;
   /** The telecode id for an already-adopted Claude session, or undefined. */
@@ -101,6 +107,12 @@ export function createAdoptedSessionManager(options: AdoptedSessionOptions): Ado
       // The clientRef we announced is the Claude session id; bind it even if the waiter already timed out
       // (a late ACK), so a retried hook event for the same session correlates without re-announcing.
       settle(clientRef, telecodeSessionId);
+    },
+
+    restore(claudeSessionId, telecodeSessionId): void {
+      // Same binding as an ACK — this process has no pending waiter for a session announced in a prior
+      // one, and `settle`'s waiter branch is a no-op when there's none.
+      settle(claudeSessionId, telecodeSessionId);
     },
 
     isPending(claudeSessionId): boolean {

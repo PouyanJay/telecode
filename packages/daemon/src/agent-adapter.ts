@@ -92,8 +92,13 @@ export interface AgentAdapter {
 export interface FakeAgentAdapterOptions {
   /** The conversation id every run reports (so the daemon can thread `resume` across turns). */
   readonly sessionId?: string;
-  /** Invoked once per `run` with the turn's prompt + the `resume` id / `forkSession` flag it was called with. */
-  readonly onRun?: (call: { prompt: string; resume?: string; forkSession?: boolean }) => void;
+  /** Invoked once per `run` with the turn's prompt + the resume id / forkSession flag / cwd it was called with. */
+  readonly onRun?: (call: {
+    prompt: string;
+    resume?: string;
+    forkSession?: boolean;
+    cwd?: string;
+  }) => void;
   /** The terminal reason every run reports (simulates the SDK's `result` subtype; default none). */
   readonly endReason?: AgentEndReason;
 }
@@ -111,12 +116,13 @@ export function createFakeAgentAdapter(
   return {
     async run(
       prompt: string,
-      { canUseTool, onEvent, resume, forkSession }: AgentRunOptions,
+      { canUseTool, onEvent, resume, forkSession, cwd }: AgentRunOptions,
     ): Promise<AgentRunResult> {
       options.onRun?.({
         prompt,
         ...(resume !== undefined ? { resume } : {}),
         ...(forkSession !== undefined ? { forkSession } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
       });
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];

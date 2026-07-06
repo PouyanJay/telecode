@@ -142,7 +142,11 @@ describe('follow-ups: launch → turn → user.message → resumed turn', () => 
     browser.close();
   });
 
-  it('drops a follow-up for an unknown session (no conversation to resume)', async () => {
+  it('drops a follow-up for an id the daemon never held — no phantom state (T4)', async () => {
+    // A stale tab (or a hostile client) can send any UUID. The daemon must NOT fabricate + persist a
+    // `needs_restart` record for a session it never owned (that would be an unbounded write vector);
+    // `needs_restart` is reserved for a launched session it DOES hold but lost the resume id (daemon-
+    // level test coverage). Here the id is unknown → the follow-up streams nothing back.
     const browser = await connectBrowser(relayUrl, userId, deviceId);
     const seen: string[] = [];
     browser.on('message', (raw: Buffer) => {
@@ -162,7 +166,6 @@ describe('follow-ups: launch → turn → user.message → resumed turn', () => 
     );
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    // The daemon has no conversation for this session id, so it streams nothing back.
     expect(seen).not.toContain('session.started');
     expect(seen).not.toContain('session.ended');
     expect(runs).toEqual([]);

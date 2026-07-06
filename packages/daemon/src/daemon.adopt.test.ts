@@ -14,13 +14,16 @@ import {
   openPayload,
   sealPayload,
   sessionAdoptedPayloadSchema,
+  sessionHistoryPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { pino } from 'pino';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createFakeAgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
 import { hookRpc } from './hook-rpc';
+import { createSessionStore } from './sessions/session-store';
 import { markViewerPresent, startFakeRelay, type FakeRelay } from './fake-relay';
 
 /**
@@ -1155,5 +1158,147 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
     ackAdopted(relay, announce);
     await after;
+  });
+});
+
+describe('daemon: adopted session survives a restart without a duplicate card (session-identity T4)', () => {
+  let dir: string;
+  // Track every daemon/relay so a thrown assertion never leaks a reconnect-looping daemon or an open WS
+  // server into a later test (the single afterEach drains them regardless of outcome).
+  const started: { relay: FakeRelay; daemon: Daemon }[] = [];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-restart-'));
+  });
+  afterEach(async () => {
+    await Promise.all(started.splice(0).map((s) => s.daemon.stop()));
+    await Promise.all(started.map((s) => s.relay.close()));
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function startAdoptDaemon(): Promise<{ relay: FakeRelay; daemon: Daemon; socket: string }> {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const socket = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      sessionStore: createSessionStore({ dir: join(dir, 'sessions') }),
+      adopt: { socketPath: socket, ackTimeoutMs: 2000 },
+      logger: pino({ level: 'silent' }),
+    });
+    await daemon.start();
+    started.push({ relay, daemon });
+    return { relay, daemon, socket };
+  }
+
+  async function awaitPersistedClaudeId(): Promise<void> {
+    await vi.waitFor(
+      async () => {
+        const persisted = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(persisted?.claudeSessionId).toBe(CLAUDE_SESSION);
+      },
+      { timeout: 5000, interval: 50 },
+    );
+  }
+
+  const readTool = (session: string) => ({
+    hook_event_name: 'PreToolUse',
+    session_id: session,
+    cwd: '/repo',
+    tool_name: 'Read',
+    tool_input: { file_path: 'README.md' },
+    tool_use_id: 'toolu_restart',
+  });
+
+  it('recognizes the adopted Claude session after a restart instead of re-announcing it', async () => {
+    // Daemon A: adopt the session and let the mapping persist.
+    const a = await startAdoptDaemon();
+    const firstDecision = hookRpc(a.socket, readTool(CLAUDE_SESSION));
+    ackAdopted(a.relay, await a.relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await firstDecision;
+    await awaitPersistedClaudeId();
+    await a.daemon.stop();
+    await a.relay.close();
+
+    // Daemon B: a fresh process on the same store. Its FIRST session.reconcile (sent right after
+    // hello.ack) must already list the restored id — that's what keeps the relay from retiring the
+    // restored non-terminal adopted row as stale.
+    const b = await startAdoptDaemon();
+    const reconcile = await b.relay.waitForFrame((e) => e.type === 'session.reconcile');
+    expect((reconcile.payload as { heldSessionIds: string[] }).heldSessionIds).toContain(
+      TELECODE_SESSION,
+    );
+
+    // And a hook event for the SAME Claude session is handled WITHOUT a second `session.adopted`
+    // announce — the restored mapping is recognized, so the read-tool decision resolves `allow`
+    // immediately (a re-announce would await an ack that never comes, then fail-closed to `ask`).
+    const decision = await hookRpc(b.socket, readTool(CLAUDE_SESSION));
+    expect(decision).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
+  });
+
+  it('restores an adopted transcript grown by a Stop after adoption (not the adoption snapshot)', async () => {
+    const transcriptPath = join(dir, 'transcript.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'work done after Stop' }] },
+      })}\n`,
+    );
+
+    // Daemon A: adopt, then a Stop grows the transcript (the Stop-hook persist keeps disk fresh).
+    const a = await startAdoptDaemon();
+    const firstDecision = hookRpc(a.socket, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(a.relay, await a.relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await firstDecision;
+    await hookRpc(a.socket, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      transcript_path: transcriptPath,
+    });
+    await vi.waitFor(
+      async () => {
+        const persisted = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(
+          persisted?.transcript.some(
+            (e) => e.kind === 'message' && e.text === 'work done after Stop',
+          ),
+        ).toBe(true);
+      },
+      { timeout: 5000, interval: 50 },
+    );
+    await a.daemon.stop();
+    await a.relay.close();
+
+    // Daemon B: a subscribe backfills the POST-Stop transcript, not a frozen adoption-time snapshot.
+    const b = await startAdoptDaemon();
+    b.relay.send(
+      makeEnvelope({
+        type: 'session.subscribe',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: {},
+      }),
+    );
+    const history = await b.relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === TELECODE_SESSION,
+    );
+    const payload = sessionHistoryPayloadSchema.parse(history.payload);
+    expect(
+      payload.entries.some((e) => e.kind === 'message' && e.text === 'work done after Stop'),
+    ).toBe(true);
   });
 });
