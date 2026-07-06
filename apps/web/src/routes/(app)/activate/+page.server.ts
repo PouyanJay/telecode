@@ -24,10 +24,10 @@ export const actions: Actions = {
       return fail(400, { error: 'Enter the code shown by the daemon.', code });
     }
     // user_id is the authenticated user's — never taken from the client.
-    const ok = await approveDevice(code, locals.user.id);
-    if (!ok) {
+    const result = await approveDevice(code, locals.user.id);
+    if (!result.ok) {
       return fail(400, { error: codeExpiredError, code });
     }
-    return { activated: true };
+    return { activated: true, restored: result.restored, deviceName: result.deviceName };
   },
 };

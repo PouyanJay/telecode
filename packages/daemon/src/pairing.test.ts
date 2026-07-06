@@ -119,9 +119,10 @@ describe('pairDevice', () => {
     await pairDevice({
       relayHttpUrl,
       intervalMs: 1,
-      onPrompt: ({ userCode, verificationUri }) => {
+      onPrompt: ({ userCode, verificationUri, expiresInSeconds }) => {
         expect(userCode).toBe('ABCD-2345');
         expect(verificationUri).toBe('http://relay.test/activate');
+        expect(expiresInSeconds).toBe(300);
         promptedBeforePoll.push(requests.filter((r) => r.url === '/device/token').length);
       },
     });

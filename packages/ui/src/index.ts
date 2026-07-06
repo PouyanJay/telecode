@@ -4,6 +4,7 @@
  */
 export { BrandLogo } from './BrandLogo';
 export { Button } from './Button';
+export { ConfirmDialog } from './ConfirmDialog';
 export { Drawer } from './Drawer';
 export { IconButton } from './IconButton';
 export { Panel } from './Panel';

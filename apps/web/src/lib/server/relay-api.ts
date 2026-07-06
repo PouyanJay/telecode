@@ -1,4 +1,5 @@
 import {
+  deviceApproveResponseSchema,
   SESSION_ORIGINS,
   SESSION_STATUSES,
   type SessionOrigin,
@@ -40,6 +41,18 @@ export interface RelayDevice {
   lastSeenAt: Date | null;
   /** The device daemon's X25519 public key (base64) for E2E key exchange; null if paired pre-E2E. */
   publicKey: string | null;
+}
+
+/** A revoked device the user still owns — shown in the Devices page's Revoked section. */
+export interface RelayRevokedDevice {
+  id: string;
+  name: string;
+  os: string | null;
+  revokedAt: Date;
+  /** Sessions this device ever held — the history that stays attached after revoke. */
+  sessionCount: number;
+  /** True while a verified re-authorization request is pending (the daemon is re-pairing). */
+  pendingReauth: boolean;
 }
 
 /** A session in the user's registry (routing metadata only) — the dashboard's persisted list source. */
@@ -171,6 +184,38 @@ export async function listDevices(sessionToken: string): Promise<RelayListResult
       os: device.os,
       lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
       publicKey: device.public_key,
+    }));
+  });
+}
+
+/** The relay's `GET /me/devices/revoked` body — validated, not cast (this is a trust boundary). */
+const revokedDeviceListBodySchema = z.object({
+  devices: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      os: z.string().nullable(),
+      revoked_at: z.string(),
+      session_count: z.number(),
+      pending_reauth: z.boolean(),
+    }),
+  ),
+});
+
+/** List the user's revoked devices (session-token authed) — the Devices page's Revoked section. */
+export async function listRevokedDevices(
+  sessionToken: string,
+): Promise<RelayListResult<RelayRevokedDevice>> {
+  return fetchRegistryList('/me/devices/revoked', sessionToken, (body) => {
+    const parsed = revokedDeviceListBodySchema.safeParse(body);
+    if (!parsed.success) return null;
+    return parsed.data.devices.map((device) => ({
+      id: device.id,
+      name: device.name,
+      os: device.os,
+      revokedAt: new Date(device.revoked_at),
+      sessionCount: device.session_count,
+      pendingReauth: device.pending_reauth,
     }));
   });
 }
@@ -335,13 +380,32 @@ export async function mintChannelToken(sessionToken: string): Promise<string | n
  * Approve a pending device pairing for the authenticated user (server-derived). Service-secret guarded;
  * the relay binds the device to `userId` — the client never supplies it. Resolves true on success.
  */
-export async function approveDevice(userCode: string, userId: string): Promise<boolean> {
+/**
+ * The outcome of a device approval. `restored` is true when the approval re-authorized a revoked
+ * device (identity + history preserved) rather than pairing a new one, and `deviceName` names it so
+ * the activate page can say so. A pre-restore relay (deploy skew) returns just `{ ok: true }` → we
+ * default to `restored: false`, matching its old behavior.
+ */
+export interface ApproveDeviceResult {
+  readonly ok: boolean;
+  readonly restored: boolean;
+  readonly deviceName: string | null;
+}
+
+export async function approveDevice(
+  userCode: string,
+  userId: string,
+): Promise<ApproveDeviceResult> {
   const res = await fetch(`${RELAY_HTTP_URL}/device/approve`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-telecode-service-secret': SERVICE_SECRET },
     body: JSON.stringify({ user_code: userCode, user_id: userId }),
   });
-  return res.ok;
+  if (!res.ok) return { ok: false, restored: false, deviceName: null };
+  // Tolerate an older relay that returns a bare { ok: true } with no restore fields.
+  const parsed = deviceApproveResponseSchema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) return { ok: true, restored: false, deviceName: null };
+  return { ok: true, restored: parsed.data.restored, deviceName: parsed.data.device_name };
 }
 
 /** Revoke a session (logout). Best-effort. */

@@ -206,7 +206,7 @@ describe('runServiceCli — start / stop / logs dispatch', () => {
   // Built per test with the live temp `home` so the closure never reads a stale binding.
   function makeBase(currentHome: string, write: (text: string) => void) {
     return {
-      env: {} as NodeJS.ProcessEnv,
+      env: {},
       platform: 'darwin' as const,
       home: currentHome,
       runner: createRecordingRunner().runner,
@@ -335,5 +335,74 @@ describe('runServiceCli — install guards', () => {
       readFile(join(home, 'Library', 'LaunchAgents', 'ai.telecode.daemon.plist'), 'utf8'),
     ).resolves.toContain('ai.telecode.daemon');
     expect(out.join('')).toMatch(/-g|global/i);
+  });
+});
+
+describe('runServiceCli — status surfaces a pending pairing code', () => {
+  const UID = 501;
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'telecode-svc-pairing-'));
+  });
+
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  async function statusOutput(now: number): Promise<string> {
+    const { runner } = createRecordingRunner();
+    const out: string[] = [];
+    await runServiceCli({
+      argv: ['service', 'status'],
+      env: {},
+      platform: 'darwin',
+      home,
+      runner,
+      uid: UID,
+      nodePath: '/usr/local/bin/node',
+      binPath: '/opt/telecode/bin/telecode.mjs',
+      now: () => now,
+      write: (text: string): void => void out.push(text),
+    });
+    return out.join('');
+  }
+
+  async function writePairingState(expiresAt: number): Promise<void> {
+    const path = join(home, '.telecode', 'run', 'pairing.json');
+    await mkdir(join(home, '.telecode', 'run'), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        userCode: 'ABCD-2345',
+        verificationUri: 'http://relay.test/activate',
+        expiresAt,
+      }),
+    );
+  }
+
+  it('shows the fresh pairing code — the headless re-authorization path (P0-3 #4)', async () => {
+    await writePairingState(2_000_000);
+    const text = await statusOutput(1_000_000);
+    expect(text).toMatch(/awaiting pairing/i);
+    expect(text).toContain('ABCD-2345');
+    expect(text).toContain('http://relay.test/activate');
+  });
+
+  it('shows no pairing section when nothing is pending', async () => {
+    expect(await statusOutput(1_000_000)).not.toMatch(/awaiting pairing/i);
+  });
+
+  it('hides an expired code (a dead code must never be shown)', async () => {
+    await writePairingState(500_000);
+    expect(await statusOutput(1_000_000)).not.toMatch(/awaiting pairing/i);
+  });
+
+  it('tolerates a corrupt pairing file — status still renders without the section', async () => {
+    await mkdir(join(home, '.telecode', 'run'), { recursive: true });
+    await writeFile(join(home, '.telecode', 'run', 'pairing.json'), 'not-json{');
+    const text = await statusOutput(1_000_000);
+    expect(text).toMatch(/installed:/i);
+    expect(text).not.toMatch(/awaiting pairing/i);
   });
 });

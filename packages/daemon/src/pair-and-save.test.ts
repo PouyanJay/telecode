@@ -124,4 +124,18 @@ describe('pairAndSaveCredentials', () => {
     expect(pair.mock.calls[0]![0].priorDeviceToken).toBeUndefined();
     expect(creds.deviceToken).toBe(APPROVED.deviceToken);
   });
+
+  it('forwards the onPrompt hook to the grant so the composition root controls surfacing', async () => {
+    const onPrompt = (): void => undefined;
+    const pair = vi.fn(async (_options: PairDeviceOptions) => APPROVED);
+    await pairAndSaveCredentials({
+      relayHttpUrl: 'http://relay.test',
+      credentialsPath,
+      name: 'mbp',
+      os: 'macOS 15.4',
+      onPrompt,
+      pair,
+    });
+    expect(pair.mock.calls[0]![0].onPrompt).toBe(onPrompt);
+  });
 });

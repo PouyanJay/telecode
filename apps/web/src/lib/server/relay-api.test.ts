@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { listDevices, listSessions } from './relay-api';
+import { approveDevice, listDevices, listRevokedDevices, listSessions } from './relay-api';
 
 /**
  * Error ≠ empty (honesty pass T4): a relay outage must be distinguishable from "you have no devices /
@@ -73,6 +73,85 @@ describe('listDevices', () => {
     stubFetch(() => Promise.resolve(okJson({ devices: [{ id: 42 }] })));
     const result = await listDevices('tok');
     expect(result).toEqual({ ok: false, items: [] });
+  });
+});
+
+describe('listRevokedDevices', () => {
+  it('maps revoked devices with history count + pending-reauth on a 200', async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        okJson({
+          devices: [
+            {
+              id: 'd1',
+              name: 'old-mbp',
+              os: 'macOS 15.4',
+              revoked_at: '2026-07-05T10:00:00.000Z',
+              session_count: 3,
+              pending_reauth: true,
+            },
+          ],
+        }),
+      ),
+    );
+    const result = await listRevokedDevices('tok');
+    expect(result.ok).toBe(true);
+    expect(result.items[0]).toEqual({
+      id: 'd1',
+      name: 'old-mbp',
+      os: 'macOS 15.4',
+      revokedAt: new Date('2026-07-05T10:00:00.000Z'),
+      sessionCount: 3,
+      pendingReauth: true,
+    });
+  });
+
+  it('returns ok:false on an error status (outage ≠ no revoked devices)', async () => {
+    stubFetch(() => Promise.resolve(new Response('boom', { status: 502 })));
+    expect(await listRevokedDevices('tok')).toEqual({ ok: false, items: [] });
+  });
+
+  it('returns ok:false on a body that does not match the contract', async () => {
+    stubFetch(() => Promise.resolve(okJson({ devices: [{ id: 'd1' }] })));
+    expect(await listRevokedDevices('tok')).toEqual({ ok: false, items: [] });
+  });
+});
+
+describe('approveDevice', () => {
+  it('reports restored + device name from the relay response', async () => {
+    stubFetch(() => Promise.resolve(okJson({ ok: true, restored: true, device_name: 'mbp' })));
+    expect(await approveDevice('ABCD-2345', 'user-1')).toEqual({
+      ok: true,
+      restored: true,
+      deviceName: 'mbp',
+    });
+  });
+
+  it('reports a fresh pair as not-restored', async () => {
+    stubFetch(() => Promise.resolve(okJson({ ok: true, restored: false, device_name: null })));
+    expect(await approveDevice('ABCD-2345', 'user-1')).toEqual({
+      ok: true,
+      restored: false,
+      deviceName: null,
+    });
+  });
+
+  it('tolerates an older relay that returns a bare { ok: true } (deploy skew)', async () => {
+    stubFetch(() => Promise.resolve(okJson({ ok: true })));
+    expect(await approveDevice('ABCD-2345', 'user-1')).toEqual({
+      ok: true,
+      restored: false,
+      deviceName: null,
+    });
+  });
+
+  it('reports failure on a non-ok status', async () => {
+    stubFetch(() => Promise.resolve(new Response('nope', { status: 404 })));
+    expect(await approveDevice('ABCD-2345', 'user-1')).toEqual({
+      ok: false,
+      restored: false,
+      deviceName: null,
+    });
   });
 });
 

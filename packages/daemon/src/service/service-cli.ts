@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 
+import { loadPairingState, resolvePairingStatePath, type PairingState } from '../pairing-state';
 import { resolveRelayUrl } from '../relay-url';
 import type { CommandRunner } from './command-runner';
 import { createExecCommandRunner } from './exec-command-runner';
@@ -36,6 +37,8 @@ export interface ServiceCliOptions {
    * of the adoption dependency; omitted (e.g. in most tests) it is a no-op.
    */
   readonly onUninstallHooks?: () => Promise<void>;
+  /** Clock for the pairing-state expiry check; defaults to `Date.now`. Injected in tests. */
+  readonly now?: () => number;
   /** Sink for output; defaults to stdout. Injected in tests. */
   readonly write?: (text: string) => void;
 }
@@ -45,7 +48,7 @@ const USAGE = 'usage: telecode service <install|uninstall|start|stop|status|logs
 // Tail size for `readRecentLogLines` — a bounded read so a large (un-rotated) log never blows memory.
 const LOG_TAIL_LINES = 200;
 
-function formatStatus(status: ServiceStatus): string {
+function formatStatus(status: ServiceStatus, pairing: PairingState | null): string {
   const lines = ['telecode background service', `  installed: ${status.installed ? 'yes' : 'no'}`];
   if (status.installed) {
     lines.push(
@@ -54,6 +57,11 @@ function formatStatus(status: ServiceStatus): string {
       `  log: ${status.logPath}`,
       `  unit: ${status.unitPath}`,
     );
+  }
+  // The headless re-authorization path: a background daemon that is (re-)pairing has no terminal to
+  // show its code, so status is where the user finds it.
+  if (pairing) {
+    lines.push(`  awaiting pairing: enter ${pairing.userCode} at ${pairing.verificationUri}`);
   }
   lines.push('');
   return lines.join('\n');
@@ -98,11 +106,16 @@ function resolveInstallDaemonArgs(
   }
 }
 
-async function dispatchServiceCommand(
-  manager: ServiceManager,
-  subcommand: string | undefined,
-  write: (text: string) => void,
-): Promise<number> {
+/** The resolved context a dispatched `service` subcommand runs against. */
+interface DispatchContext {
+  readonly manager: ServiceManager;
+  readonly subcommand: string | undefined;
+  readonly write: (text: string) => void;
+  readonly readPendingPairing: () => Promise<PairingState | null>;
+}
+
+async function dispatchServiceCommand(ctx: DispatchContext): Promise<number> {
+  const { manager, subcommand, write } = ctx;
   switch (subcommand) {
     case 'install':
       return reportAction(await manager.install(), write);
@@ -113,7 +126,7 @@ async function dispatchServiceCommand(
     case 'stop':
       return reportAction(await manager.stop(), write);
     case 'status':
-      write(formatStatus(await manager.status()));
+      write(formatStatus(await manager.status(), await ctx.readPendingPairing()));
       return 0;
     case 'logs': {
       const { logPath } = await manager.status();
@@ -169,7 +182,11 @@ export async function runServiceCli(options: ServiceCliOptions): Promise<number>
     return 1;
   }
 
-  const exitCode = await dispatchServiceCommand(manager, subcommand, write);
+  const now = options.now ?? ((): number => Date.now());
+  const readPendingPairing = (): Promise<PairingState | null> =>
+    loadPairingState(resolvePairingStatePath(home), now);
+
+  const exitCode = await dispatchServiceCommand({ manager, subcommand, write, readPendingPairing });
   // Disengage cleanly: uninstalling the service is the user turning telecode off, so also remove its Claude
   // Code hooks — otherwise they keep firing `telecode hook` on every tool call with no daemon to answer.
   // Only on a *successful* uninstall; every other subcommand leaves the hooks untouched.

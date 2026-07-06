@@ -14,6 +14,8 @@ import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
 import { runDoctorCli } from './doctor-cli';
 import { detectOs } from './os-info';
 import { pairAndSaveCredentials } from './pair-and-save';
+import { createPairingPrompt } from './pairing-prompt';
+import { clearPairingState, resolvePairingStatePath } from './pairing-state';
 import { resolveRelayUrl } from './relay-url';
 import { createExecCommandRunner } from './service/exec-command-runner';
 import { offerBackgroundService } from './service/offer-background-service';
@@ -195,14 +197,32 @@ releaseLockOnExit(lock.release);
 // the keypair and presents the dead token as restore evidence so the relay re-authorizes the SAME
 // device row (history intact) once the owner approves.
 const credentialsPath = join(homedir(), '.telecode', 'credentials.json');
-const runPairing = (): Promise<StoredCredentials> =>
-  pairAndSaveCredentials({
-    relayHttpUrl,
-    credentialsPath,
-    name: hostname(),
-    os: detectOs(),
-    logger: log,
-  });
+// The prompt surfaces the pairing code three ways (see createPairingPrompt); the state file is what
+// `telecode service status` reads for a headless daemon.
+const pairingStatePath = resolvePairingStatePath(homedir());
+const runPairing = async (): Promise<StoredCredentials> => {
+  try {
+    return await pairAndSaveCredentials({
+      relayHttpUrl,
+      credentialsPath,
+      name: hostname(),
+      os: detectOs(),
+      logger: log,
+      onPrompt: createPairingPrompt({
+        pairingStatePath,
+        isTty: Boolean(process.stdout.isTTY),
+        logger: log,
+      }),
+    });
+  } finally {
+    // Settled either way: approved (code consumed) or failed/expired (code dead) — never show it again.
+    // Caught (not awaited-bare) so a cleanup failure can't mask the try's error; logged so a stale
+    // "awaiting pairing" status line is diagnosable rather than silent.
+    await clearPairingState(pairingStatePath).catch((err: unknown) =>
+      log.warn({ err }, 'daemon: could not clear pairing state'),
+    );
+  }
+};
 
 let credentials = await loadCredentials(credentialsPath);
 const wasJustPaired = !credentials;

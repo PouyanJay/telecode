@@ -12,6 +12,8 @@ export interface PairAndSaveOptions {
   /** Short OS descriptor (e.g. "macOS 15.4"). */
   readonly os: string;
   readonly logger?: Logger;
+  /** Surfaces the pairing code (state file / TTY block); wired by the composition root. */
+  readonly onPrompt?: PairDeviceOptions['onPrompt'];
   /** Injectable grant runner for tests; defaults to the real HTTP pairing client. */
   readonly pair?: (options: PairDeviceOptions) => Promise<DeviceCredentials>;
 }
@@ -42,6 +44,7 @@ export async function pairAndSaveCredentials(
     os: options.os,
     publicKey: keyPair.publicKey,
     ...(prior ? { priorDeviceToken: prior.deviceToken } : {}),
+    ...(options.onPrompt ? { onPrompt: options.onPrompt } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
   const creds: StoredCredentials = { ...paired, ...keyPair };
