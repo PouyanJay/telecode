@@ -29,6 +29,7 @@ import {
   renameSession,
   requestAdoptConfig,
   resetSessionTitle,
+  resumeAsNew,
   seedSessionMetas,
   seedSessionTitleOverrides,
   sessionDevices,
@@ -51,6 +52,7 @@ const deviceId = 'device-1';
 /** A fake relay connection that records launch/subscribe calls and lets the test emit inbound frames. */
 function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
+  const resumed: { sessionId: string; payload: { prompt: string; clientRef?: string } }[] = [];
   const subscribed: string[] = [];
   const answered: { sessionId: string; payload: unknown }[] = [];
   const handovers: { sessionId: string; payload: unknown }[] = [];
@@ -65,6 +67,7 @@ function makeFakeConnection() {
     options.onStatus('connected');
     return {
       launch: (payload) => launched.push(payload),
+      resumeNew: (sessionId, payload) => resumed.push({ sessionId, payload }),
       subscribe: (id) => subscribed.push(id),
       sendUserMessage: () => undefined,
       decide: () => undefined,
@@ -79,6 +82,7 @@ function makeFakeConnection() {
   return {
     create,
     launched,
+    resumed,
     subscribed,
     answered,
     handovers,
@@ -521,6 +525,7 @@ describe('session rename (ux Phase 6 T6)', () => {
         options.onStatus('connected');
         return {
           launch: () => undefined,
+          resumeNew: () => undefined,
           subscribe: () => undefined,
           sendUserMessage: () => undefined,
           decide: () => undefined,
@@ -676,5 +681,64 @@ describe('session housekeeping actions (ux Phase 6 T7)', () => {
     const result = await deleteSessionForever('sess-stays');
     expect(result.ok).toBe(false);
     expect(get(sessions).has('sess-stays')).toBe(true);
+  });
+});
+
+describe('resume-as-new (ux Phase 6 T8)', () => {
+  it('sends session.resume_new on the parent’s channel and resolves with the minted child id', async () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started('parent-1'); // routes the parent to this device's channel
+
+    const pending = resumeAsNew('parent-1', 'continue where it left off');
+    expect(fake.resumed).toHaveLength(1);
+    const sent = fake.resumed[0]!;
+    expect(sent.sessionId).toBe('parent-1');
+    expect(sent.payload.prompt).toBe('continue where it left off');
+    expect(sent.payload.clientRef).toBeDefined();
+
+    // The daemon's child session.started echoes the clientRef — the promise resolves with the child.
+    fake.started('child-9', sent.payload.clientRef);
+    await expect(pending).resolves.toBe('child-9');
+  });
+
+  it('rejects when no device channel exists at all', async () => {
+    await expect(resumeAsNew('sess-orphan', 'x')).rejects.toThrow(/not connected/i);
+  });
+
+  it('falls back to the SOLE connected device for an un-routed parent (registry-outage edge)', async () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    // The parent was never routed (no frame seen this visit) — with exactly one device, that device
+    // is the honest target, mirroring launchTarget/connectionFor.
+    const pending = resumeAsNew('sess-unrouted', 'continue it');
+    expect(fake.resumed).toHaveLength(1);
+    expect(fake.resumed[0]!.sessionId).toBe('sess-unrouted');
+    fake.started('child-2', fake.resumed[0]!.payload.clientRef);
+    await expect(pending).resolves.toBe('child-2');
+  });
+
+  it('rejects on timeout when no child ever starts', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = makeFakeConnection();
+      connect(
+        { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+        fake.create,
+      );
+      fake.started('parent-2');
+      const pending = resumeAsNew('parent-2', 'never answered');
+      const outcome = expect(pending).rejects.toThrow(/timed out/i);
+      vi.advanceTimersByTime(20_000);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

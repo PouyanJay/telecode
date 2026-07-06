@@ -11,6 +11,7 @@ import {
   type QuestionAnswerPayload,
   type SessionControlAction,
   type SessionLaunchPayload,
+  type SessionResumeNewPayload,
 } from '@telecode/protocol';
 
 import { createBrowserSessionCipher } from './session-cipher';
@@ -65,6 +66,13 @@ export interface RelayConnectionOptions {
 export interface RelayConnection {
   /** Launch a new agent session on this connection's device. The relay mints the `session_id`. */
   launch(payload: SessionLaunchPayload): void;
+  /**
+   * Continue a TERMINAL session as a NEW linked one (ux Phase 6 T8): the daemon fork-resumes the
+   * conversation when it still can, fresh-launches otherwise, minting the child via `session.chained`.
+   * Sealed like a launch (box-sealed to the daemon) — never under the parent's content key, which a
+   * needs_restart parent may no longer have. `sessionId` names the PARENT.
+   */
+  resumeNew(sessionId: string, payload: SessionResumeNewPayload): void;
   /** Re-attach to an existing session on reopen; the daemon replies with `session.history` (backfill). */
   subscribe(sessionId: string): void;
   /** Send a follow-up instruction to steer an existing session (resumes its agent conversation). */
@@ -348,6 +356,20 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
           });
         }
         return buildFrame('session.launch', { payload });
+      });
+    },
+    resumeNew(sessionId: string, payload: SessionResumeNewPayload): void {
+      enqueueSend(async () => {
+        if (cipher.enabled) {
+          const sealed = await cipher.sealLaunch(payload);
+          return buildFrame('session.resume_new', {
+            sessionId,
+            payload: sealed.payload,
+            nonce: sealed.nonce,
+            senderPublicKey: sealed.senderPublicKey,
+          });
+        }
+        return buildFrame('session.resume_new', { sessionId, payload });
       });
     },
     subscribe(sessionId: string): void {

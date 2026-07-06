@@ -24,6 +24,7 @@
   import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
+  import { canResumeAsNew } from '$lib/resume-as-new';
   import {
     answer,
     answerHandover,
@@ -34,6 +35,7 @@
     deviceChannels,
     renameSession,
     resetSessionTitle,
+    resumeAsNew,
     sendControl,
     sendUserMessage,
     sessionDevices,
@@ -228,7 +230,37 @@
     }),
   );
 
+  // Resume-as-new (T8): a session that CANNOT continue in place (needs_restart any origin; ended
+  // adopted) routes its composer to a forked continuation instead of a dead-end follow-up.
+  const resumeMode = $derived(
+    effectiveStatus !== undefined &&
+      canResumeAsNew(effectiveStatus, registryRow?.origin ?? 'launched'),
+  );
+  let resuming = $state(false);
+  let resumeError = $state<string | null>(null);
+  // Standing copy for the flipped composer, derived here so the markup stays scannable.
+  const resumeNotice =
+    'This session can’t continue here. Your next message starts a new linked session ' +
+    'that picks up where it left off.';
+
+  async function submitResumeAsNew(text: string): Promise<void> {
+    resumeError = null;
+    resuming = true;
+    try {
+      const childId = await resumeAsNew(sessionId, text);
+      await goto(`/sessions/${childId}`, { invalidateAll: true });
+    } catch (err) {
+      resumeError = err instanceof Error ? err.message : 'Could not resume. Please try again.';
+    } finally {
+      resuming = false;
+    }
+  }
+
   function submitPrompt(text: string): void {
+    if (resumeMode) {
+      void submitResumeAsNew(text);
+      return;
+    }
     sendUserMessage(sessionId, text);
   }
 
@@ -377,7 +409,7 @@
 
       {#if known}
         <div class="dock hairline-t">
-          {#if session.status === 'turn_limit'}
+          {#if session.status === 'turn_limit' && !resumeMode}
             <!-- The honest affordance for a budget-exhausted run (B5): a pause, not a death. Standing
                  (no dismiss) — it reads for as long as the state does. -->
             <SessionNotice
@@ -385,10 +417,24 @@
               message="Turn limit reached — the run stopped early. Send a message to continue it."
             />
           {/if}
+          {#if resumeMode}
+            <!-- Resume-as-new (T8): the honest affordance for a session that CANNOT continue in
+                 place. Standing (no dismiss) — it reads for as long as the state does. -->
+            <SessionNotice tone="warning" message={resumeNotice} />
+          {/if}
+          {#if resumeError}
+            <SessionNotice
+              message={resumeError}
+              tone="danger"
+              ondismiss={() => (resumeError = null)}
+            />
+          {/if}
           <Composer
-            isBusy={isBusy}
-            submitLabel="Send"
-            placeholder="Send a follow-up instruction…"
+            isBusy={isBusy || resuming}
+            submitLabel={resumeMode ? 'Resume as new' : 'Send'}
+            placeholder={resumeMode
+              ? 'Continue this work in a new session…'
+              : 'Send a follow-up instruction…'}
             onsend={submitPrompt}
           />
         </div>

@@ -60,6 +60,12 @@ export const MESSAGE_TYPES = [
   // forked telecode-owned continuation that resumes the adopted conversation with this answer as its turn.
   'handover.answer',
   'user.message',
+  // resume-as-new (web -> daemon, ux Phase 6 T8): continue a TERMINAL session as a NEW linked one —
+  // the daemon fork-resumes the conversation when it still can (SDK resume + forkSession) or fresh-
+  // launches otherwise, minting the child through the existing `session.chained` machinery. Sealed
+  // like `session.launch` (box-sealed to the daemon), NOT under the parent's content key: a
+  // needs_restart parent after a restart may have no key anywhere, and this frame must still open.
+  'session.resume_new',
   // per-session controls (web -> daemon): end / interrupt / pause / resume
   'session.control',
   // reconnect (web <-> daemon)

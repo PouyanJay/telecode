@@ -49,6 +49,7 @@ function makePool() {
       answer: () => undefined,
       answerHandover: () => undefined,
       control: () => undefined,
+      resumeNew: () => undefined,
       sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
       sendAdoptConfig: () => undefined,
       close: () => {

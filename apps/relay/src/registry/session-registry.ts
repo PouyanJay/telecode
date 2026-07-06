@@ -270,6 +270,20 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
       // An adopted session is already running on the user's machine; a launched one is just starting.
       const status: SessionStatusName = sessionOrigin === 'external' ? 'running' : 'starting';
       return withUserContext(db, userId, async (scoped) => {
+        // The parent link only lands when the parent is THE USER'S OWN row (RLS-scoped read). A
+        // parentSessionId is browser-influenceable since T8 (`session.resume_new` names it), and the
+        // raw FK alone would (a) let a crafted id link to another tenant's row and (b) leak whether an
+        // arbitrary UUID exists (insert-succeeds vs FK-violation). Unknown/foreign → minted UNLINKED:
+        // identical behavior either way, so there is nothing to probe.
+        let verifiedParentId: string | undefined;
+        if (parentSessionId !== undefined) {
+          const [parent] = await scoped
+            .select({ id: sessions.id })
+            .from(sessions)
+            .where(and(eq(sessions.id, parentSessionId), eq(sessions.userId, userId)))
+            .limit(1);
+          verifiedParentId = parent?.id;
+        }
         const [row] = await scoped
           .insert(sessions)
           .values({
@@ -279,7 +293,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             status,
             ...(title !== undefined ? { title } : {}),
             ...(cwd !== undefined ? { cwd } : {}),
-            ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+            ...(verifiedParentId !== undefined ? { parentSessionId: verifiedParentId } : {}),
           })
           .returning({ id: sessions.id });
         if (!row) {

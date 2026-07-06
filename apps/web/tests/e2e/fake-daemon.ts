@@ -6,6 +6,7 @@ import {
   sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
   sessionLaunchPayloadSchema,
+  sessionResumeNewPayloadSchema,
   type Envelope,
   type MessageType,
   type SessionHistoryEntry,
@@ -54,6 +55,9 @@ const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
 const CHAIN_PROMPT = 'chain a takeover';
 // Magic prompt: the run exhausts its turn budget (ux Phase 6 T2) — ends `turn_limit`, stays followable.
 const TURN_LIMIT_PROMPT = 'hit the turn limit';
+// Magic prompt: the daemon "loses" the conversation (ux Phase 6 T8) — ends `needs_restart`, so the
+// session view offers resume-as-new and the spec can drive the forked continuation.
+const LOSE_SESSION_PROMPT = 'lose this session';
 const CHAIN_PARENT_REF = 'chain-parent';
 const CHAIN_CHILD_REF = 'chain-child';
 // Overridable so the spec can use a per-run unique title — earlier runs' chains persist in the
@@ -68,6 +72,8 @@ interface SessionRecord {
   transcript: SessionHistoryEntry[];
 }
 const records = new Map<string, SessionRecord>();
+// Resume-as-new continuations awaiting their relay `session.chained` ACK, by announce clientRef (T8).
+const pendingResumes = new Map<string, { prompt: string; browserRef?: string }>();
 
 function recordFor(sessionId: string): SessionRecord {
   let record = records.get(sessionId);
@@ -161,7 +167,28 @@ socket.addEventListener('message', (event: MessageEvent) => {
   // The relay's chained ACK: the continuation's row exists, linked to the parent. Bring it live.
   if (envelope.type === 'session.chained') {
     const ack = sessionChainedPayloadSchema.safeParse(envelope.payload);
-    if (!ack.success || ack.data.clientRef !== CHAIN_CHILD_REF) return;
+    if (!ack.success) return;
+    // A resume-as-new child (T8): run the prompt as its first turn and finish, echoing the browser's
+    // clientRef on session.started so the acting tab can navigate (exactly like a launch).
+    const pendingResume = pendingResumes.get(ack.data.clientRef);
+    if (pendingResume !== undefined) {
+      pendingResumes.delete(ack.data.clientRef);
+      const rec = recordFor(sid);
+      rec.transcript.push({ kind: 'user', text: pendingResume.prompt });
+      rec.status = 'running';
+      send(
+        'session.started',
+        pendingResume.browserRef !== undefined ? { clientRef: pendingResume.browserRef } : {},
+        sid,
+      );
+      send('session.meta', { title: pendingResume.prompt, titleSource: 'derived' }, sid);
+      rec.transcript.push({ kind: 'message', text: 'Picking up where we left off' });
+      send('agent.message', { text: 'Picking up where we left off' }, sid);
+      rec.status = 'done';
+      send('session.ended', { status: 'done' }, sid);
+      return;
+    }
+    if (ack.data.clientRef !== CHAIN_CHILD_REF) return;
     const rec = recordFor(sid);
     // One stamp per entry, minted once — the live frame and the backfill must carry the SAME instant
     // (the real daemon's record-time invariant).
@@ -199,6 +226,16 @@ socket.addEventListener('message', (event: MessageEvent) => {
       return;
     }
 
+    if (launch.success && launch.data.prompt.startsWith(LOSE_SESSION_PROMPT)) {
+      // The daemon "lost" this conversation: the honest terminal state whose only way forward is a
+      // forked continuation (resume-as-new, T8).
+      rec.transcript.push({ kind: 'message', text: 'Connection to the conversation was lost' });
+      send('agent.message', { text: 'Connection to the conversation was lost' }, sid);
+      rec.status = 'needs_restart';
+      send('session.ended', { status: 'needs_restart' }, sid);
+      return;
+    }
+
     if (launch.success && launch.data.prompt === CHAIN_PROMPT) {
       // The trigger session's only job is to kick off the dance — end it and announce the parent.
       rec.transcript.push({ kind: 'message', text: 'Chaining a takeover' });
@@ -222,6 +259,19 @@ socket.addEventListener('message', (event: MessageEvent) => {
     });
     rec.status = 'awaiting_input';
     send('agent.permission_request', { requestId, toolName: 'Write', input: DEFAULT_INPUT }, sid);
+    return;
+  }
+
+  // Resume-as-new (T8): mint a linked child via the chained dance; the ACK handler above runs it.
+  if (envelope.type === 'session.resume_new') {
+    const resume = sessionResumeNewPayloadSchema.safeParse(envelope.payload);
+    if (!resume.success) return;
+    const ref = `resume-child-${++requestSeq}`;
+    pendingResumes.set(ref, {
+      prompt: resume.data.prompt,
+      ...(resume.data.clientRef !== undefined ? { browserRef: resume.data.clientRef } : {}),
+    });
+    send('session.chained', { clientRef: ref, parentSessionId: sid });
     return;
   }
 

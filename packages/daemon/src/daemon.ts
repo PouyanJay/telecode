@@ -18,6 +18,7 @@ import {
   sessionControlPayloadSchema,
   sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
+  sessionResumeNewPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   viewerPresencePayloadSchema,
@@ -1134,6 +1135,165 @@ export function createDaemon(options: DaemonOptions): Daemon {
     await runTurn(envelope, message.data.text, { resume, ...(cwd !== undefined ? { cwd } : {}) });
   }
 
+  /**
+   * Open a `session.resume_new` frame into its request, or undefined on any invalid frame (dropped +
+   * logged). Sealed like a launch (box-sealed to the daemon) — never under the parent's content key,
+   * which a needs_restart parent may no longer have anywhere (AD-17).
+   */
+  async function unsealResumeNewRequest(
+    envelope: Envelope,
+  ): Promise<{ parentId: string; prompt: string; clientRef?: string } | undefined> {
+    let rawPayload: unknown = envelope.payload;
+    if (cipher.enabled && envelope.sender_public_key !== undefined) {
+      try {
+        rawPayload = await cipher.decryptLaunch(envelope);
+      } catch (err) {
+        log.warn(
+          { err, deviceId: options.deviceId },
+          'daemon: could not decrypt session.resume_new',
+        );
+        return undefined;
+      }
+    }
+    const parsed = sessionResumeNewPayloadSchema.safeParse(rawPayload);
+    if (!parsed.success || envelope.session_id === undefined) {
+      log.warn(
+        { deviceId: options.deviceId },
+        'daemon: dropped session.resume_new with invalid payload',
+      );
+      return undefined;
+    }
+    return {
+      parentId: envelope.session_id,
+      prompt: parsed.data.prompt,
+      ...(parsed.data.clientRef !== undefined ? { clientRef: parsed.data.clientRef } : {}),
+    };
+  }
+
+  /**
+   * Mint a telecode-owned CHAINED child linked to `parentSessionId` and bring it live: register with
+   * the relay (`session.chained` ack carries the minted id), establish its E2E key, record the first
+   * user turn, and emit `session.started` (echoing `startedClientRef` so an acting browser can pair +
+   * navigate, exactly like a launch) followed by its sealed identity. Shared by the handover takeover
+   * and resume-as-new — the two ways a conversation continues under a new telecode-owned id. Returns
+   * undefined when the relay never minted the child (offline / parent row gone); nothing to clean up.
+   */
+  async function mintChainedChild(params: {
+    parentSessionId: string;
+    permissionMode: PermissionModeName;
+    /** The child's sealed identity (title/titleSource/cwd/…), emitted right after `session.started`. */
+    metaPatch: Partial<SessionMetaPayload>;
+    firstTurnText: string;
+    startedClientRef?: string;
+    /** Working directory the child runs in — persisted so follow-ups + restarts reuse it (T4). */
+    cwd?: string;
+    /**
+     * Deliver the child's content key to this browser pubkey BEFORE `session.started` (resume-as-new:
+     * the started frame carries the clientRef the acting browser must decrypt to pair + navigate).
+     * Omitted for the handover path, whose browser gets the key on its subscribe like any adopted flow.
+     */
+    deliverKeyTo?: string;
+  }): Promise<{ childId: string; source: Envelope } | undefined> {
+    let childId: string;
+    try {
+      childId = await registerChained({
+        clientRef: randomUUID(),
+        parentSessionId: params.parentSessionId,
+      });
+    } catch (err) {
+      // The relay never minted the child (offline / parent row gone); the caller's browser-side
+      // pending navigation (or a retried answer) handles the miss honestly.
+      log.warn(
+        { err, deviceId: options.deviceId, sessionId: params.parentSessionId },
+        'daemon: chained continuation registration failed',
+      );
+      return undefined;
+    }
+    const source = adoptedSource(childId);
+    // The child is a telecode-owned launched session; encrypt its frames under E2E. Without an
+    // explicit `deliverKeyTo`, the browser receives the content key when it subscribes.
+    if (cipher.enabled) {
+      cipher.establish(childId);
+      if (params.deliverKeyTo !== undefined) deliverKey(source, params.deliverKeyTo);
+    }
+    const rec = recordFor(childId);
+    rec.permissionMode = params.permissionMode;
+    rec.origin = 'launched';
+    if (params.cwd !== undefined) {
+      sessionCwds.set(childId, params.cwd);
+      rec.cwd = params.cwd; // persisted so a restored follow-up reuses it (T4)
+    }
+    record(childId, { kind: 'user', text: params.firstTurnText, ts: now() });
+    setStatus(childId, 'running');
+    sendForSession(
+      source,
+      'session.started',
+      params.startedClientRef !== undefined ? { clientRef: params.startedClientRef } : {},
+    );
+    emitSessionMeta(source, params.metaPatch);
+    return { childId, source };
+  }
+
+  /**
+   * Resume-as-new (ux Phase 6 T8): continue a TERMINAL session as a NEW linked one — FORK-resuming
+   * the parent's conversation when a resume id survives (launched or adopted, in-memory or restored),
+   * fresh-launching otherwise (needs_restart, or a parent only the relay remembers). The parent is
+   * left exactly as it ended: never re-ended, never revived (AD-17).
+   */
+  async function runResumeNew(envelope: Envelope): Promise<void> {
+    const request = await unsealResumeNewRequest(envelope);
+    if (!request) return;
+    const { parentId, prompt } = request;
+    const parent = sessionRecords.get(parentId);
+    // Only a session that is OVER continues as a new one — a live parent keeps its own composer. An
+    // UNKNOWN parent is allowed: the relay remembers sessions this daemon lost (needs_restart after a
+    // restart), and the child link needs nothing from the parent beyond its id.
+    if (parent !== undefined && !isSessionEndStatus(parent.status)) {
+      log.warn(
+        { deviceId: options.deviceId, sessionId: parentId },
+        'daemon: resume_new refused — session still active',
+      );
+      return;
+    }
+    const permissionMode = parent?.permissionMode ?? 'default';
+    const cwd = sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd;
+    const minted = await mintChainedChild({
+      parentSessionId: parentId,
+      permissionMode,
+      metaPatch: {
+        ...resolveLaunchTitle(undefined, prompt),
+        ...(cwd !== undefined ? { cwd } : {}),
+        permissionMode,
+      },
+      firstTurnText: prompt,
+      ...(cwd !== undefined ? { cwd } : {}),
+      ...(request.clientRef !== undefined ? { startedClientRef: request.clientRef } : {}),
+      // The acting browser must decrypt the started frame's clientRef to pair + navigate — deliver
+      // the child's key to the pubkey the (sealed) request announced.
+      ...(envelope.sender_public_key !== undefined
+        ? { deliverKeyTo: envelope.sender_public_key }
+        : {}),
+    });
+    if (!minted) return;
+    // The resume id survives on the record for launched AND adopted parents (T4); fall back to the
+    // in-memory map. Absent → fresh launch, still linked.
+    const resume = parent?.claudeSessionId ?? sdkSessions.get(parentId);
+    log.info(
+      {
+        deviceId: options.deviceId,
+        parentSessionId: parentId,
+        sessionId: minted.childId,
+        forked: resume !== undefined,
+      },
+      'daemon: resume-as-new launched',
+    );
+    await runTurn(minted.source, prompt, {
+      ...(cwd !== undefined ? { cwd } : {}),
+      // A fork that can't actually resume falls back to a fresh run seeded with the same prompt.
+      ...(resume !== undefined ? { resume, forkSession: true, resumeFallbackPrompt: prompt } : {}),
+    });
+  }
+
   async function handleFrame(raw: Buffer, onReady: () => void): Promise<void> {
     let envelope: Envelope;
     try {
@@ -1185,6 +1345,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       }
       case 'user.message': {
         void runFollowUp(envelope);
+        return;
+      }
+      case 'session.resume_new': {
+        void runResumeNew(envelope);
         return;
       }
       case 'session.subscribe': {
@@ -1798,40 +1962,24 @@ export function createDaemon(options: DaemonOptions): Daemon {
     answerText: string,
   ): Promise<void> {
     const parentId = handover.telecodeSessionId;
-    const clientRef = randomUUID();
     const title = `Continue: ${handover.question.slice(0, HANDOVER_TITLE_PREVIEW_CHARS)}`;
-    let childId: string;
-    try {
-      // Ids-only announce (ux Phase 6 T5): the continuation's title/cwd travel in the sealed session.meta
-      // below, so they never reach the relay in cleartext (the P1-2 privacy fix).
-      childId = await registerChained({ clientRef, parentSessionId: parentId });
-    } catch (err) {
-      // The relay never minted the child (offline / dropped). Leave the parent as-is; a later answer can
-      // retry. (Journey 4 T2 adds the summary-seeded fresh-launch fallback for a resume that errors.)
-      log.warn(
-        { err, deviceId: options.deviceId, sessionId: parentId },
-        'daemon: handover continuation registration failed',
-      );
-      return;
-    }
-    const childSource = adoptedSource(childId);
-    // The child is a telecode-owned launched session; encrypt its frames under E2E (the browser receives the
-    // content key when it subscribes, exactly like an adopted session). Cleartext only on a pre-E2E daemon.
-    if (cipher.enabled) cipher.establish(childId);
-    recordFor(childId).permissionMode = 'default';
-    recordFor(childId).origin = 'launched';
-    // The continuation's identity, SEALED (ux Phase 6 T5) — title from the taken-over question + the
-    // inherited cwd, under the content key so they never reach the relay in cleartext.
-    emitSessionMeta(childSource, derivedMetaPatch(title, handover.cwd));
-    record(childId, { kind: 'user', text: answerText, ts: now() });
-    setStatus(childId, 'running');
-    sendForSession(childSource, 'session.started', {});
+    // The continuation's identity travels SEALED (ux Phase 6 T5) — the mint's announce is ids-only, so
+    // the taken-over question and cwd never reach the relay in cleartext (the P1-2 privacy fix). A
+    // failed mint leaves the parent as-is; a later answer can retry.
+    const minted = await mintChainedChild({
+      parentSessionId: parentId,
+      permissionMode: 'default',
+      metaPatch: derivedMetaPatch(title, handover.cwd),
+      firstTurnText: answerText,
+      ...(handover.cwd !== undefined ? { cwd: handover.cwd } : {}),
+    });
+    if (!minted) return;
     // Migrate the conversation: the parent adopted row is handed off (terminal, read-only) — the child now
     // carries it forward. Ended promptly (before the long turn) so the dashboard reflects the migration.
     setStatus(parentId, 'done');
     sendForSession(source, 'session.ended', { status: 'done' });
     log.info(
-      { deviceId: options.deviceId, parentSessionId: parentId, sessionId: childId },
+      { deviceId: options.deviceId, parentSessionId: parentId, sessionId: minted.childId },
       'daemon: handover continuation launched (forked resume)',
     );
     // Run the forked continuation: resume the adopted conversation by its Claude id, fork it, seed the answer.
@@ -1842,7 +1990,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       handover.question,
       answerText,
     );
-    await runTurn(childSource, answerText, {
+    await runTurn(minted.source, answerText, {
       resume: handover.externalSessionId,
       ...(handover.cwd !== undefined ? { cwd: handover.cwd } : {}),
       forkSession: true,

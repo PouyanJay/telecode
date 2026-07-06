@@ -1,0 +1,472 @@
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { createConnection } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  encodeKey,
+  generateKeyPair,
+  makeEnvelope,
+  sessionMetaPayloadSchema,
+  type Envelope,
+} from '@telecode/protocol';
+import { pino } from 'pino';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { createFakeAgentAdapter, type AgentAdapter } from './agent-adapter';
+import { createDaemon, type Daemon } from './daemon';
+import {
+  decryptWithContentKey,
+  mkE2eIds,
+  sealEnvelopePayload,
+  sendSealedLaunch,
+  startE2eDaemon,
+  unwrapContentKey,
+} from './e2e-harness';
+import { startFakeRelay, type FakeRelay } from './fake-relay';
+
+/** One bridge round-trip over the hook socket: write the event, half-close, read the decision JSON. */
+function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const client = createConnection(socketPath);
+    let out = '';
+    client.on('connect', () => client.end(JSON.stringify(event)));
+    client.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf8');
+    });
+    client.on('end', () => {
+      try {
+        resolve(out === '' ? {} : JSON.parse(out));
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('hook response parse failed'));
+      }
+    });
+    client.on('error', reject);
+  });
+}
+
+/**
+ * Resume-as-new (session-identity T8), daemon leg. A `session.resume_new` on a TERMINAL session mints a
+ * NEW linked session through the existing `session.chained` machinery and runs the prompt there: a
+ * fork-resume (`resume` + `forkSession`) when the parent conversation is still resumable, a plain fresh
+ * launch when it isn't (needs_restart, or a parent only the relay remembers). The parent is left exactly
+ * as it ended — never re-ended, never resumed in place. Real daemon + real socket + fake relay/adapter.
+ */
+const silent = pino({ level: 'silent' });
+const daemons: Daemon[] = [];
+const relays: FakeRelay[] = [];
+
+const ofType = (type: string, sessionId: string) => (e: Envelope) =>
+  e.type === type && e.session_id === sessionId;
+
+interface RunCall {
+  prompt: string;
+  resume?: string;
+  forkSession?: boolean;
+  cwd?: string;
+}
+
+async function startDaemon(adapter: AgentAdapter): Promise<{
+  relay: FakeRelay;
+  userId: string;
+  deviceId: string;
+}> {
+  const userId = randomUUID();
+  const deviceId = randomUUID();
+  const relay = await startFakeRelay(userId, deviceId);
+  relays.push(relay);
+  const daemon = createDaemon({
+    relayUrl: relay.url,
+    userId,
+    deviceId,
+    agentAdapter: adapter,
+    logger: silent,
+  });
+  daemons.push(daemon);
+  await daemon.start();
+  return { relay, userId, deviceId };
+}
+
+afterEach(async () => {
+  await Promise.all(daemons.splice(0).map((d) => d.stop()));
+  await Promise.all(relays.splice(0).map((r) => r.close()));
+});
+
+/** Launch a session and run it to its terminal frame; returns the ended envelope. */
+async function launchToEnd(
+  relay: FakeRelay,
+  ids: { userId: string; deviceId: string },
+  sessionId: string,
+  prompt: string,
+): Promise<Envelope> {
+  relay.send(
+    makeEnvelope({
+      type: 'session.launch',
+      userId: ids.userId,
+      deviceId: ids.deviceId,
+      sessionId,
+      payload: { prompt },
+    }),
+  );
+  return relay.waitForFrame(ofType('session.ended', sessionId));
+}
+
+function sendResumeNew(
+  relay: FakeRelay,
+  ids: { userId: string; deviceId: string },
+  parentId: string,
+  payload: { prompt: string; clientRef?: string },
+): void {
+  relay.send(
+    makeEnvelope({
+      type: 'session.resume_new',
+      userId: ids.userId,
+      deviceId: ids.deviceId,
+      sessionId: parentId,
+      payload,
+    }),
+  );
+}
+
+/** Ack the daemon's chained announce with a relay-minted child id; returns the announce payload. */
+async function ackChained(
+  relay: FakeRelay,
+  ids: { userId: string; deviceId: string },
+  childId: string,
+): Promise<{ clientRef: string; parentSessionId: string }> {
+  const announce = await relay.waitForFrame((e) => e.type === 'session.chained');
+  const payload = announce.payload as { clientRef: string; parentSessionId: string };
+  relay.send(
+    makeEnvelope({
+      type: 'session.chained',
+      userId: ids.userId,
+      deviceId: ids.deviceId,
+      sessionId: childId,
+      payload: { clientRef: payload.clientRef, parentSessionId: payload.parentSessionId },
+    }),
+  );
+  return payload;
+}
+
+/**
+ * Barrier + negative assert: the daemon chains inbound handleFrame calls per socket, and the drop
+ * guards under test run synchronously to completion (cleartext daemon: no await before the early
+ * returns) — so by the time the echo round-trip completes, a frame the drop would have produced has
+ * either arrived or never will. No timing wait.
+ */
+async function expectNoFrame(
+  relay: FakeRelay,
+  ids: { userId: string; deviceId: string },
+  predicate: (e: Envelope) => boolean,
+): Promise<void> {
+  let observed = false;
+  relay.waitForFrame(predicate).then(
+    () => {
+      observed = true;
+    },
+    // Expected: nothing arrives, so the peek eventually times out — never an unhandled rejection.
+    () => undefined,
+  );
+  relay.send(
+    makeEnvelope({
+      type: 'echo',
+      userId: ids.userId,
+      deviceId: ids.deviceId,
+      payload: { text: 'barrier' },
+    }),
+  );
+  await relay.waitForFrame((e) => e.type === 'echo.reply');
+  expect(observed).toBe(false);
+}
+
+describe('daemon resume-as-new (session-identity T8)', () => {
+  it('forks-and-resumes a done launched parent into a linked child (clientRef → child started)', async () => {
+    const runCalls: RunCall[] = [];
+    const ids = await startDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'done work' }], {
+        sessionId: 'sdk-parent',
+        onRun: (call) => runCalls.push(call),
+      }),
+    );
+    const { relay } = ids;
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    await launchToEnd(relay, ids, parentId, 'build the feature');
+
+    sendResumeNew(relay, ids, parentId, { prompt: 'now add tests', clientRef: 'browser-ref-1' });
+
+    // The child is minted via the EXISTING chained machinery: ids-only announce, linked to the parent.
+    const announce = await ackChained(relay, ids, childId);
+    expect(announce.parentSessionId).toBe(parentId);
+
+    // The acting browser can navigate: the child's started frame echoes ITS clientRef.
+    const started = await relay.waitForFrame(ofType('session.started', childId));
+    expect(started.payload).toMatchObject({ clientRef: 'browser-ref-1' });
+
+    // The child's sealed identity: a title derived from the prompt (cleartext daemon here).
+    const meta = sessionMetaPayloadSchema.parse(
+      (await relay.waitForFrame(ofType('session.meta', childId))).payload,
+    );
+    expect(meta.title).toBe('now add tests');
+
+    // The conversation was FORK-resumed from the parent's SDK id with the prompt as the next turn.
+    await relay.waitForFrame(ofType('session.ended', childId));
+    expect(runCalls).toHaveLength(2);
+    expect(runCalls[1]).toMatchObject({
+      prompt: 'now add tests',
+      resume: 'sdk-parent',
+      forkSession: true,
+    });
+  });
+
+  it('fresh-launches (no resume) when the parent has no resumable conversation (needs_restart)', async () => {
+    const runCalls: RunCall[] = [];
+    // An adapter that never reports an SDK session id — the parent ends with nothing to resume.
+    const adapter: AgentAdapter = {
+      async run(prompt, { onEvent, resume, forkSession, cwd }) {
+        runCalls.push({
+          prompt,
+          ...(resume !== undefined ? { resume } : {}),
+          ...(forkSession !== undefined ? { forkSession } : {}),
+          ...(cwd !== undefined ? { cwd } : {}),
+        });
+        onEvent({ type: 'message', text: 'ran once' });
+        return { intercepted: [], allowed: [], denied: [] };
+      },
+    };
+    const ids = await startDaemon(adapter);
+    const { relay } = ids;
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    await launchToEnd(relay, ids, parentId, 'first run');
+
+    // A follow-up can't resume → the daemon honestly reports needs_restart (T4 behavior).
+    relay.send(
+      makeEnvelope({
+        type: 'user.message',
+        userId: ids.userId,
+        deviceId: ids.deviceId,
+        sessionId: parentId,
+        payload: { text: 'hello?' },
+      }),
+    );
+    const restart = await relay.waitForFrame(ofType('session.ended', parentId));
+    expect(restart.payload).toMatchObject({ status: 'needs_restart' });
+
+    // Resume-as-new is the way out: a linked child, launched FRESH (no resume id exists).
+    sendResumeNew(relay, ids, parentId, { prompt: 'start over from here' });
+    const announce = await ackChained(relay, ids, childId);
+    expect(announce.parentSessionId).toBe(parentId);
+    await relay.waitForFrame(ofType('session.ended', childId));
+    const childRun = runCalls.at(-1);
+    expect(childRun).toMatchObject({ prompt: 'start over from here' });
+    expect(childRun?.resume).toBeUndefined();
+    expect(childRun?.forkSession).toBeUndefined();
+  });
+
+  it('serves a parent only the relay remembers (daemon restarted without it): fresh linked child', async () => {
+    const runCalls: RunCall[] = [];
+    const ids = await startDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'fresh child' }], {
+        sessionId: 'sdk-fresh',
+        onRun: (call) => runCalls.push(call),
+      }),
+    );
+    const { relay } = ids;
+    const unknownParent = randomUUID();
+    const childId = randomUUID();
+
+    sendResumeNew(relay, ids, unknownParent, { prompt: 'continue the lost session' });
+    const announce = await ackChained(relay, ids, childId);
+    expect(announce.parentSessionId).toBe(unknownParent);
+    await relay.waitForFrame(ofType('session.ended', childId));
+    expect(runCalls).toHaveLength(1);
+    expect(runCalls[0]).toMatchObject({ prompt: 'continue the lost session' });
+    expect(runCalls[0]?.resume).toBeUndefined();
+  });
+
+  it('drops a resume_new for a session it knows to be still going (no child, run untouched)', async () => {
+    const ids = await startDaemon(
+      // A gated tool keeps the session awaiting_input — stably non-terminal.
+      createFakeAgentAdapter([{ type: 'tool_use', toolName: 'Write', input: { path: 'a' } }], {
+        sessionId: 'sdk-live',
+      }),
+    );
+    const { relay } = ids;
+    const parentId = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId: ids.userId,
+        deviceId: ids.deviceId,
+        sessionId: parentId,
+        payload: { prompt: 'long task' },
+      }),
+    );
+    await relay.waitForFrame(ofType('agent.permission_request', parentId));
+
+    sendResumeNew(relay, ids, parentId, { prompt: 'fork it anyway' });
+    await expectNoFrame(relay, ids, (e) => e.type === 'session.chained');
+  });
+
+  it('drops a resume_new with an invalid payload (empty prompt)', async () => {
+    const ids = await startDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'x' }], { sessionId: 'sdk-x' }),
+    );
+    const { relay } = ids;
+    const parentId = randomUUID();
+    await launchToEnd(relay, ids, parentId, 'a task');
+
+    sendResumeNew(relay, ids, parentId, { prompt: '' });
+    await expectNoFrame(relay, ids, (e) => e.type === 'session.chained');
+  });
+
+  it('opens a BOX-SEALED resume_new (AD-17: sealed like a launch, never under the parent key)', async () => {
+    const runCalls: RunCall[] = [];
+    const daemonKp = await generateKeyPair();
+    const browserKp = await generateKeyPair();
+    const ids = mkE2eIds();
+    const { daemon, relay } = await startE2eDaemon({
+      ids,
+      daemonKeyPair: daemonKp,
+      agentAdapter: createFakeAgentAdapter([{ type: 'message', text: 'sealed work' }], {
+        sessionId: 'sdk-sealed',
+        onRun: (call) => runCalls.push(call),
+      }),
+    });
+    daemons.push(daemon);
+    relays.push(relay);
+    const childId = randomUUID();
+
+    // Run the parent to its end through the sealed launch path.
+    await sendSealedLaunch(relay, ids, daemonKp, browserKp, { prompt: 'sealed parent task' });
+    await relay.waitForFrame(ofType('session.ended', ids.sessionId));
+
+    // The resume frame is sealed to the DAEMON (launch-style), not under any session content key.
+    const sealed = await sealEnvelopePayload(
+      { prompt: 'sealed continuation', clientRef: 'ref-sealed' },
+      daemonKp.publicKey,
+      browserKp.privateKey,
+    );
+    relay.send(
+      makeEnvelope({
+        type: 'session.resume_new',
+        userId: ids.userId,
+        deviceId: ids.deviceId,
+        sessionId: ids.sessionId,
+        senderPublicKey: encodeKey(browserKp.publicKey),
+        payload: sealed.payload,
+        nonce: sealed.nonce,
+      }),
+    );
+    await ackChained(relay, ids, childId);
+    // The child's content key is delivered to the REQUESTING browser's pubkey BEFORE started — the
+    // acting browser must be able to decrypt the clientRef to pair + navigate.
+    const keyFrame = await relay.waitForFrame(ofType('session.key', childId));
+    const started = await relay.waitForFrame(ofType('session.started', childId));
+
+    // The daemon opened the box: the PLAINTEXT prompt reached the adapter as a fork of the parent —
+    // and the child's own frames are E2E (opaque string payloads), like any launched session's.
+    expect(runCalls.at(-1)).toMatchObject({
+      prompt: 'sealed continuation',
+      resume: 'sdk-sealed',
+      forkSession: true,
+    });
+    expect(typeof started.payload).toBe('string');
+    expect(started.nonce).not.toBe('');
+    const childKey = await unwrapContentKey(
+      { payload: keyFrame.payload, nonce: keyFrame.nonce },
+      daemonKp.publicKey,
+      browserKp.privateKey,
+    );
+    expect(
+      await decryptWithContentKey({ payload: started.payload, nonce: started.nonce }, childKey),
+    ).toEqual({ clientRef: 'ref-sealed' });
+  });
+
+  it('forks an ADOPTED terminal parent from its recorded Claude session id', async () => {
+    const runCalls: RunCall[] = [];
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-resume-adopt-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startFakeRelay(userId, deviceId);
+    relays.push(relay);
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId,
+      deviceId,
+      agentAdapter: createFakeAgentAdapter([{ type: 'message', text: 'forked from adopted' }], {
+        sessionId: 'sdk-adopt-child',
+        onRun: (call) => runCalls.push(call),
+      }),
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
+      logger: silent,
+    });
+    daemons.push(daemon);
+    await daemon.start();
+    try {
+      const claudeSessionId = 'claude-adopted-1';
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      // Adopt via the hook bridge (PreToolUse announces; ack mints the parent row) …
+      const first = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: claudeSessionId,
+        cwd: '/repo',
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+      relay.send(
+        makeEnvelope({
+          type: 'session.adopted',
+          userId,
+          deviceId,
+          sessionId: parentId,
+          payload: { clientRef: (announce.payload as { clientRef: string }).clientRef },
+        }),
+      );
+      await first;
+      // … and end it (SessionEnd hook → the adopted session is terminal).
+      await hookRpc(socketPath, {
+        hook_event_name: 'SessionEnd',
+        session_id: claudeSessionId,
+        cwd: '/repo',
+      });
+      await relay.waitForFrame(ofType('session.ended', parentId));
+
+      const ids = { userId, deviceId };
+      sendResumeNew(relay, ids, parentId, { prompt: 'continue the adopted work' });
+      const chained = await ackChained(relay, ids, childId);
+      expect(chained.parentSessionId).toBe(parentId);
+      await relay.waitForFrame(ofType('session.ended', childId));
+
+      // The adopted parent's Claude id is the fork's resume source (AD-17: record.claudeSessionId
+      // covers launched AND adopted parents) — and the fork runs in the parent's cwd.
+      expect(runCalls.at(-1)).toMatchObject({
+        prompt: 'continue the adopted work',
+        resume: claudeSessionId,
+        forkSession: true,
+        cwd: '/repo',
+      });
+
+      // The inherited cwd is PERSISTED on the child, not first-turn-only: a later follow-up to the
+      // child still runs in it.
+      relay.send(
+        makeEnvelope({
+          type: 'user.message',
+          userId,
+          deviceId,
+          sessionId: childId,
+          payload: { text: 'and keep going' },
+        }),
+      );
+      await relay.waitForFrame(ofType('session.ended', childId));
+      expect(runCalls.at(-1)).toMatchObject({ prompt: 'and keep going', cwd: '/repo' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

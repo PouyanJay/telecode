@@ -180,19 +180,22 @@ function sessionIdsOf(deviceId: string): Set<string> {
 }
 
 /**
- * The connection a session's actions must go out on: its routed device's. With a single pooled
- * connection the sole channel is the honest fallback (the pre-pool behavior); with several, an
- * unrouted send is dropped rather than guessed — a decision must never reach the wrong daemon
- * (AD-2: no fan-out; routing is seeded from the registry, so this is a registry-outage edge).
+ * The device a session's actions must go out on: its route if known, else the sole pooled connection
+ * (the pre-pool behavior); with several devices, an unrouted session resolves to nothing rather than a
+ * guess — an action must never reach the wrong daemon (AD-2: no fan-out; routing is seeded from the
+ * registry, so this is a registry-outage edge).
  */
+function routedDeviceId(sessionId: string): string | undefined {
+  return (
+    get(sessionDeviceMap).get(sessionId) ??
+    (connections.size === 1 ? [...connections.keys()][0] : undefined)
+  );
+}
+
+/** The connection a session's actions go out on (see {@link routedDeviceId}), or null. */
 function connectionFor(sessionId: string): RelayConnection | null {
-  const deviceId = get(sessionDeviceMap).get(sessionId);
-  if (deviceId !== undefined) return connections.get(deviceId) ?? null;
-  if (connections.size === 1) {
-    const sole = connections.values().next().value;
-    return sole ?? null;
-  }
-  return null;
+  const deviceId = routedDeviceId(sessionId);
+  return deviceId !== undefined ? (connections.get(deviceId) ?? null) : null;
 }
 
 /**
@@ -560,23 +563,22 @@ function launchTarget(
 }
 
 /**
- * Launch a session on one device; resolves with the relay-minted id once the daemon reports it
- * started. The target device is explicit — with a fleet there is no "the" device to default to.
+ * Await the `session.started` that echoes `clientRef`, resolving with the minted session id (routed to
+ * `deviceId` before resolving — the caller navigates to the session view, which subscribes). Shared by
+ * {@link launch} and {@link resumeAsNew}: both actions mint their session daemon-side and pair it here.
  */
-export function launch(payload: SessionLaunchPayload, deviceId?: string): Promise<string> {
-  const target = launchTarget(deviceId);
-  if (!target) {
-    return Promise.reject(new Error('Not connected to the relay.'));
-  }
-  const clientRef = crypto.randomUUID();
+function awaitSessionStart(
+  clientRef: string,
+  deviceId: string,
+  timeoutMessage: string,
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const pending: PendingLaunch = {
       clientRef,
-      deviceId: target.deviceId,
+      deviceId,
       resolve: (sessionId) => {
         clearTimeout(pending.timer);
-        // Route before resolving: the caller navigates to the session view, which subscribes.
-        routeSession(sessionId, target.deviceId);
+        routeSession(sessionId, deviceId);
         resolve(sessionId);
       },
       reject: (error) => {
@@ -586,12 +588,51 @@ export function launch(payload: SessionLaunchPayload, deviceId?: string): Promis
       timer: setTimeout(() => {
         const index = pendingLaunches.indexOf(pending);
         if (index >= 0) pendingLaunches.splice(index, 1);
-        reject(new Error('Launch timed out — is the device online?'));
+        reject(new Error(timeoutMessage));
       }, LAUNCH_TIMEOUT_MS),
     };
     pendingLaunches.push(pending);
-    target.conn.launch({ ...payload, clientRef });
   });
+}
+
+/**
+ * Launch a session on one device; resolves with the relay-minted id once the daemon reports it
+ * started. The target device is explicit — with a fleet there is no "the" device to default to.
+ */
+export function launch(payload: SessionLaunchPayload, deviceId?: string): Promise<string> {
+  const target = launchTarget(deviceId);
+  if (!target) {
+    return Promise.reject(new Error('Not connected to the relay.'));
+  }
+  const clientRef = crypto.randomUUID();
+  const started = awaitSessionStart(
+    clientRef,
+    target.deviceId,
+    'Launch timed out — is the device online?',
+  );
+  target.conn.launch({ ...payload, clientRef });
+  return started;
+}
+
+/**
+ * Continue a TERMINAL session as a NEW linked one (ux Phase 6 T8): sends `session.resume_new` on the
+ * PARENT's channel; the daemon forks (or fresh-launches) a `session.chained` child whose
+ * `session.started` echoes our clientRef — resolves with the child id so the caller can navigate.
+ */
+export function resumeAsNew(parentSessionId: string, prompt: string): Promise<string> {
+  const deviceId = routedDeviceId(parentSessionId);
+  const conn = deviceId !== undefined ? connections.get(deviceId) : undefined;
+  if (deviceId === undefined || !conn) {
+    return Promise.reject(new Error('Not connected to this session’s device.'));
+  }
+  const clientRef = crypto.randomUUID();
+  const started = awaitSessionStart(
+    clientRef,
+    deviceId,
+    'Resume timed out — is the device online?',
+  );
+  conn.resumeNew(parentSessionId, { prompt, clientRef });
+  return started;
 }
 
 /** Re-attach to an existing session on open; the daemon backfills its transcript via `session.history`. */
