@@ -40,3 +40,25 @@ export function deviceConsequences(
   }
   return { ending, awaiting };
 }
+
+/**
+ * The revoke confirmation's body copy, driven by the real counts. Always states the identity
+ * consequence (a revoke bricks the device's credentials); adds the session toll when there is one,
+ * and names the "waiting on you right now" subset because that's the one the user might not expect.
+ */
+export function revokeConsequenceText(
+  name: string,
+  { ending, awaiting }: DeviceConsequences,
+): string {
+  const identity = `Revoking ${name} ends its access — the daemon must re-authorize to reconnect.`;
+  if (ending === 0) {
+    return `${identity} It has no active sessions.`;
+  }
+  const sessions = `${ending} active ${ending === 1 ? 'session' : 'sessions'} will end`;
+  if (awaiting === 0) {
+    return `${identity} ${sessions}.`;
+  }
+  const waiting =
+    awaiting === 1 ? 'one is waiting on you right now' : `${awaiting} are waiting on you right now`;
+  return `${identity} ${sessions} — ${waiting}.`;
+}

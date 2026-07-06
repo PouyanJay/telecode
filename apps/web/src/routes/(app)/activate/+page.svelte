@@ -32,7 +32,16 @@
     </p>
 
     {#if form?.activated}
-      <p class="ok" role="status">Device activated. It will connect shortly — you can close this page.</p>
+      {#if form.restored}
+        <p class="ok" role="status">
+          {form.deviceName ? `${form.deviceName} re-authorized` : 'Device re-authorized'} — its history
+          is preserved. It will reconnect shortly; you can close this page.
+        </p>
+      {:else}
+        <p class="ok" role="status">
+          Device activated. It will connect shortly — you can close this page.
+        </p>
+      {/if}
       <p class="back"><a href="/">Back to sessions</a></p>
     {:else}
       <form

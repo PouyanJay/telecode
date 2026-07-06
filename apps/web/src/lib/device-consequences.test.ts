@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { deviceConsequences } from './device-consequences';
+import { deviceConsequences, revokeConsequenceText } from './device-consequences';
 import type { SessionStatus } from './session';
 
 /**
@@ -48,5 +48,35 @@ describe('deviceConsequences', () => {
 
   it('returns zeroes for a device with no sessions', () => {
     expect(deviceConsequences('dev-a', [], new Map())).toEqual({ ending: 0, awaiting: 0 });
+  });
+});
+
+describe('revokeConsequenceText', () => {
+  it('states no active sessions when there are none', () => {
+    expect(revokeConsequenceText('mbp', { ending: 0, awaiting: 0 })).toMatch(/no active sessions/i);
+  });
+
+  it('counts ending sessions and singularizes', () => {
+    expect(revokeConsequenceText('mbp', { ending: 1, awaiting: 0 })).toMatch(
+      /1 active session will end\./i,
+    );
+    expect(revokeConsequenceText('mbp', { ending: 3, awaiting: 0 })).toMatch(
+      /3 active sessions will end\./i,
+    );
+  });
+
+  it('names the awaiting subset, singular and plural', () => {
+    expect(revokeConsequenceText('mbp', { ending: 2, awaiting: 1 })).toMatch(
+      /one is waiting on you right now/i,
+    );
+    expect(revokeConsequenceText('mbp', { ending: 3, awaiting: 2 })).toMatch(
+      /2 are waiting on you right now/i,
+    );
+  });
+
+  it('always names the device and the identity consequence', () => {
+    const text = revokeConsequenceText('studio-mini', { ending: 0, awaiting: 0 });
+    expect(text).toContain('studio-mini');
+    expect(text).toMatch(/re-authorize/i);
   });
 });

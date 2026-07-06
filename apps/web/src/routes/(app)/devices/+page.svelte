@@ -1,23 +1,53 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
-  import { Button, Panel } from '@telecode/ui';
+  import { Button, ConfirmDialog, Panel, Pill } from '@telecode/ui';
 
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
+  import { deviceConsequences, revokeConsequenceText } from '$lib/device-consequences';
   import { deviceStatus } from '$lib/devices';
-  import { connectionState, watchedDaemonOnline } from '$lib/session-store';
+  import { pairingInstructions } from '$lib/pairing-instructions';
+  import { connectionState, sessions as liveSessions, watchedDaemonOnline } from '$lib/session-store';
+  import type { SessionStatus } from '$lib/session';
   import type { ActionData, PageData } from './$types';
 
   /**
-   * Paired devices — the machines that run agents on the user's behalf (never the cloud). Shows each
-   * device's name, OS, and honest presence (from the live channel), and lets the owner revoke access. The
-   * revoke is verification-gated: a click reveals an inline confirm, the form posts to the relay (which
-   * scopes it to the owner), and on success SvelteKit reruns the load so the row drops out.
+   * Paired devices — the machines that run agents on the user's behalf (never the cloud). Revoking is a
+   * lifecycle: a click opens a confirmation dialog stating the real consequences (identity + how many
+   * sessions end, and how many are waiting on the user right now); the form posts to the relay (owner-
+   * scoped) and on success the row moves to the Revoked section below, where a Re-authorize flow explains
+   * how to bring the same device — and its history — back.
    */
   let { data, form }: { data: PageData; form: ActionData } = $props();
 
-  let confirmingId = $state<string | null>(null);
+  // Live status per session id (the demuxed channel), overlaid on the registry for honest counts.
+  const liveStatusById = $derived(
+    new Map<string, SessionStatus>([...$liveSessions].map(([id, s]) => [id, s.status])),
+  );
+
+  let confirmOpen = $state(false);
+  let confirming = $state<{ id: string; name: string } | null>(null);
   let revokingId = $state<string | null>(null);
+  let reauthorizingId = $state<string | null>(null);
+
+  function askRevoke(id: string, name: string): void {
+    confirming = { id, name };
+    confirmOpen = true;
+  }
+
+  const consequenceText = $derived.by(() => {
+    if (!confirming) return '';
+    return revokeConsequenceText(
+      confirming.name,
+      deviceConsequences(confirming.id, data.sessions, liveStatusById),
+    );
+  });
+
+  let revokeForm = $state<HTMLFormElement | null>(null);
+
+  function submitRevoke(): void {
+    revokeForm?.requestSubmit();
+  }
 </script>
 
 <svelte:head>
@@ -35,70 +65,106 @@
     {#if data.registryError}
       <!-- Error ≠ empty: an outage must never read as "no devices paired". -->
       <RegistryErrorNotice />
-    {:else if data.devices.length === 0}
+    {:else if data.devices.length === 0 && data.revokedDevices.length === 0}
       <div class="empty">
         <p class="eyebrow">No devices paired</p>
         <p class="sub">Pair a machine to run agents on it.</p>
         <a class="cta cta-primary" href="/activate">Pair a device</a>
       </div>
     {:else}
-      <Panel title="Paired devices" meta="{data.devices.length} total">
-        <ul class="devices" role="list">
-          {#each data.devices as device, i (device.id)}
-            {@const status = deviceStatus({
-              lastSeenAt: device.lastSeenAt,
-              isWatched: i === 0,
-              connection: $connectionState,
-              daemonOnline: $watchedDaemonOnline,
-            })}
-            <li class="row hairline-b">
-              <span class="dot" data-tone={status.tone} aria-hidden="true"></span>
-              <div class="id">
-                <span class="name" title={device.name}>{device.name}</span>
-                <span class="did mono">{device.id.slice(0, 18)}…</span>
-              </div>
-              <span class="os mono">{device.os ?? '—'}</span>
-              <span class="seen mono" data-online={status.online}>
-                {status.online ? 'online · now' : `offline · ${status.lastSeen}`}
-              </span>
-              <div class="revoke">
-                {#if confirmingId === device.id}
-                  <form
-                    class="confirm"
-                    method="POST"
-                    action="?/revoke"
-                    use:enhance={() => {
-                      revokingId = device.id;
-                      return async ({ update }) => {
-                        await update();
-                        revokingId = null;
-                        confirmingId = null;
-                      };
-                    }}
-                  >
-                    <input type="hidden" name="deviceId" value={device.id} />
-                    <button class="confirm-cancel" type="button" onclick={() => (confirmingId = null)}>
-                      Cancel
-                    </button>
-                    <Button variant="danger" size="sm" type="submit" loading={revokingId === device.id}>
-                      Revoke
-                    </Button>
-                  </form>
-                {:else}
+      {#if data.devices.length > 0}
+        <Panel title="Paired devices" meta="{data.devices.length} total">
+          <ul class="devices" role="list">
+            {#each data.devices as device, i (device.id)}
+              {@const status = deviceStatus({
+                lastSeenAt: device.lastSeenAt,
+                isWatched: i === 0,
+                connection: $connectionState,
+                daemonOnline: $watchedDaemonOnline,
+              })}
+              <li class="row hairline-b">
+                <span class="dot" data-tone={status.tone} aria-hidden="true"></span>
+                <div class="id">
+                  <span class="name" title={device.name}>{device.name}</span>
+                  <span class="did mono">{device.id.slice(0, 18)}…</span>
+                </div>
+                <span class="os mono">{device.os ?? '—'}</span>
+                <span class="seen mono" data-online={status.online}>
+                  {status.online ? 'online · now' : `offline · ${status.lastSeen}`}
+                </span>
+                <div class="rowaction">
                   <button
                     class="revoke-btn"
                     type="button"
-                    onclick={() => (confirmingId = device.id)}
+                    onclick={() => askRevoke(device.id, device.name)}
                     aria-label="Revoke {device.name}"
                   >
                     Revoke
                   </button>
-                {/if}
-              </div>
-            </li>
-          {/each}
-        </ul>
-      </Panel>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        </Panel>
+      {/if}
+
+      {#if data.revokedError}
+        <div class="revoked-outage"><RegistryErrorNotice /></div>
+      {:else if data.revokedDevices.length > 0}
+        <div class="section-gap">
+          <Panel title="Revoked" meta="{data.revokedDevices.length} total">
+            <ul class="devices" role="list">
+              {#each data.revokedDevices as device (device.id)}
+                <li class="row revoked-row hairline-b">
+                  <Pill label="REVOKED" tone="danger" />
+                  <div class="id">
+                    <span class="name" title={device.name}>{device.name}</span>
+                    <span class="did mono">
+                      {device.sessionCount}
+                      {device.sessionCount === 1 ? 'session' : 'sessions'} in history
+                    </span>
+                  </div>
+                  <span class="os mono">{device.os ?? '—'}</span>
+                  <div class="reauth-cell">
+                    {#if device.pendingReauth}
+                      <Pill label="AWAITING RE-AUTH" tone="warning" pulse />
+                    {:else}
+                      <button
+                        class="revoke-btn"
+                        type="button"
+                        aria-expanded={reauthorizingId === device.id}
+                        onclick={() =>
+                          (reauthorizingId = reauthorizingId === device.id ? null : device.id)}
+                      >
+                        Re-authorize…
+                      </button>
+                    {/if}
+                  </div>
+                  {#if reauthorizingId === device.id}
+                    <div class="reauth-help">
+                      <p>
+                        Run <code class="mono">{pairingInstructions.command}</code> on
+                        <strong>{device.name}</strong>. It re-pairs to this same device — its history stays
+                        attached.
+                        {#if pairingInstructions.codeLocation}
+                          Then enter the code from <code class="mono"
+                            >{pairingInstructions.codeLocation}</code
+                          >
+                          on the
+                        {:else}
+                          Then enter the code it shows on the
+                        {/if}
+                        <a href="/activate">activation page</a>.
+                      </p>
+                    </div>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          </Panel>
+        </div>
+      {/if}
+
       <div class="actions">
         <a class="cta cta-secondary" href="/activate">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true"><path d="M6.5 2.5v8M2.5 6.5h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
@@ -108,6 +174,36 @@
     {/if}
   </div>
 </div>
+
+<!-- The revoke form is the submit target; the ConfirmDialog drives it so the network round-trip stays a
+     real SvelteKit form action (progressive enhancement + owner-scoped on the relay). -->
+<form
+  bind:this={revokeForm}
+  method="POST"
+  action="?/revoke"
+  class="visually-hidden"
+  use:enhance={() => {
+    revokingId = confirming?.id ?? null;
+    return async ({ update }) => {
+      await update();
+      revokingId = null;
+      confirmOpen = false;
+      confirming = null;
+    };
+  }}
+>
+  <input type="hidden" name="deviceId" value={confirming?.id ?? ''} />
+</form>
+
+<ConfirmDialog
+  bind:open={confirmOpen}
+  title="Revoke {confirming?.name ?? 'device'}?"
+  body={consequenceText}
+  confirmLabel="Revoke device"
+  busy={revokingId !== null}
+  onconfirm={submitRevoke}
+  oncancel={() => (confirming = null)}
+/>
 
 <style>
   .sub {
@@ -147,6 +243,12 @@
   }
   .row:last-child {
     border-bottom: none;
+  }
+  /* The revoked row swaps the presence dot/column for a REVOKED pill and gives the re-auth help a full
+     row below, so it wraps to a two-line grid when expanded. */
+  .revoked-row {
+    grid-template-columns: auto minmax(0, 1fr) 9rem auto;
+    row-gap: var(--space-3);
   }
   .dot {
     width: 8px;
@@ -192,13 +294,38 @@
   .seen[data-online='true'] {
     color: var(--text-secondary);
   }
-  .revoke {
+  .rowaction,
+  .reauth-cell {
     justify-self: end;
   }
-  .confirm {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
+  .reauth-help {
+    grid-column: 1 / -1;
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-subtle);
+  }
+  .reauth-help p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+  }
+  .reauth-help code {
+    font-size: var(--text-xs);
+    color: var(--text);
+    background: var(--bg-muted);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+  }
+  .reauth-help a {
+    color: var(--accent);
+  }
+  .section-gap {
+    margin-top: var(--space-6);
+  }
+  .revoked-outage {
+    margin-top: var(--space-6);
   }
   /* The trigger reads as a quiet control that turns danger on intent (matches the panel's hairline rows). */
   .revoke-btn {
@@ -215,27 +342,20 @@
       border-color var(--dur-fast) var(--ease);
   }
   .revoke-btn:hover {
-    color: var(--danger);
-    border-color: var(--danger);
+    color: var(--text);
+    border-color: var(--border-strong);
   }
   .revoke-btn:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--focus-ring);
   }
-  .confirm-cancel {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: var(--text-xs);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-  }
-  .confirm-cancel:hover {
-    color: var(--text);
-  }
-  .confirm-cancel:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--focus-ring);
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .actions {
@@ -301,6 +421,9 @@
   @media (max-width: 760px) {
     .row {
       grid-template-columns: 10px minmax(0, 1fr) 8.5rem auto;
+    }
+    .revoked-row {
+      grid-template-columns: auto minmax(0, 1fr) auto;
     }
     .os {
       display: none;
