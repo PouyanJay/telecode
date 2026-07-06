@@ -9,6 +9,8 @@
  */
 const INJECTED_PROMPT_TAGS = [
   'local-command-caveat',
+  'local-command-stdout',
+  'local-command-stderr',
   'command-name',
   'command-message',
   'command-args',

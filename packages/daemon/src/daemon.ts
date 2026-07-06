@@ -443,6 +443,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // blob) stays decryptable, and the daemon never rotates a restored session's key.
         if (persisted.contentKey !== undefined) cipher.restoreKey(sessionId, persisted.contentKey);
         restoreConversationState(sessionId, persisted);
+        backfillRestoredTitle(sessionId);
       }
       log.info({ deviceId: options.deviceId }, 'daemon: restored persisted sessions');
     } catch (err) {
@@ -463,6 +464,39 @@ export function createDaemon(options: DaemonOptions): Daemon {
     } else {
       sdkSessions.set(sessionId, persisted.claudeSessionId);
     }
+  }
+
+  /**
+   * Repair a restored session's DERIVED title from the transcript it already holds (title backfill).
+   * An ended/idle session gets no further hooks, and the board only subscribes to awaiting rows — so
+   * restore is its one chance to shed a name minted before the injected-prompt classifier (or under
+   * the old first-line derivation) AND push it out. The push must wait for registration (a send before
+   * the socket exists is dropped), so corrected ids queue in {@link pendingTitleBackfills} and flush on
+   * the first hello.ack — but only those whose frame can travel SEALED (key restored, or a
+   * cleartext-mode daemon). A keyless E2E record is corrected in memory only and reaches browsers via
+   * the subscribe re-send, which establishes its key first — a title is prompt-derived content and
+   * must never leave the machine in the clear (AD-6).
+   */
+  const pendingTitleBackfills = new Set<string>();
+
+  function backfillRestoredTitle(sessionId: string): void {
+    const rec = sessionRecords.get(sessionId);
+    if (rec === undefined) return;
+    const derived = refinedTitleFor(rec);
+    if (derived === undefined) return;
+    rec.meta = { ...rec.meta, title: derived, titleSource: 'derived' };
+    if (!cipher.enabled || cipher.isEncrypted(sessionId)) pendingTitleBackfills.add(sessionId);
+  }
+
+  /** Emit + persist the restore-corrected titles once the relay connection is up (then never again). */
+  function flushTitleBackfills(): void {
+    for (const sessionId of pendingTitleBackfills) {
+      const rec = sessionRecords.get(sessionId);
+      if (rec === undefined) continue;
+      emitSessionMeta(adoptedSource(sessionId), {});
+      persistSession(sessionId, rec);
+    }
+    pendingTitleBackfills.clear();
   }
 
   /**
@@ -1373,6 +1407,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // on every (re)registration; cleartext session ids only. Routed through the outbound chain like every
         // other send, so a frame a future hello.ack step might add can never overtake or be overtaken by it.
         enqueueSend(async () => reconcileFrame());
+        // Push restore-corrected titles now that sends can actually leave (no-op after the first ack).
+        flushTitleBackfills();
         return;
       }
       case 'echo': {
@@ -1877,10 +1913,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     : undefined;
 
   /**
-   * A synthetic `source` envelope so adopted sessions reuse the session send + gate helpers. Uses
-   * `type: 'session.adopted'` only as a sentinel source type; each {@link sendForSession} call supplies
-   * the real frame type. (Frames are cleartext on a pre-E2E daemon and E2E-encrypted once a content key
-   * is established — see {@link handleHookEvent}.)
+   * A synthetic `source` envelope for a session frame that has no inbound envelope to reply to —
+   * originally for adopted sessions (hence the name), now equally the source for chained children and
+   * the restore-time title backfill, whatever the session's origin. Uses `type: 'session.adopted'` only
+   * as a sentinel source type; each {@link sendForSession} call supplies the real frame type. (Frames
+   * are cleartext on a pre-E2E daemon and E2E-encrypted once a content key is established — see
+   * {@link handleHookEvent}.)
    */
   function adoptedSource(telecodeSessionId: string): Envelope {
     return makeEnvelope({
@@ -1909,19 +1947,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
+   * The refined DERIVED title a session's transcript earns — from its first REAL user prompt
+   * (harness-injected machinery is a 'user' entry in a mirrored transcript but must never become the
+   * session's name) — or undefined when there is nothing (new) to apply: a user-renamed title (T6),
+   * no real prompt yet, or a title already up to date.
+   */
+  function refinedTitleFor(rec: Pick<SessionRecord, 'meta' | 'transcript'>): string | undefined {
+    if (rec.meta?.titleSource === 'user') return undefined;
+    const firstPrompt = firstRealPromptText(rec.transcript);
+    if (firstPrompt === undefined) return undefined;
+    const derived = deriveSessionTitle(firstPrompt);
+    return derived !== undefined && rec.meta?.title !== derived ? derived : undefined;
+  }
+
+  /**
    * Refine an adopted session's DERIVED title to its first real user prompt once the mirror has captured
    * one (ux Phase 6 T5) — the cwd-basename is only the sensible default for a session adopted before any
    * prompt. A no-op for a user-renamed title (T6) or once already refined to the prompt.
    */
   function refineAdoptedTitleFromPrompt(telecodeSessionId: string): void {
     const rec = sessionRecords.get(telecodeSessionId);
-    if (rec === undefined || rec.meta?.titleSource === 'user') return;
-    // The first REAL prompt: harness-injected machinery (command caveats, system reminders) is a
-    // 'user' entry in the mirrored transcript but must never become the session's name.
-    const firstPrompt = firstRealPromptText(rec.transcript);
-    if (firstPrompt === undefined) return;
-    const derived = deriveSessionTitle(firstPrompt);
-    if (derived === undefined || rec.meta?.title === derived) return;
+    if (rec === undefined) return;
+    const derived = refinedTitleFor(rec);
+    if (derived === undefined) return;
     emitSessionMeta(adoptedSource(telecodeSessionId), derivedMetaPatch(derived, undefined));
   }
 
