@@ -17,6 +17,8 @@
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, type SessionState } from '$lib/session';
+  import { firstRealPromptText } from '@telecode/protocol';
+  import { pickDisplayTitle } from '$lib/session-groups';
   import { clockTime } from '$lib/clock-time';
   import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { lineageOf } from '$lib/lineage';
@@ -114,8 +116,8 @@
   const SESSION_ID_DISPLAY_LENGTH = 12;
   const sessionTitle = $derived(
     $sessionTitleOverrides.get(sessionId) ??
-      $sessionMetas.get(sessionId)?.title ??
-      session.entries.find((e) => e.kind === 'user')?.text ??
+      pickDisplayTitle($sessionMetas.get(sessionId)?.title) ??
+      firstRealPromptText(session.entries) ??
       sessionId.slice(0, SESSION_ID_DISPLAY_LENGTH),
   );
   // A "Reset to default name" affordance appears only when the user has actually set an override.

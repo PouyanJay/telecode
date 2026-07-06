@@ -23,6 +23,8 @@ function row(overrides: Partial<SessionRow> & { id: string }): SessionRow {
     origin: 'launched',
     isContinuation: false,
     parentSessionId: null,
+    repo: null,
+    cwd: null,
     createdAt: T0,
     lastActivityAt: T0,
     ...overrides,

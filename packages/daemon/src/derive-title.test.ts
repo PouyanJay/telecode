@@ -8,8 +8,30 @@ describe('deriveSessionTitle', () => {
     expect(deriveSessionTitle('   \n\t  \n  ')).toBeUndefined();
   });
 
-  it('takes the first non-empty line and collapses its whitespace', () => {
-    expect(deriveSessionTitle('\n\n  Fix   the\tlogin bug  \nand more')).toBe('Fix the login bug');
+  it('reads ACROSS lines into one friendly phrase, collapsing all whitespace', () => {
+    expect(deriveSessionTitle('read the memory and \n\nRemaining for the new session: T7')).toBe(
+      'read the memory and Remaining for the new session: T7',
+    );
+    expect(
+      deriveSessionTitle(
+        'read the memory and \n\nRemaining for the new session: T7 (housekeeping)',
+      ),
+    ).toBe('read the memory and Remaining for the new session: T7…');
+  });
+
+  it('caps at 10 words with an ellipsis (user-scannable, per the board row budget)', () => {
+    expect(deriveSessionTitle('one two three four five six seven eight nine ten')).toBe(
+      'one two three four five six seven eight nine ten',
+    );
+    expect(deriveSessionTitle('one two three four five six seven eight nine ten eleven')).toBe(
+      'one two three four five six seven eight nine ten…',
+    );
+  });
+
+  it('collapses messy whitespace into the single phrase', () => {
+    expect(deriveSessionTitle('\n\n  Fix   the\tlogin bug  \nand more')).toBe(
+      'Fix the login bug and more',
+    );
   });
 
   it('keeps an exactly-80-char line untouched and truncates 81 with an ellipsis', () => {
@@ -26,6 +48,22 @@ describe('deriveSessionTitle', () => {
     const spaceAtCut = `${'a'.repeat(78)} bbbbb`;
     expect(deriveSessionTitle(spaceAtCut)).toBe(`${'a'.repeat(78)}…`);
   });
+
+  it('keeps the word-cap ellipsis within the 80-char bound (never 81)', () => {
+    // First 10 words join to exactly 80 chars; the word-cap ellipsis must not overshoot the limit.
+    const first10 = [...Array.from({ length: 9 }, () => 'a'.repeat(7)), 'b'.repeat(8)];
+    expect(first10.join(' ')).toHaveLength(80);
+    const title = deriveSessionTitle([...first10, 'extra'].join(' '));
+    expect(title!.length).toBeLessThanOrEqual(80);
+    expect(title).toMatch(/…$/);
+  });
+
+  it('applies the char cap when the first 10 words alone exceed it (both caps trigger)', () => {
+    const longWords = Array.from({ length: 10 }, () => 'w'.repeat(12)); // 10 words, 129 chars joined
+    const title = deriveSessionTitle([...longWords, 'tail'].join(' '));
+    expect(title!.length).toBeLessThanOrEqual(80);
+    expect(title).toMatch(/…$/);
+  });
 });
 
 describe('resolveLaunchTitle', () => {
@@ -38,7 +76,7 @@ describe('resolveLaunchTitle', () => {
 
   it('derives from the prompt when the user typed none', () => {
     expect(resolveLaunchTitle(undefined, 'Do the thing\nlater')).toEqual({
-      title: 'Do the thing',
+      title: 'Do the thing later',
       titleSource: 'derived',
     });
   });

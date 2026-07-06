@@ -1,21 +1,26 @@
 import type { SessionMetaPayload, TitleSourceName } from '@telecode/protocol';
 
 /**
- * A session title derived from its first prompt (ux Phase 6): the first non-empty line, whitespace
- * collapsed, truncated to a bounded single line so the dashboard row stays scannable. `undefined` for a
- * blank prompt (the caller then simply omits the title — never an empty string, which the wire schema
- * rejects). The title is prompt-derived CONTENT: it must only ever travel sealed and never be logged.
+ * A session title derived from its first prompt (ux Phase 6): ONE friendly phrase reading across the
+ * whole prompt — all whitespace (newlines included) collapsed, capped at 10 words so the dashboard
+ * row stays scannable, with a character bound behind it for pathological word lengths. An ellipsis
+ * marks any truncation. `undefined` for a blank prompt (the caller then simply omits the title —
+ * never an empty string, which the wire schema rejects). The title is prompt-derived CONTENT: it
+ * must only ever travel sealed and never be logged.
  */
 const MAX_TITLE_LENGTH = 80;
+const MAX_TITLE_WORDS = 10;
 
 export function deriveSessionTitle(prompt: string): string | undefined {
-  const firstLine = prompt
-    .split('\n')
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .find((line) => line !== '');
-  if (firstLine === undefined) return undefined;
-  if (firstLine.length <= MAX_TITLE_LENGTH) return firstLine;
-  return `${firstLine.slice(0, MAX_TITLE_LENGTH - 1).trimEnd()}…`;
+  const collapsed = prompt.replace(/\s+/g, ' ').trim();
+  if (collapsed === '') return undefined;
+  const words = collapsed.split(' ');
+  const phrase = words.slice(0, MAX_TITLE_WORDS).join(' ');
+  // Build the ellipsis-inclusive candidate FIRST so the character cap bounds the final string — a
+  // word-capped phrase sitting at the limit must not overshoot by its own ellipsis.
+  const candidate = words.length > MAX_TITLE_WORDS ? `${phrase}…` : phrase;
+  if (candidate.length <= MAX_TITLE_LENGTH) return candidate;
+  return `${phrase.slice(0, MAX_TITLE_LENGTH - 1).trimEnd()}…`;
 }
 
 /**

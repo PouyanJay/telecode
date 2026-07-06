@@ -8,6 +8,7 @@ import WebSocket from 'ws';
 import {
   type DiffStat,
   adoptConfigPayloadSchema,
+  firstRealPromptText,
   isSessionEndStatus,
   echoPayloadSchema,
   handoverAnswerPayloadSchema,
@@ -997,32 +998,42 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const FAILED = Symbol('workspace-failed');
 
   /**
-   * Resolve the on-disk repo a session runs against: clone the launch's `repo` on demand (Task 8), or use
-   * the daemon's configured `defaultRepoPath` (a local checkout). `undefined` means run in the daemon cwd.
+   * Resolve the on-disk repo a session runs against — clone the launch's `repo` on demand (Task 8), or
+   * use the daemon's configured `defaultRepoPath` (a local checkout) — plus its display identity for the
+   * sealed meta (`owner/name` when cloned, the checkout's folder name otherwise; the worktree cwd ends in
+   * the session id, so it can never serve as the repo tag). `undefined` means run in the daemon cwd.
    */
-  async function resolveRepoPath(launch: SessionLaunchPayload): Promise<string | undefined> {
+  async function resolveSessionRepo(
+    launch: SessionLaunchPayload,
+  ): Promise<{ path: string; repo: string } | undefined> {
     if (launch.repo && repoManager) {
-      return repoManager.ensureClone(launch.repo);
+      return {
+        path: await repoManager.ensureClone(launch.repo),
+        repo: `${launch.repo.owner}/${launch.repo.name}`,
+      };
     }
-    return defaultRepoPath;
+    return defaultRepoPath !== undefined
+      ? { path: defaultRepoPath, repo: basename(defaultRepoPath) }
+      : undefined;
   }
 
   /**
    * Prepare the session's workspace — clone its repo (if any) then cut its git worktree — and return the
-   * worktree path as the agent cwd, caching it so every turn reuses it. Returns `undefined` to run in the
-   * daemon cwd (no worktree manager, or no repo resolved). On failure it ends the session with an error and
-   * returns {@link FAILED} so the launch aborts (it must never stick at `starting`).
+   * worktree path as the agent cwd (cached so every turn reuses it) plus the repo identity for the sealed
+   * meta. An empty result runs in the daemon cwd (no worktree manager, or no repo resolved). On failure it
+   * ends the session with an error and returns {@link FAILED} so the launch aborts (it must never stick at
+   * `starting`).
    */
   async function prepareWorkspace(
     envelope: Envelope,
     launch: SessionLaunchPayload,
-  ): Promise<string | undefined | typeof FAILED> {
+  ): Promise<{ cwd?: string; repo?: string } | typeof FAILED> {
     const sessionId = envelope.session_id;
-    if (!worktreeManager || sessionId === undefined) return undefined;
+    if (!worktreeManager || sessionId === undefined) return {};
     try {
-      const repoPath = await resolveRepoPath(launch);
-      if (repoPath === undefined) return undefined;
-      const worktree = await worktreeManager.ensureWorktree(sessionId, repoPath);
+      const resolved = await resolveSessionRepo(launch);
+      if (resolved === undefined) return {};
+      const worktree = await worktreeManager.ensureWorktree(sessionId, resolved.path);
       sessionCwds.set(sessionId, worktree.path);
       recordFor(sessionId).cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
       // Log owner/name + branch only — never the clone URL or local paths (kept out of log sinks).
@@ -1035,7 +1046,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         },
         'daemon: session workspace ready',
       );
-      return worktree.path;
+      return { cwd: worktree.path, repo: resolved.repo };
     } catch (err) {
       log.error(
         { err, deviceId: options.deviceId, sessionId },
@@ -1089,8 +1100,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     );
     // Prepare this session's workspace (clone-on-demand + worktree) before any agent work, so parallel
     // sessions never share a cwd. A failure here fails the launch cleanly — it must never stick at `starting`.
-    const cwd = await prepareWorkspace(envelope, launch.data);
-    if (cwd === FAILED) return;
+    const workspace = await prepareWorkspace(envelope, launch.data);
+    if (workspace === FAILED) return;
+    const cwd = workspace.cwd;
     // Remember the operator's chosen mode so every turn (this one and follow-ups) gates tools the same way.
     if (envelope.session_id !== undefined && launch.data.permissionMode !== undefined) {
       recordFor(envelope.session_id).permissionMode = launch.data.permissionMode;
@@ -1109,6 +1121,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       emitSessionMeta(envelope, {
         ...resolveLaunchTitle(launch.data.title, launch.data.prompt),
         ...(cwd !== undefined ? { cwd } : {}),
+        ...(workspace.repo !== undefined ? { repo: workspace.repo } : {}),
         permissionMode: recordFor(envelope.session_id).permissionMode,
       });
     }
@@ -1298,12 +1311,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     const permissionMode = parent?.permissionMode ?? 'default';
     const cwd = sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd;
+    // The child runs where the parent ran, so it also IS the parent's repo — a worktree cwd alone
+    // can't say so (it ends in the parent's session id, not the repo name).
+    const repo = parent?.meta?.repo;
     const minted = await mintChainedChild({
       parentSessionId: parentId,
       permissionMode,
       metaPatch: {
         ...resolveLaunchTitle(undefined, prompt),
         ...(cwd !== undefined ? { cwd } : {}),
+        ...(repo !== undefined ? { repo } : {}),
         permissionMode,
       },
       firstTurnText: prompt,
@@ -1899,7 +1916,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
   function refineAdoptedTitleFromPrompt(telecodeSessionId: string): void {
     const rec = sessionRecords.get(telecodeSessionId);
     if (rec === undefined || rec.meta?.titleSource === 'user') return;
-    const firstPrompt = rec.transcript.find((entry) => entry.kind === 'user')?.text;
+    // The first REAL prompt: harness-injected machinery (command caveats, system reminders) is a
+    // 'user' entry in the mirrored transcript but must never become the session's name.
+    const firstPrompt = firstRealPromptText(rec.transcript);
     if (firstPrompt === undefined) return;
     const derived = deriveSessionTitle(firstPrompt);
     if (derived === undefined || rec.meta?.title === derived) return;

@@ -163,3 +163,5 @@ export type {
   SessionHistoryEntry,
   SessionHistoryPayload,
 } from './session';
+
+export { firstRealPromptText, isInjectedPrompt } from './prompt';
