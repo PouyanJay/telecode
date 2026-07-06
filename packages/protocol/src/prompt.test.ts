@@ -8,6 +8,8 @@ describe('isInjectedPrompt', () => {
     '<command-name>/clear</command-name>',
     '  <system-reminder>background task event</system-reminder>',
     '<bash-stdout>ok</bash-stdout>',
+    '<local-command-stdout>Set model to claude-opus-4-8[1m]</local-command-stdout>',
+    '<local-command-stderr>boom</local-command-stderr>',
   ])('recognizes harness-injected machinery: %s', (text) => {
     expect(isInjectedPrompt(text)).toBe(true);
   });

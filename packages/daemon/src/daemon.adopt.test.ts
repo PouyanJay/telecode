@@ -1340,6 +1340,128 @@ describe('daemon: adopted session survives a restart without a duplicate card (s
     expect(decision).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
   });
 
+  it('re-derives a restored machinery title from the first real prompt at startup (title backfill)', async () => {
+    // A record persisted by an older daemon whose title is injected machinery (the pre-classifier
+    // refine took the transcript's first 'user' entry verbatim). The session is OVER — no hook will
+    // ever fire again — so restore itself must repair the title from the transcript it already holds.
+    const store = createSessionStore({ dir: join(dir, 'sessions') });
+    store.save(TELECODE_SESSION, {
+      status: 'done',
+      permissionMode: 'default',
+      transcript: [
+        { kind: 'user', text: '<local-command-caveat>Caveat: the messages below were generated…' },
+        { kind: 'user', text: '<local-command-stdout>Set model to opus</local-command-stdout>' },
+        {
+          kind: 'user',
+          text: 'polish the landing page hero and ship it to production today please',
+        },
+        { kind: 'message', text: 'done' },
+      ],
+      meta: {
+        title: '<local-command-caveat>Caveat: the messages below were generated…',
+        titleSource: 'derived',
+        cwd: '/repo',
+      },
+      origin: 'external',
+      claudeSessionId: CLAUDE_SESSION,
+    });
+    // Barrier on the PARSED record via the store's own read path — save() writes in place, so a raw
+    // readFile could pass on a torn/empty file and the one-shot restore would silently drop the id.
+    await vi.waitFor(
+      async () => {
+        const seeded = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(seeded?.meta?.title).toBe(
+          '<local-command-caveat>Caveat: the messages below were generated…',
+        );
+      },
+      { timeout: 5000, interval: 50 },
+    );
+
+    // No subscribe: the corrected title must arrive EAGERLY after registration — the board never
+    // subscribes to an ended session, so a lazy (subscribe-only) push would leave its row stale.
+    const b = await startAdoptDaemon();
+    const meta = sessionMetaPayloadSchema.parse(
+      (
+        await b.relay.waitForFrame(
+          (e) => e.type === 'session.meta' && e.session_id === TELECODE_SESSION,
+        )
+      ).payload,
+    );
+    expect(meta.title).toBe('polish the landing page hero and ship it to production…');
+    expect(meta.titleSource).toBe('derived');
+    expect(meta.cwd).toBe('/repo'); // the rest of the restored identity is preserved
+
+    // And the correction is persisted — the next restart re-derives nothing (no re-emit loop).
+    await vi.waitFor(
+      async () => {
+        const persisted = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(persisted?.meta?.title).toBe(
+          'polish the landing page hero and ship it to production…',
+        );
+      },
+      { timeout: 5000, interval: 50 },
+    );
+  });
+
+  it('never backfills over a user-renamed title on restore (rename survives restarts)', async () => {
+    // A rename seals titleSource 'user' (T6) — the restore backfill must leave it alone even when the
+    // transcript's first real prompt would derive something else, and emit no spurious meta frame.
+    const store = createSessionStore({ dir: join(dir, 'sessions') });
+    store.save(TELECODE_SESSION, {
+      status: 'done',
+      permissionMode: 'default',
+      transcript: [
+        {
+          kind: 'user',
+          text: 'polish the landing page hero and ship it to production today please',
+        },
+      ],
+      meta: { title: 'My Custom Name', titleSource: 'user', cwd: '/repo' },
+      origin: 'external',
+      claudeSessionId: CLAUDE_SESSION,
+    });
+    await vi.waitFor(
+      async () => {
+        const seeded = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(seeded?.meta?.title).toBe('My Custom Name');
+      },
+      { timeout: 5000, interval: 50 },
+    );
+
+    const b = await startAdoptDaemon();
+    // Echo round-trip barrier: anything the hello.ack flush enqueued drains before the daemon even
+    // processes the echo message, so by the reply, a backfill frame would already have arrived. The
+    // peek must observe nothing (no spurious re-derive).
+    let observed = false;
+    b.relay
+      .waitForFrame((e) => e.type === 'session.meta' && e.session_id === TELECODE_SESSION)
+      .then(
+        () => {
+          observed = true;
+        },
+        // Expected: nothing arrives, so the peek eventually times out — never an unhandled rejection.
+        () => undefined,
+      );
+    b.relay.send(
+      makeEnvelope({ type: 'echo', userId: USER, deviceId: DEVICE, payload: { text: 'barrier' } }),
+    );
+    await b.relay.waitForFrame((e) => e.type === 'echo.reply');
+    expect(observed).toBe(false);
+
+    // And the on-disk record still carries the user's name.
+    const persisted = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+      TELECODE_SESSION,
+    );
+    expect(persisted?.meta?.title).toBe('My Custom Name');
+    expect(persisted?.meta?.titleSource).toBe('user');
+  });
+
   it('restores an adopted transcript grown by a Stop after adoption (not the adoption snapshot)', async () => {
     const transcriptPath = join(dir, 'transcript.jsonl');
     await writeFile(
