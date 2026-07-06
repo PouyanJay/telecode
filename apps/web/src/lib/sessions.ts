@@ -26,18 +26,21 @@ export function foldSessionFrame(map: SessionMap, envelope: Envelope): SessionMa
 }
 
 /**
- * The device behind this channel went offline (Phase 4 Task 3): flip every still-live session to
- * `offline_paused` so the UI honestly shows it can't run until the daemon reconnects. Terminal sessions
- * (done/error) and already-paused ones are left untouched. Returns the SAME map when nothing changed.
+ * A device went offline (Phase 4 Task 3): flip ITS still-live sessions — the ids in `scope` — to
+ * `offline_paused` so the UI honestly shows they can't run until that daemon reconnects. Scoped per
+ * device (ux Phase 5): with a fleet, one machine dropping must never pause another's sessions.
+ * Terminal (done/error) and already-paused sessions are untouched. Returns the SAME map when
+ * nothing changed.
  */
-export function markChannelOffline(map: SessionMap): SessionMap {
+export function markChannelOffline(map: SessionMap, scope: ReadonlySet<string>): SessionMap {
   let changed = false;
   const next = new Map(map);
   for (const [id, state] of map) {
     if (
-      state.status === 'running' ||
-      state.status === 'starting' ||
-      state.status === 'awaiting_input'
+      scope.has(id) &&
+      (state.status === 'running' ||
+        state.status === 'starting' ||
+        state.status === 'awaiting_input')
     ) {
       next.set(id, { ...state, status: 'offline_paused' });
       changed = true;

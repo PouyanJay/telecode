@@ -18,6 +18,7 @@ function row(overrides: Partial<SessionRow> & { id: string }): SessionRow {
   return {
     title: null,
     status: 'done',
+    deviceId: 'dev-1',
     deviceName: 'macbook',
     origin: 'launched',
     isContinuation: false,

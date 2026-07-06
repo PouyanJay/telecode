@@ -1,13 +1,22 @@
 <script lang="ts">
   import { Button } from '@telecode/ui';
 
+  import { page } from '$app/stores';
+
+  import DeviceChips from '$lib/components/DeviceChips.svelte';
   import InboxCard from '$lib/components/InboxCard.svelte';
   import Onboarding from '$lib/components/Onboarding.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import SessionGroupHeader from '$lib/components/SessionGroupHeader.svelte';
   import SessionRow from '$lib/components/SessionRow.svelte';
-  import { deviceStatus } from '$lib/devices';
+  import {
+    buildDeviceChips,
+    deviceBoardHref,
+    deviceFilterFromSearch,
+    filterRowsByDevice,
+  } from '$lib/device-filter';
+  import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { buildInboxAsks } from '$lib/inbox';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildOnboardingSteps } from '$lib/onboarding';
@@ -17,15 +26,27 @@
   import {
     connectionState,
     decide,
+    deviceChannels,
+    sessionDevices,
     sessions as liveSessions,
     subscribe,
-    watchedDaemonOnline,
   } from '$lib/session-store';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
 
-  const device = $derived(data.devices[0] ?? null);
+  const paired = $derived(data.devices.length > 0);
+  // The board's device scope (chips, plan B4) — URL state, so /devices deep-links it and reload
+  // keeps it. A stale id (revoked device) degrades to the unfiltered board.
+  const deviceFilter = $derived(
+    deviceFilterFromSearch(
+      $page.url.searchParams,
+      data.devices.map((d) => d.id),
+    ),
+  );
+  const filteredDeviceName = $derived(
+    deviceFilter === null ? null : (data.devices.find((d) => d.id === deviceFilter)?.name ?? null),
+  );
 
   // Bring every awaiting session live so its pending asks are actionable from the inbox (the daemon
   // backfills each via session.history). Once-per-session (the set), not once-per-render.
@@ -48,20 +69,33 @@
     return () => clearInterval(timer);
   });
 
+  // Which device a session runs on: its registry row, else the live routing map (a session
+  // launched this visit before its row lands). Used for ask filtering + inbox device names.
+  const deviceIdOfSession = $derived(
+    (sessionId: string): string | null =>
+      data.sessions.find((s) => s.id === sessionId)?.deviceId ??
+      $sessionDevices.get(sessionId) ??
+      null,
+  );
+
   const asks = $derived(
     buildInboxAsks({
       live: $liveSessions,
       titleOf: (id) => data.sessions.find((s) => s.id === id)?.title ?? null,
       deviceNameOf: (id) => {
-        const row = data.sessions.find((s) => s.id === id);
-        return row
-          ? (data.devices.find((d) => d.id === row.deviceId)?.name ?? null)
-          : (device?.name ?? null);
+        const deviceId = deviceIdOfSession(id);
+        return data.devices.find((d) => d.id === deviceId)?.name ?? null;
       },
     }),
   );
+  // The chips scope the WHOLE board — the inbox included (an ask filters by its session's device).
+  const visibleAsks = $derived(
+    deviceFilter === null
+      ? asks
+      : asks.filter((ask) => deviceIdOfSession(ask.sessionId) === deviceFilter),
+  );
   // Awaiting sessions whose asks aren't live yet (subscribe still in flight) fall back to plain rows.
-  const askSessionIds = $derived(new Set(asks.map((a) => a.sessionId)));
+  const askSessionIds = $derived(new Set(visibleAsks.map((a) => a.sessionId)));
 
   function onInboxApprove(sessionId: string, requestId: string): void {
     decide(sessionId, { requestId, behavior: 'allow' });
@@ -83,29 +117,35 @@
         registry: data.sessions,
         live: $liveSessions,
         deviceNameOf: (deviceId) => data.devices.find((d) => d.id === deviceId)?.name ?? null,
-        watchedDeviceName: device?.name ?? null,
+        deviceIdOf: (sessionId) => $sessionDevices.get(sessionId) ?? null,
       }),
     ),
   );
 
-  const groups = $derived(groupSessions(rows));
-  const counts = $derived(sessionCounts(rows));
+  // The chips' scope applies to everything below the header: list, groups, and the board stats.
+  const visibleRows = $derived(filterRowsByDevice(rows, deviceFilter));
+  const chips = $derived(
+    buildDeviceChips({ devices: data.devices, channels: $deviceChannels, rows }),
+  );
+
+  const groups = $derived(groupSessions(visibleRows));
+  const counts = $derived(sessionCounts(visibleRows));
   const devicesOnline = $derived(
-    data.devices.filter(
-      (d, i) =>
-        deviceStatus({
-          lastSeenAt: d.lastSeenAt,
-          isWatched: i === 0,
-          connection: $connectionState,
-          daemonOnline: $watchedDaemonOnline,
-        }).online,
-    ).length,
+    data.devices.filter((d) => {
+      const channel = deviceChannelOf($deviceChannels, d.id);
+      return deviceStatus({
+        lastSeenAt: d.lastSeenAt,
+        connection: channel.connection,
+        daemonOnline: channel.daemonOnline,
+        restOnline: d.online,
+      }).online;
+    }).length,
   );
 
   // First-run path (T14): pair → launch, shown when no device is paired yet.
   const onboardingSteps = $derived(
     buildOnboardingSteps({
-      paired: device !== null,
+      paired,
       hasSessions: rows.length > 0,
       instructions: pairingInstructions,
     }),
@@ -119,7 +159,7 @@
 {#if data.registryError}
   <!-- Error ≠ empty: a relay outage must never render the "pair your first device" onboarding. -->
   <RegistryErrorNotice />
-{:else if !device}
+{:else if !paired}
   <div class="onboard-scroll">
     <Onboarding steps={onboardingSteps} />
   </div>
@@ -143,20 +183,38 @@
     {/snippet}
   </PageHeader>
 
+  {#if data.devices.length > 1}
+    <DeviceChips {chips} active={deviceFilter} />
+  {/if}
+
   <div class="scroll">
     {#if rows.length === 0}
       <div class="empty">
         <p class="eyebrow">No sessions yet</p>
-        <p class="sub">Launch a session on {device.name} to watch the agent work.</p>
+        <p class="sub">Launch a session to watch the agent work.</p>
         <Button variant="primary" onclick={() => launchDrawerOpen.set(true)}>Launch session</Button>
+      </div>
+    {:else if visibleRows.length === 0}
+      <!-- The scope is empty, the account is not: name the scope and offer the way out. -->
+      <div class="empty">
+        <p class="eyebrow">No sessions on {filteredDeviceName ?? 'this device'}</p>
+        <p class="sub">Launch one here, or widen the view.</p>
+        <div class="empty-actions">
+          <Button variant="primary" onclick={() => launchDrawerOpen.set(true)}>
+            Launch session
+          </Button>
+          <a class="show-all" href={deviceBoardHref(null)} data-sveltekit-noscroll>
+            Show all devices
+          </a>
+        </div>
       </div>
     {:else}
       <div class="list">
-        {#if asks.length > 0 || groups.awaiting.length > 0}
+        {#if visibleAsks.length > 0 || groups.awaiting.length > 0}
           <SessionGroupHeader label="Needs you" />
-          {#if asks.length > 0}
+          {#if visibleAsks.length > 0}
             <ul class="asks" role="list" aria-live="polite">
-              {#each asks as ask (`${ask.sessionId}:${ask.requestId}`)}
+              {#each visibleAsks as ask (`${ask.sessionId}:${ask.requestId}`)}
                 <li>
                   <InboxCard {ask} {now} onapprove={onInboxApprove} onreject={onInboxReject} />
                 </li>
@@ -262,6 +320,27 @@
     gap: var(--space-3);
     text-align: center;
     padding: var(--space-16) var(--space-4);
+  }
+  .empty-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .show-all {
+    color: var(--accent);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    text-decoration: none;
+    border-radius: var(--radius-sm);
+  }
+  .show-all:hover {
+    text-decoration: underline;
+  }
+  .show-all:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--bg),
+      0 0 0 4px var(--focus-ring);
   }
   .eyebrow {
     margin: 0;

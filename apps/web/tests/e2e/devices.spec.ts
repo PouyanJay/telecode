@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 import { loadRepoEnv } from './env';
+import { pairDevice } from './pairing';
 
 /**
  * The revoke → re-authorize device lifecycle (UX Phase 4) through the real stack: pair a device via
@@ -11,69 +12,6 @@ import { loadRepoEnv } from './env';
  * browser; this spec plays the daemon's HTTP half itself (no streaming, so no fake-daemon process).
  */
 const RELAY_HTTP = process.env.RELAY_HTTP_URL ?? 'http://127.0.0.1:8080';
-const DEV_IDENTITY = {
-  provider: 'dev',
-  providerUserId: 'dev-user',
-  displayName: 'Developer',
-  email: 'dev@telecode.local',
-};
-
-interface PairedDevice {
-  userId: string;
-  deviceId: string;
-  deviceToken: string;
-  userCode: string;
-}
-
-/** Run the device-grant flow; when `priorDeviceToken` is passed the relay may restore the same row. */
-async function pairDevice(
-  serviceSecret: string,
-  name: string,
-  priorDeviceToken?: string,
-): Promise<PairedDevice> {
-  const svc = { 'content-type': 'application/json', 'x-telecode-service-secret': serviceSecret };
-
-  const sessionRes = await fetch(`${RELAY_HTTP}/auth/session`, {
-    method: 'POST',
-    headers: svc,
-    body: JSON.stringify(DEV_IDENTITY),
-  });
-  const { user_id: userId } = (await sessionRes.json()) as { user_id: string };
-
-  const codeRes = await fetch(`${RELAY_HTTP}/device/code`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      name,
-      ...(priorDeviceToken ? { prior_device_token: priorDeviceToken } : {}),
-    }),
-  });
-  const { device_code, user_code } = (await codeRes.json()) as {
-    device_code: string;
-    user_code: string;
-  };
-
-  await fetch(`${RELAY_HTTP}/device/approve`, {
-    method: 'POST',
-    headers: svc,
-    body: JSON.stringify({ user_code, user_id: userId }),
-  });
-
-  const tokenRes = await fetch(`${RELAY_HTTP}/device/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ device_code }),
-  });
-  const poll = (await tokenRes.json()) as {
-    status: string;
-    device_token?: string;
-    device_id?: string;
-  };
-  if (poll.status !== 'approved' || !poll.device_token || !poll.device_id) {
-    throw new Error(`device pairing failed: ${JSON.stringify(poll)}`);
-  }
-  return { userId, deviceId: poll.device_id, deviceToken: poll.device_token, userCode: user_code };
-}
 
 /** Request a restore code (prior token as evidence) WITHOUT approving it — leaves it pending. */
 async function requestRestoreCode(name: string, priorDeviceToken: string): Promise<void> {

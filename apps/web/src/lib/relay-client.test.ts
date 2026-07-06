@@ -161,6 +161,70 @@ describe('relay-client auto-reconnect (Phase 4 Task 1)', () => {
     await vi.advanceTimersByTimeAsync(11_000);
     expect(sockets.length).toBe(1); // no redial after an intentional teardown
   });
+
+  it('holds session frames behind the handshake and releases them on hello.ack (ux Phase 5)', async () => {
+    const { sockets, conn } = connectWithFakes();
+
+    // Subscribed before the socket even opened (a per-device channel racing a page's subscribes):
+    // nothing may be written into a CONNECTING/unauthenticated socket.
+    conn.subscribe('sess-1');
+    sockets[0]!.fireOpen();
+    await flush();
+    expect(sockets[0]!.sentHello()).toBe(true);
+    expect(sockets[0]!.sent.some((f) => f.includes('session.subscribe'))).toBe(false);
+
+    // The relay authenticates the peer → the queued frame flushes, in order, on the same socket.
+    // (One extra flush: releasing the gate adds a microtask hop before the queued build runs.)
+    sockets[0]!.fireMessage(helloAck());
+    await flush();
+    await flush();
+    expect(sockets[0]!.sent.some((f) => f.includes('sess-1'))).toBe(true);
+
+    // After a drop the gate re-arms: a frame enqueued mid-redial waits for the NEW handshake…
+    sockets[0]!.fireClose();
+    conn.subscribe('sess-2');
+    await vi.advanceTimersByTimeAsync(11_000);
+    sockets[1]!.fireOpen();
+    await flush();
+    expect(sockets[1]!.sent.some((f) => f.includes('sess-2'))).toBe(false);
+
+    // …and is delivered only once the new socket is authenticated.
+    sockets[1]!.fireMessage(helloAck());
+    await flush();
+    await flush();
+    expect(sockets[1]!.sent.some((f) => f.includes('sess-2'))).toBe(true);
+
+    conn.close();
+  });
+
+  it('a socket dying BEFORE its first hello.ack never wedges the send chain (gate rollover)', async () => {
+    const { sockets, conn } = connectWithFakes();
+
+    // A frame queued while the very first handshake is still pending…
+    conn.subscribe('sess-early');
+    sockets[0]!.fireOpen();
+    await flush();
+    // …and the socket dies before any hello.ack — the frame's gate generation is now orphaned
+    // unless re-arming settles it. This exact race used to freeze the chain permanently: every
+    // later send silently never went out.
+    sockets[0]!.fireClose();
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    // The redial authenticates cleanly; the early frame rolls over and flushes, as does a new one.
+    sockets[1]!.fireOpen();
+    await flush();
+    sockets[1]!.fireMessage(helloAck());
+    await flush();
+    await flush();
+    expect(sockets[1]!.sent.some((f) => f.includes('sess-early'))).toBe(true);
+
+    conn.subscribe('sess-later');
+    await flush();
+    await flush();
+    expect(sockets[1]!.sent.some((f) => f.includes('sess-later'))).toBe(true);
+
+    conn.close();
+  });
 });
 
 /**

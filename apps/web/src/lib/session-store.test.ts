@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RelayConnection, type RelayConnectionOptions } from './relay-client';
 import {
-  adoptState,
+  adoptStates,
   answer,
   answerHandover,
   connect,
@@ -265,31 +265,31 @@ describe('session-store launch correlation (Task 11)', () => {
     expect(map.get(childId)?.parentSessionId).toBe(parentId);
   });
 
-  it('reads + writes the adoption policy and surfaces adopt.state (Journey 3)', () => {
+  it('reads + writes the adoption policy and surfaces adopt.state per device (Journey 3)', () => {
     const fake = makeFakeConnection();
     connect(
       { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
       fake.create,
     );
 
-    // A GET (no settings) then a SET are both forwarded to the connection.
-    requestAdoptConfig();
-    setAdoptConfig({ enabled: false, denylist: ['/Users/me/secret'] });
+    // A GET (no settings) then a SET are both forwarded to the device's connection.
+    requestAdoptConfig(deviceId);
+    setAdoptConfig(deviceId, { enabled: false, denylist: ['/Users/me/secret'] });
     expect(fake.adoptConfigs).toEqual([
       undefined,
       { enabled: false, denylist: ['/Users/me/secret'] },
     ]);
 
-    // The daemon's sealed adopt.state reply (opened by the relay-client) lands on the adoptState store —
+    // The daemon's sealed adopt.state reply (opened by the relay-client) lands under ITS device —
     // now carrying the setup status (hook-install state) the UI renders.
-    expect(get(adoptState)).toBeNull();
+    expect(get(adoptStates).get(deviceId)).toBeUndefined();
     fake.adoptStateReply({
       enabled: false,
       denylist: ['/Users/me/secret'],
       hooksInstalled: false,
       events: [],
     });
-    expect(get(adoptState)).toEqual({
+    expect(get(adoptStates).get(deviceId)).toEqual({
       enabled: false,
       denylist: ['/Users/me/secret'],
       hooksInstalled: false,

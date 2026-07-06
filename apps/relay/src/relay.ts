@@ -815,6 +815,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         ...(deviceAuth
           ? { pendingRestoreDeviceIds: () => deviceAuth.pendingRestoreDeviceIds() }
           : {}),
+        // Presence snapshot for cold loads (ux Phase 5): the in-memory daemon channel map is the truth.
+        isDeviceOnline: (userId, deviceId) => daemons.has(channelKey(userId, deviceId)),
         onSessionsEnded: ({ userId, deviceId, sessionIds }) => {
           const channel = channelKey(userId, deviceId);
           for (const sessionId of sessionIds) {

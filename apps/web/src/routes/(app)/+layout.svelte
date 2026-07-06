@@ -17,9 +17,11 @@
   import { buildThreadRows } from '$lib/threads';
   import {
     connectionState,
-    ensureConnection,
+    deviceChannels,
+    ensureConnections,
+    seedSessionDevices,
+    sessionDevices,
     sessions as liveSessions,
-    watchedDaemonOnline,
   } from '$lib/session-store';
   import {
     DEFAULT_SIDEBAR_WIDTH,
@@ -39,7 +41,6 @@
   let { data, children }: { data: LayoutData; children: Snippet } = $props();
 
   const RELAY_URL = env.PUBLIC_TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
-  const device = $derived(data.devices[0] ?? null);
   // The system bar and sidebar badge count the SAME rows the dashboard lists (registry overlaid with
   // live status via the one shared buildSessionRows, collapsed into threads — ux Phase 3) — the tallies
   // can never disagree between surfaces. Counting live-only used to miss persisted awaiting sessions.
@@ -49,7 +50,7 @@
         registry: data.sessions,
         live: $liveSessions,
         deviceNameOf: () => null,
-        watchedDeviceName: null,
+        deviceIdOf: (sessionId) => $sessionDevices.get(sessionId) ?? null,
       }),
     ),
   );
@@ -62,15 +63,19 @@
     if (browser) writeSidebarWidth(localStorage, sidebarWidth);
   });
 
-  // Open (and keep) the shared connection whenever a device is available; idempotent, so re-running on a
-  // later pairing is safe. Client-only ($effect never runs on the server).
+  // Keep the pool synced to the paired fleet (ux Phase 5): one channel per device, idempotent —
+  // a later pairing dials in, a revoke closes that device's channel, and revoking the LAST device
+  // must run too (an empty list tears every channel down; a length guard here once leaked the
+  // final connection forever). Routing is seeded from the persisted registry so a cold page's
+  // subscribes reach each session's OWN device before any live frame names it. Client-only
+  // ($effect never runs on the server).
   $effect(() => {
-    if (device && browser) {
-      void ensureConnection({
+    if (browser) {
+      seedSessionDevices(data.sessions);
+      ensureConnections({
         relayUrl: RELAY_URL,
         userId: data.user?.id ?? '',
-        deviceId: device.id,
-        daemonPublicKey: device.publicKey,
+        devices: data.devices.map((d) => ({ id: d.id, publicKey: d.publicKey })),
       });
     }
   });
@@ -102,8 +107,7 @@
   <Sidebar
     user={data.user}
     devices={data.devices}
-    connection={$connectionState}
-    daemonOnline={$watchedDaemonOnline}
+    channels={$deviceChannels}
     {sessionTotal}
     onlaunch={openLaunchDrawer}
   />
@@ -121,7 +125,8 @@
 
 <LaunchDrawer
   bind:open={$launchDrawerOpen}
-  {device}
+  devices={data.devices}
+  channels={$deviceChannels}
   repos={data.repos}
   githubConnected={data.githubConnected}
 />

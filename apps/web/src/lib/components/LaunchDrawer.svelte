@@ -5,26 +5,31 @@
   import type { PermissionModeName } from '@telecode/protocol';
 
   import PermissionModeField from '$lib/components/PermissionModeField.svelte';
+  import { buildLaunchDeviceOptions, defaultLaunchDeviceId } from '$lib/launch-device';
   import { launchRepo } from '$lib/launch-repo';
   import type { RelayDevice, RelayRepo } from '$lib/server/relay-api';
-  import { launch } from '$lib/session-store';
+  import { launch, type DeviceChannelState } from '$lib/session-store';
   import { DEFAULT_PERMISSION_MODE, readPermissionMode } from '$lib/settings';
 
   /**
-   * The launch drawer (enterprise-ui §7 forms): pick where to run, an optional repo, the permission mode,
-   * and the first instruction. Submit stays enabled until submission starts, then shows real pending
-   * state — launch is verification-gated (the daemon must report the session started). Seeds the mode from
-   * the saved Settings default each time it opens. Without a device it routes the operator to pairing
-   * rather than presenting a form that can't run.
+   * The launch drawer (enterprise-ui §7 forms): pick where to run — a real device picker across the
+   * fleet (ux Phase 5), with honest per-device presence — an optional repo, the permission mode, and
+   * the first instruction. Submit stays enabled until submission starts, then shows real pending
+   * state — launch is verification-gated (the daemon must report the session started). Seeds the mode
+   * from the saved Settings default each time it opens. Without a device it routes the operator to
+   * pairing rather than presenting a form that can't run.
    */
   let {
     open = $bindable(false),
-    device,
+    devices,
+    channels,
     repos,
     githubConnected,
   }: {
     open?: boolean;
-    device: RelayDevice | null;
+    devices: RelayDevice[];
+    /** Per-device channel state from the pool — presence for the picker's ●/○ marks. */
+    channels: ReadonlyMap<string, DeviceChannelState>;
     repos: RelayRepo[];
     githubConnected: boolean;
   } = $props();
@@ -32,29 +37,47 @@
   let prompt = $state('');
   let title = $state('');
   let selectedRepoId = $state('');
+  let selectedDeviceId = $state('');
   let mode = $state<PermissionModeName>(DEFAULT_PERMISSION_MODE);
   let launching = $state(false);
   let launchError = $state<string | null>(null);
+
+  const deviceOptions = $derived(buildLaunchDeviceOptions(devices, channels));
+  const selectedDevice = $derived(
+    deviceOptions.find((option) => option.id === selectedDeviceId) ?? null,
+  );
 
   // Seed the mode from the saved default whenever the drawer opens (Settings owns the persisted value).
   $effect(() => {
     if (open && browser) mode = readPermissionMode(localStorage);
   });
 
+  // Keep a valid launch target: seed the default on open, and re-seed only if the picked device
+  // left the fleet (a mid-open revoke) — never stomp a choice the operator has made.
+  $effect(() => {
+    if (!open) return;
+    if (!deviceOptions.some((option) => option.id === selectedDeviceId)) {
+      selectedDeviceId = defaultLaunchDeviceId(deviceOptions) ?? '';
+    }
+  });
+
   async function onLaunch(event: Event): Promise<void> {
     event.preventDefault();
     const text = prompt.trim();
-    if (!text || launching || !device) return;
+    if (!text || launching || !selectedDevice) return;
     launching = true;
     launchError = null;
     try {
       const repo = launchRepo(repos, selectedRepoId);
-      const id = await launch({
-        prompt: text,
-        permissionMode: mode,
-        ...(title.trim() ? { title: title.trim() } : {}),
-        ...(repo ? { repo } : {}),
-      });
+      const id = await launch(
+        {
+          prompt: text,
+          permissionMode: mode,
+          ...(title.trim() ? { title: title.trim() } : {}),
+          ...(repo ? { repo } : {}),
+        },
+        selectedDevice.id,
+      );
       open = false;
       prompt = '';
       title = '';
@@ -71,18 +94,47 @@
   }
 </script>
 
+{#snippet chevron()}
+  <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5l3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+{/snippet}
+
 <Drawer bind:open title="Launch session">
-  {#if !device}
+  {#if deviceOptions.length === 0}
     <div class="no-device">
       <p class="lede">No device is paired yet. Pair a machine to run agents on it.</p>
       <a class="link" href="/activate" onclick={() => (open = false)}>Pair a device →</a>
     </div>
   {:else}
     <form id="launch-form" class="form" onsubmit={onLaunch}>
-      <div class="field">
-        <span class="label">Run on</span>
-        <p class="readonly mono" title={device.name}>{device.name}</p>
-      </div>
+      {#if deviceOptions.length === 1}
+        <div class="field">
+          <span class="label">Run on</span>
+          <p class="readonly mono" title={deviceOptions[0]!.name}>
+            {deviceOptions[0]!.online ? '●' : '○'}
+            {deviceOptions[0]!.name}
+          </p>
+        </div>
+      {:else}
+        <div class="field">
+          <label class="label" for="launch-device">Run on</label>
+          <div class="select-wrap">
+            <select id="launch-device" class="select" bind:value={selectedDeviceId}>
+              {#each deviceOptions as option (option.id)}
+                <option value={option.id}>
+                  {option.online ? '●' : '○'}
+                  {option.name}{option.online ? '' : ' (offline)'}
+                </option>
+              {/each}
+            </select>
+            {@render chevron()}
+          </div>
+          {#if selectedDevice && !selectedDevice.online}
+            <p class="note">
+              {selectedDevice.name} is offline — the launch will fail until it reconnects.
+            </p>
+          {/if}
+        </div>
+      {/if}
 
       {#if githubConnected && repos.length > 0}
         <div class="field">
@@ -96,7 +148,7 @@
                 </option>
               {/each}
             </select>
-            <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5l3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            {@render chevron()}
           </div>
         </div>
       {:else if githubConnected}
@@ -132,7 +184,7 @@
 
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
-    {#if device}
+    {#if selectedDevice}
       <Button
         form="launch-form"
         type="submit"
@@ -140,7 +192,7 @@
         loading={launching}
         disabled={launching}
       >
-        Launch on {device.name}
+        Launch on {selectedDevice.name}
       </Button>
     {/if}
   {/snippet}

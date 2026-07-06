@@ -11,10 +11,11 @@
   import { resolveAdoptSetupState } from '$lib/adopt-setup-state';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import PermissionModeField from '$lib/components/PermissionModeField.svelte';
+  import { deviceChannelOf } from '$lib/devices';
   import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
   import {
-    adoptState,
-    connectionState,
+    adoptStates,
+    deviceChannels,
     requestAdoptConfig,
     setAdoptConfig,
   } from '$lib/session-store';
@@ -74,31 +75,43 @@
     }
   }
 
-  // Adopted-sessions policy (Journey 3): the daemon owns it; the web reads/writes it over the sealed
-  // channel. Ask for the current policy once the channel is live; every edit sends the full new policy and
-  // the UI reflects the daemon's confirmed reply (adoptState).
-  let newDenyPath = $state('');
-  const adoptConnected = $derived($connectionState === 'connected');
+  // Adopted-sessions policy (Journey 3, per-device since ux Phase 5): each device's daemon owns
+  // ITS policy; the web reads/writes it over that device's sealed channel. Ask each device once
+  // when its channel comes up; every edit sends the full new policy for THAT device and the UI
+  // reflects its daemon's confirmed reply (adoptStates).
+  const denyDrafts = $state<Record<string, string>>({});
+  const requestedAdopt = new Set<string>();
 
   $effect(() => {
-    if (adoptConnected) requestAdoptConfig();
+    for (const device of data.devices) {
+      if (
+        deviceChannelOf($deviceChannels, device.id).connection === 'connected' &&
+        !requestedAdopt.has(device.id)
+      ) {
+        requestedAdopt.add(device.id);
+        requestAdoptConfig(device.id);
+      }
+    }
   });
 
-  function toggleAdoption(): void {
-    const state = $adoptState;
-    if (state) setAdoptConfig({ enabled: !state.enabled, denylist: state.denylist });
+  function toggleAdoption(deviceId: string): void {
+    const state = $adoptStates.get(deviceId);
+    if (state) setAdoptConfig(deviceId, { enabled: !state.enabled, denylist: state.denylist });
   }
-  function addDeny(): void {
-    const state = $adoptState;
-    const path = newDenyPath.trim();
+  function addDeny(deviceId: string): void {
+    const state = $adoptStates.get(deviceId);
+    const path = (denyDrafts[deviceId] ?? '').trim();
     if (!state || path === '' || state.denylist.includes(path)) return;
-    setAdoptConfig({ enabled: state.enabled, denylist: [...state.denylist, path] });
-    newDenyPath = '';
+    setAdoptConfig(deviceId, { enabled: state.enabled, denylist: [...state.denylist, path] });
+    denyDrafts[deviceId] = '';
   }
-  function removeDeny(path: string): void {
-    const state = $adoptState;
+  function removeDeny(deviceId: string, path: string): void {
+    const state = $adoptStates.get(deviceId);
     if (state) {
-      setAdoptConfig({ enabled: state.enabled, denylist: state.denylist.filter((p) => p !== path) });
+      setAdoptConfig(deviceId, {
+        enabled: state.enabled,
+        denylist: state.denylist.filter((p) => p !== path),
+      });
     }
   }
 </script>
@@ -141,107 +154,127 @@
       </div>
     </Panel>
 
-    <Panel title="Adopted sessions" meta="this device">
-      <div class="body">
-        <p class="hint">
-          telecode monitors and steers the Claude Code sessions you start yourself (terminal or IDE). It sets
-          this up automatically when you pair the device — nothing to install by hand.
-        </p>
-
-        {#if !$adoptState}
+    {#if data.devices.length === 0}
+      <Panel title="Adopted sessions" meta="no devices">
+        <div class="body">
           <p class="hint">
-            {adoptConnected
-              ? 'Loading adoption settings…'
-              : 'Connect this device to manage adoption.'}
+            telecode monitors and steers the Claude Code sessions you start yourself (terminal or
+            IDE). <a href="/activate">Pair a device</a> to manage its adoption policy here.
           </p>
-        {:else}
-          {@const setupState = resolveAdoptSetupState($adoptState)}
-          <div class="status" data-state={setupState} role="status">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span class="status-label">
-              {setupState === 'active'
-                ? 'ACTIVE'
-                : setupState === 'attention'
-                  ? 'NOT INSTALLED'
-                  : 'OFF'}
-            </span>
-            <span class="status-detail">
-              {#if setupState === 'active'}
-                Watching your sessions — {$adoptState.events.length} hook{$adoptState.events.length === 1
-                  ? ''
-                  : 's'} installed on this device.
-              {:else if setupState === 'attention'}
-                telecode couldn’t install its hooks — check that <code class="mono">~/.claude</code> is
-                writable, then toggle adoption off and on.
-              {:else}
-                telecode isn’t touching your Claude Code config.
-              {/if}
-            </span>
-          </div>
+        </div>
+      </Panel>
+    {/if}
+    {#each data.devices as adoptDevice (adoptDevice.id)}
+      {@const adopt = $adoptStates.get(adoptDevice.id)}
+      {@const adoptChannel = deviceChannelOf($deviceChannels, adoptDevice.id)}
+      <Panel title="Adopted sessions" meta={adoptDevice.name}>
+        <div class="body">
+          <p class="hint">
+            telecode monitors and steers the Claude Code sessions you start yourself (terminal or
+            IDE) on {adoptDevice.name}. It sets this up automatically when you pair the device —
+            nothing to install by hand.
+          </p>
 
-          <div class="toggle">
-            <div class="toggle-text">
-              <span class="toggle-label">Adopt my sessions</span>
-              <p class="hint">
-                When on, sessions you start are mirrored here — except the excluded projects below.
-              </p>
-            </div>
-            <Switch
-              checked={$adoptState.enabled}
-              onclick={toggleAdoption}
-              label="Adopt my Claude Code sessions"
-            />
-          </div>
-
-          <div class="field">
-            <span class="label">Excluded projects</span>
+          {#if !adopt}
             <p class="hint">
-              A session whose folder is one of these (or inside it) is never mirrored — it runs entirely on
-              your machine.
+              {adoptChannel.connection === 'connected' && adoptChannel.daemonOnline !== false
+                ? 'Loading adoption settings…'
+                : `${adoptDevice.name} is offline — its adoption settings load when it reconnects.`}
             </p>
-            {#if $adoptState.denylist.length === 0}
-              <p class="hint">No exclusions — every project is adopted.</p>
-            {:else}
-              <ul class="denylist" role="list">
-                {#each $adoptState.denylist as path (path)}
-                  <li>
-                    <code class="mono deny-path" title={path}>{path}</code>
-                    <button
-                      class="remove"
-                      type="button"
-                      onclick={() => removeDeny(path)}
-                      aria-label={`Stop excluding ${path}`}
-                    >
-                      Remove
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-            <form
-              class="add"
-              onsubmit={(e) => {
-                e.preventDefault();
-                addDeny();
-              }}
-            >
-              <input
-                class="deny-input mono"
-                type="text"
-                bind:value={newDenyPath}
-                placeholder="/Users/you/private-repo"
-                spellcheck="false"
-                autocomplete="off"
-                aria-label="Project path to exclude from adoption"
+          {:else}
+            {@const setupState = resolveAdoptSetupState(adopt)}
+            <div class="status" data-state={setupState} role="status">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span class="status-label">
+                {setupState === 'active'
+                  ? 'ACTIVE'
+                  : setupState === 'attention'
+                    ? 'NOT INSTALLED'
+                    : 'OFF'}
+              </span>
+              <span class="status-detail">
+                {#if setupState === 'active'}
+                  Watching your sessions — {adopt.events.length} hook{adopt.events.length === 1
+                    ? ''
+                    : 's'} installed on this device.
+                {:else if setupState === 'attention'}
+                  telecode couldn’t install its hooks — check that <code class="mono">~/.claude</code> is
+                  writable, then toggle adoption off and on.
+                {:else}
+                  telecode isn’t touching your Claude Code config.
+                {/if}
+              </span>
+            </div>
+
+            <div class="toggle">
+              <div class="toggle-text">
+                <span class="toggle-label">Adopt my sessions</span>
+                <p class="hint">
+                  When on, sessions you start are mirrored here — except the excluded projects below.
+                </p>
+              </div>
+              <Switch
+                checked={adopt.enabled}
+                onclick={() => toggleAdoption(adoptDevice.id)}
+                label={`Adopt my Claude Code sessions on ${adoptDevice.name}`}
               />
-              <Button type="submit" variant="secondary" size="sm" disabled={newDenyPath.trim() === ''}>
-                Add
-              </Button>
-            </form>
-          </div>
-        {/if}
-      </div>
-    </Panel>
+            </div>
+
+            <div class="field">
+              <span class="label">Excluded projects</span>
+              <p class="hint">
+                A session whose folder is one of these (or inside it) is never mirrored — it runs entirely on
+                your machine.
+              </p>
+              {#if adopt.denylist.length === 0}
+                <p class="hint">No exclusions — every project is adopted.</p>
+              {:else}
+                <ul class="denylist" role="list">
+                  {#each adopt.denylist as path (path)}
+                    <li>
+                      <code class="mono deny-path" title={path}>{path}</code>
+                      <button
+                        class="remove"
+                        type="button"
+                        onclick={() => removeDeny(adoptDevice.id, path)}
+                        aria-label={`Stop excluding ${path} on ${adoptDevice.name}`}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              <form
+                class="add"
+                onsubmit={(e) => {
+                  e.preventDefault();
+                  addDeny(adoptDevice.id);
+                }}
+              >
+                <input
+                  class="deny-input mono"
+                  type="text"
+                  bind:value={denyDrafts[adoptDevice.id]}
+                  placeholder="/Users/you/private-repo"
+                  spellcheck="false"
+                  autocomplete="off"
+                  aria-label={`Project path to exclude from adoption on ${adoptDevice.name}`}
+                />
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  size="sm"
+                  disabled={(denyDrafts[adoptDevice.id] ?? '').trim() === ''}
+                >
+                  Add
+                </Button>
+              </form>
+            </div>
+          {/if}
+        </div>
+      </Panel>
+    {/each}
 
     {#if infra}
       <Panel title="Infrastructure" meta="operator · affects everyone">
