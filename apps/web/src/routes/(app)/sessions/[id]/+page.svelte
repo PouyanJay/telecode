@@ -312,6 +312,7 @@
   <SessionHeader
     title={sessionTitle}
     deviceName={device?.name ?? null}
+    cwd={$sessionMetas.get(sessionId)?.cwd ?? null}
     {sessionId}
     status={session.status}
     {isBusy}
