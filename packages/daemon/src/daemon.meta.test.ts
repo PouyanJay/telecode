@@ -18,6 +18,7 @@ import { createDaemon, type Daemon } from './daemon';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
 import {
   decryptWithContentKey,
+  encryptWithContentKey,
   mkE2eIds,
   ofType,
   sendSealedLaunch,
@@ -214,6 +215,91 @@ describe('daemon session.meta on launch (session-identity T1)', () => {
       titleSource: 'derived',
       permissionMode: 'default',
     });
+  });
+
+  it('emits an updated session.meta carrying the model once the turn learns it (T5)', async () => {
+    const ids = mkE2eIds();
+    const daemonKp = await generateKeyPair();
+    const browserKp = await generateKeyPair();
+    const relay = await startDaemon(
+      ids,
+      daemonKp,
+      createFakeAgentAdapter([{ type: 'message', text: 'on it' }], {
+        sessionId: 'sdk-m',
+        model: 'claude-sonnet-5',
+      }),
+    );
+
+    await sendSealedLaunch(relay, ids, daemonKp, browserKp, { prompt: 'do it' });
+    const keyFrame = await relay.waitForFrame(ofType('session.key', ids.sessionId));
+    const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
+
+    // Enqueue order is deterministic (one send chain): the launch meta (no model, model not known yet)
+    // precedes the turn-end model update. So the SECOND session.meta is the one that carries the model.
+    const launchMeta = await openMeta(
+      await relay.waitForFrame(ofType('session.meta', ids.sessionId)),
+      contentKey,
+    );
+    expect(launchMeta.model).toBeUndefined();
+    const modelMeta = await openMeta(
+      await relay.waitForFrame(ofType('session.meta', ids.sessionId)),
+      contentKey,
+    );
+    expect(modelMeta.model).toBe('claude-sonnet-5');
+    // The frame carries the FULL merged snapshot, not just the model patch (documented latest-wins).
+    expect(modelMeta.title).toBe('do it');
+  });
+
+  it('does NOT re-emit session.meta on a second turn reporting the same model (T5)', async () => {
+    const ids = mkE2eIds();
+    const daemonKp = await generateKeyPair();
+    const browserKp = await generateKeyPair();
+    const relay = await startDaemon(
+      ids,
+      daemonKp,
+      createFakeAgentAdapter([{ type: 'message', text: 'ok' }], {
+        sessionId: 'sdk-m2',
+        model: 'claude-sonnet-5',
+      }),
+    );
+
+    await sendSealedLaunch(relay, ids, daemonKp, browserKp, { prompt: 'first' });
+    const contentKey = await unwrapContentKey(
+      await relay.waitForFrame(ofType('session.key', ids.sessionId)),
+      daemonKp.publicKey,
+      browserKp.privateKey,
+    );
+    // Turn 1: launch meta + the model-update meta (2 metas).
+    await relay.waitForFrame(ofType('session.meta', ids.sessionId));
+    await relay.waitForFrame(ofType('session.meta', ids.sessionId));
+    await relay.waitForFrame(ofType('session.ended', ids.sessionId));
+
+    // Turn 2 reports the SAME model → no new session.meta. Prove it by draining to the terminal
+    // session.ended (a barrier that can't miss an out-of-order frame); any session.meta in between is a
+    // regression and fails immediately, naming the offending frame — not as an opaque 5s drain timeout.
+    // The follow-up is encrypted under the content key (the session is E2E).
+    const sealed = await encryptWithContentKey({ text: 'second' }, contentKey);
+    relay.send(
+      makeEnvelope({
+        type: 'user.message',
+        userId: ids.userId,
+        deviceId: ids.deviceId,
+        sessionId: ids.sessionId,
+        payload: sealed.payload,
+        nonce: sealed.nonce,
+      }),
+    );
+    for (;;) {
+      const frame = await relay.waitForFrame(
+        (e) =>
+          e.session_id === ids.sessionId &&
+          (e.type === 'session.meta' || e.type === 'session.ended'),
+      );
+      if (frame.type === 'session.ended') break;
+      throw new Error(
+        `expected no session.meta re-emit for an unchanged model, got: ${JSON.stringify(frame)}`,
+      );
+    }
   });
 
   it('re-sends session.meta to a subscriber (reopen has identity even without the relay cache)', async () => {

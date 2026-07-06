@@ -15,9 +15,6 @@ import { type Logger } from 'pino';
 export interface AdoptInput {
   /** The Claude Code session id from the hook event. */
   readonly claudeSessionId: string;
-  /** Derived hints for the registry row (first prompt / working directory). */
-  readonly title?: string;
-  readonly cwd?: string;
 }
 
 export interface AdoptedSessionManager {
@@ -41,8 +38,11 @@ export interface AdoptedSessionManager {
 }
 
 export interface AdoptedSessionOptions {
-  /** Announce an external session to the relay (the daemon enqueues the `session.adopted` frame). */
-  readonly announce: (payload: { clientRef: string; title?: string; cwd?: string }) => void;
+  /**
+   * Announce an external session to the relay (the daemon enqueues the `session.adopted` frame). Ids-only
+   * since ux Phase 6 T5 — the session's title/cwd travel in a SEALED `session.meta`, never cleartext here.
+   */
+  readonly announce: (payload: { clientRef: string }) => void;
   /** How long to wait for the relay's ACK before failing the adoption. Default 15s. */
   readonly ackTimeoutMs?: number;
   /** Injected at the composition root (the daemon's child logger) — never created here (TYPESCRIPT.md). */
@@ -75,7 +75,7 @@ export function createAdoptedSessionManager(options: AdoptedSessionOptions): Ado
   }
 
   return {
-    ensureAdopted({ claudeSessionId, title, cwd }): Promise<string> {
+    ensureAdopted({ claudeSessionId }): Promise<string> {
       const known = byClaudeId.get(claudeSessionId);
       if (known !== undefined) return Promise.resolve(known);
       const inflight = pending.get(claudeSessionId);
@@ -95,11 +95,7 @@ export function createAdoptedSessionManager(options: AdoptedSessionOptions): Ado
       pending.set(claudeSessionId, { promise, resolve, reject, timer });
 
       log.info({ claudeSessionId }, 'adopted-sessions: announcing external session');
-      options.announce({
-        clientRef: claudeSessionId,
-        ...(title !== undefined ? { title } : {}),
-        ...(cwd !== undefined ? { cwd } : {}),
-      });
+      options.announce({ clientRef: claudeSessionId });
       return promise;
     },
 

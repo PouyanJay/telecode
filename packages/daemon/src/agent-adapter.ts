@@ -82,6 +82,8 @@ export interface AgentRunResult {
   readonly sessionId?: string;
   /** Absent when the stream ended without a terminal result (abort, old SDK) — treated as completed. */
   readonly endReason?: AgentEndReason;
+  /** The model the SDK ran (from its `system/init`, ux Phase 6 T5) — surfaced in the session's metadata. */
+  readonly model?: string;
 }
 
 export interface AgentAdapter {
@@ -101,6 +103,8 @@ export interface FakeAgentAdapterOptions {
   }) => void;
   /** The terminal reason every run reports (simulates the SDK's `result` subtype; default none). */
   readonly endReason?: AgentEndReason;
+  /** The model every run reports (simulates the SDK's `system/init` model, ux Phase 6 T5; default none). */
+  readonly model?: string;
 }
 
 /**
@@ -152,6 +156,7 @@ export function createFakeAgentAdapter(
         denied,
         sessionId,
         ...(options.endReason !== undefined ? { endReason: options.endReason } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
       };
     },
   };

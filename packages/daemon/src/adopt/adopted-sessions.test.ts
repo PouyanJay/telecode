@@ -19,12 +19,14 @@ function manager(
 describe('createAdoptedSessionManager', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('announces an unknown session and resolves with the relay-minted id', async () => {
+  it('announces an unknown session (ids-only) and resolves with the relay-minted id', async () => {
     const announce = vi.fn();
     const mgr = manager({ announce });
 
-    const pending = mgr.ensureAdopted({ claudeSessionId: 'claude-1', title: 'fix', cwd: '/repo' });
-    expect(announce).toHaveBeenCalledWith({ clientRef: 'claude-1', title: 'fix', cwd: '/repo' });
+    // Ids-only announce (ux Phase 6 T5): the title/cwd never travel here — they follow in a sealed
+    // session.meta, so the relay never sees the project name/path in cleartext.
+    const pending = mgr.ensureAdopted({ claudeSessionId: 'claude-1' });
+    expect(announce).toHaveBeenCalledWith({ clientRef: 'claude-1' });
     expect(mgr.isPending('claude-1')).toBe(true);
 
     mgr.resolveAck('claude-1', 'tc-uuid-1');

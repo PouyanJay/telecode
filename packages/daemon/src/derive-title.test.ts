@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { deriveSessionTitle, resolveLaunchTitle } from './derive-title';
+import { derivedMetaPatch, deriveSessionTitle, resolveLaunchTitle } from './derive-title';
 
 describe('deriveSessionTitle', () => {
   it('derives no title from an empty or whitespace-only prompt (wire allows " ")', () => {
@@ -45,5 +45,37 @@ describe('resolveLaunchTitle', () => {
 
   it('yields nothing for a whitespace-only prompt and no user title', () => {
     expect(resolveLaunchTitle(undefined, ' \n ')).toBeUndefined();
+  });
+});
+
+describe('derivedMetaPatch', () => {
+  it('carries both title (marked derived) and cwd when present', () => {
+    expect(derivedMetaPatch('secret-project', '/Users/me/secret-project')).toEqual({
+      title: 'secret-project',
+      titleSource: 'derived',
+      cwd: '/Users/me/secret-project',
+    });
+  });
+
+  it('omits the title (and its source) when there is none, keeping the cwd', () => {
+    expect(derivedMetaPatch(undefined, '/repo')).toEqual({ cwd: '/repo' });
+  });
+
+  it('omits the cwd when there is none, keeping the title', () => {
+    expect(derivedMetaPatch('Continue: pick a database', undefined)).toEqual({
+      title: 'Continue: pick a database',
+      titleSource: 'derived',
+    });
+  });
+
+  it('is empty when neither is present', () => {
+    expect(derivedMetaPatch(undefined, undefined)).toEqual({});
+  });
+
+  it('DROPS an empty title (basename of a root/blank cwd) so the wire schema is never handed title: ""', () => {
+    // basename('/') === '' and basename('') === '' — a reachable adopted cwd. An empty title violates
+    // sessionMetaPayloadSchema (title.min(1)); it must be omitted, not emitted, or the frame is dropped.
+    expect(derivedMetaPatch('', '/')).toEqual({ cwd: '/' });
+    expect(derivedMetaPatch('', '')).toEqual({ cwd: '' });
   });
 });

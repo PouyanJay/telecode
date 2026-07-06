@@ -1,4 +1,4 @@
-import type { TitleSourceName } from '@telecode/protocol';
+import type { SessionMetaPayload, TitleSourceName } from '@telecode/protocol';
 
 /**
  * A session title derived from its first prompt (ux Phase 6): the first non-empty line, whitespace
@@ -30,4 +30,21 @@ export function resolveLaunchTitle(
   if (userTitle !== undefined) return { title: userTitle, titleSource: 'user' };
   const derived = deriveSessionTitle(prompt);
   return derived !== undefined ? { title: derived, titleSource: 'derived' } : undefined;
+}
+
+/**
+ * A sealed-meta patch for a session whose title is DERIVED (adopted/chained, ux Phase 6 T5): carry the
+ * title (marked `derived`) and cwd only when present, so a single shape backs every derived-title emit
+ * site. `title`/`cwd` are the fields a `session.meta` frame seals. An EMPTY title is dropped, not sent —
+ * `basename('/')`/`basename('')` is `''`, which the wire schema (`title.min(1)`) rejects; an adopted
+ * session at a root/blank cwd simply gets no title until its first prompt refines one.
+ */
+export function derivedMetaPatch(
+  title: string | undefined,
+  cwd: string | undefined,
+): Pick<SessionMetaPayload, 'title' | 'titleSource' | 'cwd'> {
+  return {
+    ...(title !== undefined && title !== '' ? { title, titleSource: 'derived' as const } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
+  };
 }

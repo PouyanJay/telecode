@@ -39,6 +39,19 @@ describe('createClaudeAgentAdapter: terminal result capture', () => {
     expect(result.sessionId).toBe('sdk-r');
   });
 
+  it('captures the model from the SDK init message (ux Phase 6 T5)', async () => {
+    const result = await run([
+      { type: 'system', subtype: 'init', session_id: 'sdk-r', model: 'claude-sonnet-5' },
+      { type: 'result', subtype: 'success' },
+    ]);
+    expect(result.model).toBe('claude-sonnet-5');
+  });
+
+  it('reports no model when the init carries none', async () => {
+    const result = await run([init, { type: 'result', subtype: 'success' }]);
+    expect(result.model).toBeUndefined();
+  });
+
   it('maps error_max_turns to endReason "turn_limit"', async () => {
     const result = await run([init, { type: 'result', subtype: 'error_max_turns' }]);
     expect(result.endReason).toBe('turn_limit');

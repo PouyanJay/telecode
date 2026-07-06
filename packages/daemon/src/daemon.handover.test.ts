@@ -3,7 +3,13 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { encodeKey, generateKeyPair, makeEnvelope, type Envelope } from '@telecode/protocol';
+import {
+  encodeKey,
+  generateKeyPair,
+  makeEnvelope,
+  sessionMetaPayloadSchema,
+  type Envelope,
+} from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -13,6 +19,13 @@ import {
   type AgentRunResult,
 } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
+import {
+  decryptWithContentKey,
+  encryptWithContentKey,
+  ofType,
+  sendSubscribe,
+  unwrapContentKey,
+} from './e2e-harness';
 import { markViewerPresent, startFakeRelay, type FakeRelay } from './fake-relay';
 
 /**
@@ -175,15 +188,20 @@ describe('daemon: free-form handover & resume', () => {
     );
 
     // The daemon registers a forked continuation linked to the adopted parent (no id yet) — ack it.
+    // The announce is ids-only now (ux Phase 6 T5): the cwd travels in the sealed session.meta, not here.
     const chained = await relay.waitForFrame((e) => e.type === 'session.chained');
     expect(chained.session_id).toBeUndefined();
     const chainPayload = chained.payload as {
       clientRef: string;
       parentSessionId: string;
+      title?: string;
       cwd?: string;
     };
     expect(chainPayload.parentSessionId).toBe(PARENT_SESSION);
-    expect(chainPayload.cwd).toBe('/repo');
+    // Neither field leaks in the announce — the title (`Continue: <the user's question>`) is prompt
+    // content, MORE sensitive than the cwd; both travel sealed in session.meta (ux Phase 6 T5).
+    expect(chainPayload.title).toBeUndefined();
+    expect(chainPayload.cwd).toBeUndefined();
     relay.send(
       makeEnvelope({
         type: 'session.chained',
@@ -193,6 +211,14 @@ describe('daemon: free-form handover & resume', () => {
         payload: { clientRef: chainPayload.clientRef, parentSessionId: PARENT_SESSION },
       }),
     );
+
+    // The child's identity arrives sealed (cleartext here — no keypair): the taken-over cwd is in the meta.
+    const childMeta = sessionMetaPayloadSchema.parse(
+      (await relay.waitForFrame((e) => e.type === 'session.meta' && e.session_id === CHILD_SESSION))
+        .payload,
+    );
+    expect(childMeta.cwd).toBe('/repo');
+    expect(childMeta.title).toContain('Continue:');
 
     // The child starts, the parent is handed off (ended), and the child ran by RESUMING the adopted
     // conversation with forkSession — the answer as its next turn.
@@ -217,6 +243,75 @@ describe('daemon: free-form handover & resume', () => {
         }),
       ),
     );
+  });
+
+  it('seals the chained-child session.meta — title/cwd never reach the relay in cleartext (T5)', async () => {
+    // A full E2E path: a keypair-bearing daemon and a real browser peer, so the handover offer, the answer,
+    // and the child's identity all cross the relay sealed — exactly as production runs them.
+    const daemonKp = await generateKeyPair();
+    const browserKp = await generateKeyPair();
+    await start(
+      createFakeAgentAdapter([{ type: 'message', text: 'Continuing.' }], {
+        sessionId: 'fork-sdk-id',
+      }),
+      { publicKey: encodeKey(daemonKp.publicKey), privateKey: encodeKey(daemonKp.privateKey) },
+    );
+    await adopt(relay, socketPath); // adopts the PARENT and establishes its content key
+
+    // The browser subscribes to the adopted parent and receives its content key (box-wrapped to its pubkey),
+    // which it needs to read the sealed handover offer and to seal its answer.
+    const parentIds = { userId: USER, deviceId: DEVICE, sessionId: PARENT_SESSION };
+    sendSubscribe(relay, parentIds, encodeKey(browserKp.publicKey));
+    const keyFrame = await relay.waitForFrame(ofType('session.key', PARENT_SESSION));
+    const parentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
+
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/Users/me/secret-project',
+      last_assistant_message: 'Which database should we use for the app?',
+    });
+    // The offer is sealed — the browser decrypts it to learn the requestId (the relay never sees it).
+    const offer = await relay.waitForFrame(ofType('agent.handover', PARENT_SESSION));
+    const { requestId } = (await decryptWithContentKey(offer, parentKey)) as { requestId: string };
+    await stop;
+
+    // The browser seals its answer under the same content key, as the real web cipher does.
+    const sealedAnswer = await encryptWithContentKey(
+      { requestId, answerText: 'Use Postgres.' },
+      parentKey,
+    );
+    relay.send(
+      makeEnvelope({
+        type: 'handover.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: PARENT_SESSION,
+        payload: sealedAnswer.payload,
+        nonce: sealedAnswer.nonce,
+      }),
+    );
+
+    const chained = await relay.waitForFrame((e) => e.type === 'session.chained');
+    const { clientRef } = chained.payload as { clientRef: string };
+    relay.send(
+      makeEnvelope({
+        type: 'session.chained',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: CHILD_SESSION,
+        payload: { clientRef, parentSessionId: PARENT_SESSION },
+      }),
+    );
+
+    // Invariant #5 / P1-2: the child's identity is OPAQUE ciphertext to the relay. The continuation title is
+    // `Continue: <the parent's question>` — prompt-derived content, MORE sensitive than the cwd — so both the
+    // taken-over cwd and the title travel sealed: a non-empty nonce, a string payload, plaintext nowhere.
+    const childMeta = await relay.waitForFrame(ofType('session.meta', CHILD_SESSION));
+    expect(childMeta.nonce).not.toBe('');
+    expect(typeof childMeta.payload).toBe('string');
+    expect(JSON.stringify(childMeta)).not.toContain('secret-project');
+    expect(JSON.stringify(childMeta)).not.toContain('Continue:');
   });
 
   it('falls back to a summary-seeded fresh launch when the resume fails', async () => {

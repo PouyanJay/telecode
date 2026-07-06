@@ -15,6 +15,7 @@ import {
   sealPayload,
   sessionAdoptedPayloadSchema,
   sessionHistoryPayloadSchema,
+  sessionMetaPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
 import { pino } from 'pino';
@@ -424,7 +425,7 @@ describe('daemon: adopted sessions end-to-end', () => {
     expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
   });
 
-  it('adopts a session on SessionStart, before any tool, with a cwd-derived title', async () => {
+  it('adopts a session on SessionStart with an IDS-ONLY announce + a sealed cwd-derived title (T5)', async () => {
     // A chat-only session (never calls a tool) is invisible today. SessionStart adopts it eagerly.
     const start = hookRpc(socketPath, {
       hook_event_name: 'SessionStart',
@@ -434,11 +435,24 @@ describe('daemon: adopted sessions end-to-end', () => {
     });
     const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
     const payload = sessionAdoptedPayloadSchema.parse(announce.payload);
+    // The announce is ids-only now (ux Phase 6 T5) — the project name/path never reach the relay in the
+    // clear; they travel in the sealed session.meta (cleartext here since this daemon has no keypair).
     expect(payload.clientRef).toBe(CLAUDE_SESSION);
-    expect(payload.title).toBe('myrepo'); // derived from the cwd basename so the row has a sensible name
-    expect(payload.cwd).toBe('/Users/me/myrepo');
+    expect(payload.title).toBeUndefined();
+    expect(payload.cwd).toBeUndefined();
     ackAdopted(relay, announce);
     expect(await start).toEqual({});
+
+    const meta = sessionMetaPayloadSchema.parse(
+      (
+        await relay.waitForFrame(
+          (e) => e.type === 'session.meta' && e.session_id === TELECODE_SESSION,
+        )
+      ).payload,
+    );
+    expect(meta.title).toBe('myrepo'); // derived from the cwd basename so the row has a sensible name
+    expect(meta.titleSource).toBe('derived');
+    expect(meta.cwd).toBe('/Users/me/myrepo');
   });
 
   it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {
@@ -746,6 +760,47 @@ describe('daemon: an unanswered adopted question fails closed (no hook-socket de
 });
 
 describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
+  it('seals the adopted session.meta — title/cwd never reach the relay in cleartext (T5)', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-meta-e2e-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const keyPair = await generateKeyPair();
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+      keyPair: {
+        publicKey: encodeKey(keyPair.publicKey),
+        privateKey: encodeKey(keyPair.privateKey),
+      },
+    });
+    await daemon.start();
+    try {
+      const decision = hookRpc(socketPath, {
+        hook_event_name: 'SessionStart',
+        session_id: CLAUDE_SESSION,
+        cwd: '/Users/me/secret-project',
+        source: 'startup',
+      });
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      const meta = await relay.waitForFrame(
+        (e) => e.type === 'session.meta' && e.session_id === TELECODE_SESSION,
+      );
+      // Invariant #5 / the P1-2 privacy fix: the project name/path are OPAQUE ciphertext to the relay —
+      // a non-empty nonce, a string payload, and the plaintext cwd nowhere in the frame.
+      expect(meta.nonce).not.toBe('');
+      expect(typeof meta.payload).toBe('string');
+      expect(JSON.stringify(meta)).not.toContain('secret-project');
+      await decision;
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('sends adopted-session frames to the relay as ciphertext, not plaintext', async () => {
     const relay = await startFakeRelay(USER, DEVICE);
     const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-e2e-'));

@@ -323,7 +323,12 @@
     </div>
 
     {#if known}
-      <SessionRail {session} deviceName={device?.name ?? null} connection={$connectionState} />
+      <SessionRail
+        {session}
+        deviceName={device?.name ?? null}
+        connection={$connectionState}
+        meta={$sessionMetas.get(sessionId)}
+      />
     {/if}
   </div>
 </div>

@@ -41,7 +41,7 @@ import {
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
-import { resolveLaunchTitle } from './derive-title';
+import { deriveSessionTitle, derivedMetaPatch, resolveLaunchTitle } from './derive-title';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { adoptedGateDecision } from './adopt/adopted-gate-decision';
 import { type HookEvent } from './adopt/hook-event';
@@ -516,6 +516,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
     sendForSession(source, 'session.meta', { ...rec.meta, ts: now() });
   }
 
+  /** Emit an updated `session.meta` the first time a turn reveals the model (ux Phase 6 T5) — only on change. */
+  function emitModelUpdate(source: Envelope, model: string | undefined): void {
+    const sessionId = source.session_id;
+    if (sessionId === undefined || model === undefined) return;
+    if (recordFor(sessionId).meta?.model === model) return;
+    emitSessionMeta(source, { model });
+  }
+
   /** Deliver a session's content key, box-wrapped to a browser's ephemeral pubkey (`session.key`). */
   function deliverKey(source: Envelope, browserPublicKey: string): void {
     const sessionId = source.session_id;
@@ -891,6 +899,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         rec.claudeSessionId = result.sessionId;
         rec.origin ??= 'launched';
       }
+      emitModelUpdate(envelope, result.model);
       // Status split (ux Phase 6 T2): report HOW the turn settled. A turn-limit ending is a pause —
       // the conversation id above is kept, so the next user.message resumes it. An SDK-internal soft
       // failure ends as `error` (it used to read as a dishonest `done`). No terminal result = completed.
@@ -1437,11 +1446,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // (`transcript-mirror`) are wired together here.
   const transcriptMirrors = new Map<string, TranscriptMirror>();
 
-  /** Announce a discovered external session to the relay (cleartext routing metadata, like session.launch). */
-  function announceAdopted(payload: { clientRef: string; title?: string; cwd?: string }): void {
-    // A `session_id`-less announce: routing metadata, always cleartext — it can't go through
-    // sendForSession (which needs a source envelope), so the frame is built inline. makeEnvelope
-    // defaults the nonce to '' (cleartext).
+  /**
+   * Announce a discovered external session to the relay — IDS-ONLY (ux Phase 6 T5): the clientRef is the
+   * only field, so the session's title/cwd never reach the relay in cleartext (they follow in a sealed
+   * `session.meta`). A `session_id`-less announce can't go through sendForSession (which needs a source
+   * envelope), so the frame is built inline; makeEnvelope defaults the nonce to '' (cleartext routing).
+   */
+  function announceAdopted(payload: { clientRef: string }): void {
     enqueueSend(async () =>
       JSON.stringify(
         makeEnvelope({
@@ -1484,8 +1495,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
   function registerChained(payload: {
     clientRef: string;
     parentSessionId: string;
-    title?: string;
-    cwd?: string;
   }): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -1661,6 +1670,37 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
   }
 
+  /**
+   * On first adoption (ux Phase 6 T5): emit the session's identity as a SEALED `session.meta` (a
+   * cwd-derived title so a session adopted before any prompt reads sensibly, plus the cwd — under the
+   * content key, never cleartext to the relay), then persist the record so a restart rebuilds the adoption
+   * mapping (ux Phase 6 T4). The mirror refines the title from the first real prompt later.
+   */
+  function sealAndPersistFirstAdoptionIdentity(
+    telecodeSessionId: string,
+    cwd: string | undefined,
+    rec: SessionRecord,
+  ): void {
+    const title = cwd !== undefined ? basename(cwd) : undefined;
+    emitSessionMeta(adoptedSource(telecodeSessionId), derivedMetaPatch(title, cwd));
+    persistSession(telecodeSessionId, rec);
+  }
+
+  /**
+   * Refine an adopted session's DERIVED title to its first real user prompt once the mirror has captured
+   * one (ux Phase 6 T5) — the cwd-basename is only the sensible default for a session adopted before any
+   * prompt. A no-op for a user-renamed title (T6) or once already refined to the prompt.
+   */
+  function refineAdoptedTitleFromPrompt(telecodeSessionId: string): void {
+    const rec = sessionRecords.get(telecodeSessionId);
+    if (rec === undefined || rec.meta?.titleSource === 'user') return;
+    const firstPrompt = rec.transcript.find((entry) => entry.kind === 'user')?.text;
+    if (firstPrompt === undefined) return;
+    const derived = deriveSessionTitle(firstPrompt);
+    if (derived === undefined || rec.meta?.title === derived) return;
+    emitSessionMeta(adoptedSource(telecodeSessionId), derivedMetaPatch(derived, undefined));
+  }
+
   /** Pull transcript lines appended since the last event into the session record + push them to browsers. */
   async function mirrorTranscript(
     telecodeSessionId: string,
@@ -1762,12 +1802,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const title = `Continue: ${handover.question.slice(0, HANDOVER_TITLE_PREVIEW_CHARS)}`;
     let childId: string;
     try {
-      childId = await registerChained({
-        clientRef,
-        parentSessionId: parentId,
-        title,
-        ...(handover.cwd !== undefined ? { cwd: handover.cwd } : {}),
-      });
+      // Ids-only announce (ux Phase 6 T5): the continuation's title/cwd travel in the sealed session.meta
+      // below, so they never reach the relay in cleartext (the P1-2 privacy fix).
+      childId = await registerChained({ clientRef, parentSessionId: parentId });
     } catch (err) {
       // The relay never minted the child (offline / dropped). Leave the parent as-is; a later answer can
       // retry. (Journey 4 T2 adds the summary-seeded fresh-launch fallback for a resume that errors.)
@@ -1782,6 +1819,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // content key when it subscribes, exactly like an adopted session). Cleartext only on a pre-E2E daemon.
     if (cipher.enabled) cipher.establish(childId);
     recordFor(childId).permissionMode = 'default';
+    recordFor(childId).origin = 'launched';
+    // The continuation's identity, SEALED (ux Phase 6 T5) — title from the taken-over question + the
+    // inherited cwd, under the content key so they never reach the relay in cleartext.
+    emitSessionMeta(childSource, derivedMetaPatch(title, handover.cwd));
     record(childId, { kind: 'user', text: answerText, ts: now() });
     setStatus(childId, 'running');
     sendForSession(childSource, 'session.started', {});
@@ -1887,6 +1928,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
       return {};
     }
+    // Refine the derived title once a chat-only session (no PreToolUse) mirrors its first prompt (T5).
+    refineAdoptedTitleFromPrompt(knownId);
     // Keep the persisted transcript current (ux Phase 6 T4): an adopted session isn't terminal on Stop,
     // so without this its on-disk copy would stay frozen at adoption time and a restart would backfill a
     // stale transcript. Best-effort, coalesced by the store.
@@ -2004,15 +2047,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
     let telecodeSessionId: string;
     try {
-      // Name the registry row from the project directory (e.g. `…/myrepo` → "myrepo") so a session adopted
-      // before any user prompt — esp. a chat-only one adopted on SessionStart — still reads sensibly in the
-      // dashboard. Once the transcript mirrors a user message the UI can prefer that; the cwd title is the
-      // sensible default. Adoption announces once, so this title comes from the first event we see.
-      const title = event.cwd !== undefined ? basename(event.cwd) : '';
+      // The announce is now ids-only (ux Phase 6 T5): the title/cwd travel in the SEALED session.meta
+      // below, so an adopted session's project name + path never reach the relay in cleartext (the P1-2
+      // privacy fix — consistent with the sealed adopt.config denylist).
       telecodeSessionId = await adoptedSessions.ensureAdopted({
         claudeSessionId: event.session_id,
-        ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
-        ...(title !== '' ? { title } : {}),
       });
     } catch (err) {
       log.warn(
@@ -2021,9 +2060,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
       return preToolUseOutput('ask');
     }
-    // Capture the adoption identity on the record (ux Phase 6 T4) and persist it right away — an adopted
-    // session can be non-terminal for a long time, and this is what lets a restart rebuild the adoption
-    // mapping so the SAME Claude session isn't re-announced as a duplicate card.
+    // Capture the adoption identity on the record (ux Phase 6 T4); the first-adoption branch below persists
+    // it. An adopted session can be non-terminal for a long time, and that snapshot is what lets a restart
+    // rebuild the adoption mapping so the SAME Claude session isn't re-announced as a duplicate card.
     const adoptedRec = recordFor(telecodeSessionId);
     const isFirstAdoption = adoptedRec.claudeSessionId === undefined;
     adoptedRec.origin = 'external';
@@ -2037,11 +2076,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // MUST run BEFORE the first persist below (ux Phase 6 T4): otherwise the first on-disk snapshot has no
     // content key, and a restart in that window would mint a fresh key — the exact rotation T3 forbids.
     if (cipher.enabled) cipher.establish(telecodeSessionId);
-    // Persist the adopted session immediately (ux Phase 6 T4) — it can be non-terminal for a long time,
-    // and this is what lets a restart rebuild the adoption mapping so the SAME Claude session isn't
-    // re-announced as a duplicate card.
-    if (isFirstAdoption) persistSession(telecodeSessionId, adoptedRec);
+    if (isFirstAdoption)
+      sealAndPersistFirstAdoptionIdentity(telecodeSessionId, event.cwd, adoptedRec);
     await mirrorTranscript(telecodeSessionId, event.transcript_path);
+    // Refine the derived title from the first real user prompt once the mirror has it (ux Phase 6 T5) —
+    // a cwd-basename is only the sensible default until the conversation has content.
+    refineAdoptedTitleFromPrompt(telecodeSessionId);
 
     if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
       return handlePreToolUseHook(event, event.tool_name, telecodeSessionId);

@@ -65,6 +65,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
       const denied: string[] = [];
       let sessionId: string | undefined;
       let endReason: AgentEndReason | undefined;
+      let model: string | undefined;
 
       // The session's mode drives both the SDK and telecode's own gate. `bypassPermissions` is never honored
       // (telecode never surrenders the approval gate), so it is clamped to `default` for the SDK below.
@@ -137,9 +138,11 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
 
       try {
         for await (const message of session) {
-          // Capture the conversation id so the daemon can resume this session for a follow-up turn.
+          // Capture the conversation id (to resume) + the model (for the session's sealed metadata,
+          // ux Phase 6 T5) from the init message.
           if (message.type === 'system' && message.subtype === 'init') {
             sessionId = message.session_id;
+            if (typeof message.model === 'string') model = message.model;
           }
           // The terminal result is the ONLY place a turn-limit ending is distinguishable from a clean
           // finish (the iterator just ends either way) — surface it so the daemon reports honestly.
@@ -181,6 +184,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
         denied,
         ...(sessionId ? { sessionId } : {}),
         ...(endReason ? { endReason } : {}),
+        ...(model ? { model } : {}),
       };
     },
   };
