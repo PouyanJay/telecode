@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SessionRow } from './session-groups';
-import { buildThreadRows, segmentLabel, type ThreadRow } from './threads';
+import { buildThreadRows, lineageOf, segmentLabel, type ThreadRow } from './threads';
 
 /**
  * Threads (ux Phase 3, B1): sessions linked by `parentSessionId` collapse into ONE dashboard row — the
@@ -138,5 +138,50 @@ describe('segmentLabel', () => {
   it('names where a segment ran in the product vocabulary', () => {
     expect(segmentLabel('external')).toBe('terminal');
     expect(segmentLabel('launched')).toBe('telecode');
+  });
+});
+
+describe('lineageOf (session-view lineage strip, B2)', () => {
+  const member = (
+    id: string,
+    parentSessionId: string | null,
+    origin: 'external' | 'launched',
+    createdAt: Date,
+  ) => ({ id, parentSessionId, origin, createdAt });
+
+  it('returns the full root→leaf chain with the OPEN session marked current', () => {
+    const members = [
+      member('a', null, 'external', T0),
+      member('b', 'a', 'launched', T1),
+      member('c', 'b', 'launched', T2),
+    ];
+    // Opening the MIDDLE segment still shows the whole conversation, current = b.
+    const segments = lineageOf('b', members);
+    expect(segments.map((s) => s.sessionId)).toEqual(['a', 'b', 'c']);
+    expect(segments.map((s) => s.isCurrent)).toEqual([false, true, false]);
+    expect(segments.map((s) => s.origin)).toEqual(['external', 'launched', 'launched']);
+    expect(segments.map((s) => s.startedAt)).toEqual([T0, T1, T2]);
+  });
+
+  it('walks down through the NEWEST child when a segment was taken over twice', () => {
+    const members = [
+      member('a', null, 'external', T0),
+      member('b-old', 'a', 'launched', T1),
+      member('b-new', 'a', 'launched', T2),
+    ];
+    expect(lineageOf('a', members).map((s) => s.sessionId)).toEqual(['a', 'b-new']);
+  });
+
+  it('returns no lineage for an unchained session or an unknown id', () => {
+    expect(lineageOf('solo', [member('solo', null, 'launched', T0)])).toEqual([]);
+    expect(lineageOf('missing', [member('solo', null, 'launched', T0)])).toEqual([]);
+  });
+
+  it('stops at an unknown parent and guards against cycles', () => {
+    const orphan = [member('x', 'gone', 'launched', T1)];
+    expect(lineageOf('x', orphan)).toEqual([]);
+    const cycle = [member('a', 'b', 'launched', T0), member('b', 'a', 'launched', T1)];
+    // A cycle cannot render an honest linear strip — degrade to none rather than loop or lie.
+    expect(lineageOf('a', cycle)).toEqual([]);
   });
 });
