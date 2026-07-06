@@ -24,6 +24,7 @@ function row(overrides: Partial<SessionRow> & { id: string }): SessionRow {
     isContinuation: false,
     parentSessionId: null,
     createdAt: T0,
+    lastActivityAt: T0,
     ...overrides,
   };
 }

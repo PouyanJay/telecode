@@ -13,7 +13,7 @@ import { buildRelay } from '../../src/relay';
 /**
  * Phase 2 Task 3 — the dashboard + reconnect need to enumerate a user's sessions over HTTP. `GET
  * /me/sessions` resolves the user from the bearer session token and returns only that user's sessions
- * (RLS-scoped), newest-first, as routing metadata (never the opaque launch payload). Real relay + PG.
+ * (RLS-scoped), by last activity, as routing metadata (never the opaque launch payload). Real relay + PG.
  */
 const DATABASE_URL = process.env.DATABASE_URL;
 const SERVICE_SECRET = 'svc-secret-test';
@@ -67,7 +67,7 @@ describe('relay session listing: GET /me/sessions', () => {
     await admin.query('truncate table users restart identity cascade');
   });
 
-  it('returns the user’s sessions newest-first, scoped to that user', async () => {
+  it('returns the user’s sessions by last activity (updated_at desc), scoped to that user', async () => {
     const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
     const bob = await auth.createSession({ provider: 'dev', providerUserId: 'bob' });
     const aliceDevice = await devices.createDevice({
@@ -81,21 +81,22 @@ describe('relay session listing: GET /me/sessions', () => {
       deviceTokenHash: 'hash-b',
     });
 
-    // Three alice sessions with explicit timestamps so newest-first is deterministic (one terminal,
-    // to exercise ended_at serialization) + one bob session that must stay hidden from alice.
+    // Three alice sessions with explicit ACTIVITY timestamps so the by-last-activity order (T7:
+    // updated_at desc) is deterministic (one terminal, to exercise ended_at serialization) + one bob
+    // session that must stay hidden from alice.
     const newer = await admin.query<{ id: string }>(
-      `insert into sessions (user_id, device_id, title, status, cwd, created_at)
-       values ($1, $2, 'second task', 'awaiting_input', '/work/repo', now()) returning id`,
+      `insert into sessions (user_id, device_id, title, status, cwd, created_at, updated_at)
+       values ($1, $2, 'second task', 'awaiting_input', '/work/repo', now(), now()) returning id`,
       [alice.userId, aliceDevice],
     );
     const older = await admin.query<{ id: string }>(
-      `insert into sessions (user_id, device_id, title, status, created_at)
-       values ($1, $2, 'first task', 'running', now() - interval '1 minute') returning id`,
+      `insert into sessions (user_id, device_id, title, status, created_at, updated_at)
+       values ($1, $2, 'first task', 'running', now() - interval '1 minute', now() - interval '1 minute') returning id`,
       [alice.userId, aliceDevice],
     );
     const ended = await admin.query<{ id: string }>(
-      `insert into sessions (user_id, device_id, title, status, created_at, ended_at)
-       values ($1, $2, 'old task', 'done', now() - interval '2 minutes', now()) returning id`,
+      `insert into sessions (user_id, device_id, title, status, created_at, updated_at, ended_at)
+       values ($1, $2, 'old task', 'done', now() - interval '2 minutes', now() - interval '2 minutes', now()) returning id`,
       [alice.userId, aliceDevice],
     );
     await admin.query(
@@ -111,7 +112,7 @@ describe('relay session listing: GET /me/sessions', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json<{ sessions: SessionDto[] }>();
 
-    // Only alice's three, newest first, with routing metadata (bob's is absent).
+    // Only alice's three, most recent activity first, with routing metadata (bob's is absent).
     expect(body.sessions.map((s) => s.id)).toEqual([
       newer.rows[0]!.id,
       older.rows[0]!.id,

@@ -15,6 +15,7 @@ export function buildRegistryRow(
     origin: 'launched',
     parentSessionId: null,
     createdAt: new Date('2026-07-01T10:00:00Z'),
+    updatedAt: new Date('2026-07-01T10:00:00Z'),
     sealedMeta: null,
     sealedMetaNonce: null,
     sealedTitle: null,

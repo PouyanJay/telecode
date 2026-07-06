@@ -71,6 +71,20 @@
       "when": 1783420000000,
       "tag": "0009_session_sealed_title",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1783430000000,
+      "tag": "0010_session_archive",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1783430000001,
+      "tag": "0011_archive_terminal_check",
+      "breakpoints": true
     }
   ]
 }

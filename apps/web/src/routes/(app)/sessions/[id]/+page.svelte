@@ -1,5 +1,12 @@
 <script lang="ts">
-  import type { QuestionAnswerItem, SessionControlAction } from '@telecode/protocol';
+  import {
+    isSessionEndStatus,
+    type QuestionAnswerItem,
+    type SessionControlAction,
+  } from '@telecode/protocol';
+  import { ConfirmDialog } from '@telecode/ui';
+
+  import { goto } from '$app/navigation';
 
   import Composer from '$lib/components/Composer.svelte';
   import InheritedContext from '$lib/components/InheritedContext.svelte';
@@ -20,8 +27,10 @@
   import {
     answer,
     answerHandover,
+    archiveSession,
     connectionState,
     decide,
+    deleteSessionForever,
     deviceChannels,
     renameSession,
     resetSessionTitle,
@@ -109,6 +118,51 @@
   );
   // A "Reset to default name" affordance appears only when the user has actually set an override.
   const hasTitleOverride = $derived($sessionTitleOverrides.has(sessionId));
+
+  // Housekeeping (T7): Archive/Delete appear only for an ENDED, PERSISTED session. The effective
+  // status prefers live frames but falls back to the registry row — a cold-loaded ended session whose
+  // daemon is offline has no live status, yet must still be archivable.
+  const registryRow = $derived(data.sessions.find((s) => s.id === sessionId));
+  const effectiveStatus = $derived(
+    known && session.status !== 'idle' ? session.status : registryRow?.status,
+  );
+  const canHousekeep = $derived(registryRow !== undefined && isSessionEndStatus(effectiveStatus));
+  let confirmDeleteOpen = $state(false);
+  let deleteBusy = $state(false);
+  let archiveBusy = $state(false);
+  let houseError = $state<string | null>(null);
+  // The one irreversible action's consequence copy, derived here so the markup stays scannable.
+  const deleteBody = $derived(
+    'This permanently removes the session, its encrypted history, and its titles from your ' +
+      `dashboard — on every device and browser. Files and code${device?.name ? ` on ${device.name}` : ' on your machine'} ` +
+      'are not touched.',
+  );
+
+  async function onArchive(): Promise<void> {
+    houseError = null;
+    archiveBusy = true;
+    const result = await archiveSession(sessionId);
+    archiveBusy = false;
+    if (!result.ok) {
+      houseError = result.error;
+      return;
+    }
+    // The row left the board's default list — return to the (re-loaded) board.
+    await goto('/', { invalidateAll: true });
+  }
+
+  async function onDeleteConfirm(): Promise<void> {
+    houseError = null;
+    deleteBusy = true;
+    const result = await deleteSessionForever(sessionId);
+    deleteBusy = false;
+    confirmDeleteOpen = false;
+    if (!result.ok) {
+      houseError = result.error;
+      return;
+    }
+    await goto('/', { invalidateAll: true });
+  }
 
   // A forked handover continuation links back to the adopted session it continues (Journey 4): live from
   // the daemon's session.chained, or from the persisted registry on a cold reload.
@@ -233,11 +287,21 @@
     {showControls}
     {connected}
     canReset={hasTitleOverride}
+    {canHousekeep}
+    houseBusy={archiveBusy}
     onrename={(title) => renameSession(sessionId, title)}
     onreset={() => resetSessionTitle(sessionId)}
     oninterrupt={() => onControl('interrupt')}
     onend={() => onControl('end')}
+    onarchive={onArchive}
+    ondelete={() => (confirmDeleteOpen = true)}
   />
+
+  {#if houseError}
+    <div class="house-error">
+      <SessionNotice message={houseError} tone="danger" ondismiss={() => (houseError = null)} />
+    </div>
+  {/if}
 
   {#if lineage.length > 0}
     <LineageStrip segments={lineage} {entryCountOf} />
@@ -342,6 +406,16 @@
   </div>
 </div>
 
+<ConfirmDialog
+  bind:open={confirmDeleteOpen}
+  title="Delete this session?"
+  body={deleteBody}
+  confirmLabel="Delete session"
+  confirmTone="danger"
+  busy={deleteBusy}
+  onconfirm={onDeleteConfirm}
+/>
+
 <style>
   .view {
     flex: 1;
@@ -406,6 +480,9 @@
   .dock {
     padding: var(--space-3) var(--space-4);
     padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
+  }
+  .house-error {
+    padding: var(--space-3) var(--space-4) 0;
   }
 
   /* Below the rail breakpoint the stream takes the full width; the rail is detail, not load-bearing. */

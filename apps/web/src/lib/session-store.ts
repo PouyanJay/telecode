@@ -671,8 +671,11 @@ export function sendControl(sessionId: string, action: SessionControlAction): vo
   connectionFor(sessionId)?.control(sessionId, action);
 }
 
-/** The outcome of a rename (ux Phase 6 T6): success, or a human-readable reason the UI surfaces inline. */
-export type RenameResult = { ok: true } | { ok: false; error: string };
+/**
+ * The outcome of a session action (rename/reset, archive/restore/delete): success, or a
+ * human-readable reason the UI surfaces inline.
+ */
+export type SessionActionResult = { ok: true } | { ok: false; error: string };
 
 /** PATCH the rename BFF (which forwards to the relay with the httpOnly token). Ok on 204. */
 async function patchSessionTitle(sessionId: string, body: SessionRenameBody): Promise<boolean> {
@@ -694,7 +697,10 @@ async function patchSessionTitle(sessionId: string, body: SessionRenameBody): Pr
  * `session.title` to every other tab. Only E2E sessions can be renamed (the sealed blob must be real
  * ciphertext); a cleartext session reports that honestly instead of sending a fake one.
  */
-export async function renameSession(sessionId: string, title: string): Promise<RenameResult> {
+export async function renameSession(
+  sessionId: string,
+  title: string,
+): Promise<SessionActionResult> {
   const conn = connectionFor(sessionId);
   if (!conn) return { ok: false, error: 'Not connected to this session’s device.' };
   // Sealing is WebCrypto (can reject); keep it inside the Result contract so the caller never has to catch
@@ -721,7 +727,7 @@ export async function renameSession(sessionId: string, title: string): Promise<R
 }
 
 /** Reset a session's title to the derived default (ux Phase 6 T6): clear the override on the relay + here. */
-export async function resetSessionTitle(sessionId: string): Promise<RenameResult> {
+export async function resetSessionTitle(sessionId: string): Promise<SessionActionResult> {
   const ok = await patchSessionTitle(sessionId, { sealed_title: null });
   if (!ok) return { ok: false, error: 'Could not reset the name. Please try again.' };
   sessionTitleOverrideMap.update((map) => {
@@ -731,6 +737,96 @@ export async function resetSessionTitle(sessionId: string): Promise<RenameResult
     return next;
   });
   return { ok: true };
+}
+
+/**
+ * Drop every trace of one session from the live maps (ux Phase 6 T7, AD-13). After an archive or a
+ * delete the registry row disappears from the layout data — but a leftover live entry would make the
+ * shared merge resurrect the row as a ghost. Purges live state, meta, rename override, and the route.
+ * (The persisted IndexedDB content key stays until sign-out — with the blobs gone there is nothing left
+ * to decrypt, and the sign-out wipe already covers it.)
+ */
+function forgetSession(sessionId: string): void {
+  const drop = <V>(map: ReadonlyMap<string, V>): ReadonlyMap<string, V> => {
+    if (!map.has(sessionId)) return map;
+    const next = new Map(map);
+    next.delete(sessionId);
+    return next;
+  };
+  sessionMap.update(drop);
+  sessionMetaMap.update(drop);
+  sessionTitleOverrideMap.update(drop);
+  sessionDeviceMap.update(drop);
+}
+
+/**
+ * Shelve a terminal session via the BFF (ux Phase 6 T7). On success the session is forgotten locally
+ * so the board can't resurrect it (AD-13) — the caller re-runs the layout load for the fresh list.
+ */
+export async function archiveSession(sessionId: string): Promise<SessionActionResult> {
+  const outcome = await patchArchived(sessionId, true);
+  if (outcome !== 'ok') return failureFor(outcome, 'archive');
+  forgetSession(sessionId);
+  return { ok: true };
+}
+
+/** Bring an archived session back to the board (ux Phase 6 T7). Local state is kept — the row returns. */
+export async function restoreSession(sessionId: string): Promise<SessionActionResult> {
+  const outcome = await patchArchived(sessionId, false);
+  if (outcome !== 'ok') return failureFor(outcome, 'restore');
+  return { ok: true };
+}
+
+/** Permanently delete a terminal session via the BFF (ux Phase 6 T7); forgets it locally on success. */
+export async function deleteSessionForever(sessionId: string): Promise<SessionActionResult> {
+  const outcome = await housekeepingRequest(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+  if (outcome !== 'ok') return failureFor(outcome, 'delete');
+  forgetSession(sessionId);
+  return { ok: true };
+}
+
+type HousekeepingOutcome = 'ok' | 'conflict' | 'failed';
+
+/** The shared archive-flag PATCH behind {@link archiveSession} / {@link restoreSession}. */
+function patchArchived(sessionId: string, archived: boolean): Promise<HousekeepingOutcome> {
+  return housekeepingRequest(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ archived }),
+  });
+}
+
+/** One BFF call, folded to an outcome the actions can message (409 = still running, else failed). */
+async function housekeepingRequest(url: string, init: RequestInit): Promise<HousekeepingOutcome> {
+  try {
+    const res = await fetch(url, init);
+    if (res.ok) return 'ok';
+    return res.status === 409 ? 'conflict' : 'failed';
+  } catch {
+    return 'failed';
+  }
+}
+
+/** Past tenses spelled out — string-built grammar can't misspell a new verb's error message. */
+const HOUSEKEEPING_VERBS = {
+  archive: 'archived',
+  restore: 'restored',
+  delete: 'deleted',
+} as const;
+
+function failureFor(
+  outcome: 'conflict' | 'failed',
+  verb: keyof typeof HOUSEKEEPING_VERBS,
+): SessionActionResult {
+  return {
+    ok: false,
+    error:
+      outcome === 'conflict'
+        ? `Only ended sessions can be ${HOUSEKEEPING_VERBS[verb]} — this one is still going.`
+        : `Could not ${verb} the session. Please try again.`,
+  };
 }
 
 /** Ask ONE device's daemon for its adoption policy (Journey 3); the reply lands on {@link adoptStates}. */

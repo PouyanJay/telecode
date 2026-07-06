@@ -21,7 +21,7 @@ export const load: LayoutServerLoad = async ({ locals, cookies }) => {
     : [
         { ok: true, items: [] },
         { connected: false, repos: [] },
-        { ok: true, items: [] },
+        { ok: true, items: [], nextCursor: null },
       ];
   return {
     user: locals.user,
@@ -29,6 +29,9 @@ export const load: LayoutServerLoad = async ({ locals, cookies }) => {
     githubConnected: repoList.connected,
     repos: repoList.repos,
     sessions: sessionResult.items,
+    // Where the first ended page stopped (T7) — the dashboard's "Load more" resumes from here; null
+    // when the list is complete (or against a pre-T7 relay, whose list is always complete).
+    sessionsCursor: sessionResult.nextCursor,
     // Error ≠ empty: when the relay couldn't be read, pages must show an outage state — never the
     // "no devices paired" onboarding that makes a healthy fleet look deleted.
     registryError: !deviceResult.ok || !sessionResult.ok,

@@ -1,16 +1,17 @@
-import { sessionRenameBodySchema } from '@telecode/protocol';
+import { z } from 'zod';
 import { error } from '@sveltejs/kit';
 
-import { renameSession } from '$lib/server/relay-api';
+import { setSessionArchived } from '$lib/server/relay-api';
 import { getSessionToken } from '$lib/server/session-cookie';
 import { isSessionId } from '$lib/server/session-id';
 
 import type { RequestHandler } from './$types';
 
+const bodySchema = z.object({ archived: z.boolean() });
+
 /**
- * Session rename BFF (ux Phase 6 T6). The browser seals the new title under the session content key (the
- * server never sees plaintext) and PATCHes the sealed blob here; this forwards it to the relay with the
- * httpOnly session token, which the browser JS never holds. A reset-to-derived sends `{ sealed_title: null }`.
+ * Archive/unarchive BFF (ux Phase 6 T7): shelves or restores a TERMINAL session. Forwards to the relay
+ * with the httpOnly session token; a 409 means the session is still going (the relay refuses).
  */
 export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
   const token = getSessionToken(cookies);
@@ -21,13 +22,16 @@ export const PATCH: RequestHandler = async ({ params, request, cookies }) => {
     error(400, 'Invalid session id.');
   }
   const body: unknown = await request.json().catch(() => null);
-  const parsed = sessionRenameBodySchema.safeParse(body);
+  const parsed = bodySchema.safeParse(body);
   if (!parsed.success) {
-    error(400, 'Invalid rename.');
+    error(400, 'Invalid request.');
   }
-  const result = await renameSession(token, params.id, parsed.data);
+  const result = await setSessionArchived(token, params.id, parsed.data.archived);
   if (result.notFound) {
     error(404, 'This session no longer exists.');
+  }
+  if (result.conflict) {
+    error(409, 'Only ended sessions can be archived.');
   }
   if (!result.ok) {
     error(502, 'Could not reach the relay. Please try again.');

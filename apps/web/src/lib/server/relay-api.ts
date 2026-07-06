@@ -85,6 +85,8 @@ export interface RelaySession {
    */
   sealedTitle: string | null;
   sealedTitleNonce: string | null;
+  /** When the user shelved this session (T7); null = not archived (or a pre-T7 relay). */
+  archivedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
   endedAt: Date | null;
@@ -323,35 +325,126 @@ const sessionListBodySchema = z.object({
       // Sealed rename override (ux Phase 6 T6) — optional so a pre-T6 relay degrades cleanly.
       sealed_title: z.string().nullable().optional(),
       sealed_title_nonce: z.string().nullable().optional(),
+      // Archive shelf (T7) — optional so a pre-T7 relay degrades cleanly.
+      archived_at: z.string().nullable().optional(),
       created_at: z.string(),
       updated_at: z.string(),
       ended_at: z.string().nullable(),
     }),
   ),
+  // Ended-page cursor (T7): a pre-T7 relay omits it — the list is then complete (no Load more).
+  next_cursor: z.string().nullable().optional(),
 });
 
-/** List the user's sessions, newest-first (session-token authed). */
-export async function listSessions(sessionToken: string): Promise<RelayListResult<RelaySession>> {
-  return fetchRegistryList('/me/sessions', sessionToken, (body) => {
-    const parsed = sessionListBodySchema.safeParse(body);
-    if (!parsed.success) return null;
-    return parsed.data.sessions.map((session) => ({
-      id: session.id,
-      deviceId: session.device_id,
-      title: session.title,
-      status: session.status,
-      // Default to `launched` so a relay that predates the origin field degrades cleanly.
-      origin: session.origin ?? 'launched',
-      parentSessionId: session.parent_session_id ?? null,
-      sealedMeta: session.sealed_meta ?? null,
-      sealedMetaNonce: session.sealed_meta_nonce ?? null,
-      sealedTitle: session.sealed_title ?? null,
-      sealedTitleNonce: session.sealed_title_nonce ?? null,
-      createdAt: new Date(session.created_at),
-      updatedAt: new Date(session.updated_at),
-      endedAt: session.ended_at ? new Date(session.ended_at) : null,
-    }));
-  });
+/**
+ * One page of the session list (T7): `nextCursor` names where the ended (or archived) section stopped —
+ * null when drained, or against a pre-T7 relay (whose list is complete). `ok`/`items` keep the
+ * error ≠ empty contract of {@link RelayListResult}.
+ */
+export interface RelaySessionPage extends RelayListResult<RelaySession> {
+  readonly nextCursor: string | null;
+}
+
+/** Knobs for {@link listSessions} (T7): page size, resume cursor, and the archived view. */
+export interface ListSessionsOptions {
+  readonly limit?: number;
+  readonly cursor?: string;
+  readonly archived?: boolean;
+}
+
+/**
+ * List the user's sessions by last activity (session-token authed). Default call: all active sessions +
+ * the first ended page. Pass the returned cursor to fetch further ended pages; `archived: true` pages
+ * the archived view instead. Bespoke fetch (not {@link fetchRegistryList}): the page carries a cursor
+ * alongside its items, which the shared items-only helper can't express — threading it out through a
+ * captured variable would be a hidden side channel.
+ */
+export async function listSessions(
+  sessionToken: string,
+  options: ListSessionsOptions = {},
+): Promise<RelaySessionPage> {
+  const failure: RelaySessionPage = { ok: false, items: [], nextCursor: null };
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.cursor !== undefined) params.set('cursor', options.cursor);
+  if (options.archived) params.set('archived', 'true');
+  const query = params.size > 0 ? `?${params.toString()}` : '';
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/sessions${query}`, {
+      headers: { authorization: `Bearer ${sessionToken}` },
+    });
+    if (!res.ok) return failure;
+    const parsed = sessionListBodySchema.safeParse(await res.json());
+    if (!parsed.success) return failure;
+    return {
+      ok: true,
+      items: parsed.data.sessions.map((session) => ({
+        id: session.id,
+        deviceId: session.device_id,
+        title: session.title,
+        status: session.status,
+        // Default to `launched` so a relay that predates the origin field degrades cleanly.
+        origin: session.origin ?? 'launched',
+        parentSessionId: session.parent_session_id ?? null,
+        sealedMeta: session.sealed_meta ?? null,
+        sealedMetaNonce: session.sealed_meta_nonce ?? null,
+        sealedTitle: session.sealed_title ?? null,
+        sealedTitleNonce: session.sealed_title_nonce ?? null,
+        archivedAt: session.archived_at ? new Date(session.archived_at) : null,
+        createdAt: new Date(session.created_at),
+        updatedAt: new Date(session.updated_at),
+        endedAt: session.ended_at ? new Date(session.ended_at) : null,
+      })),
+      nextCursor: parsed.data.next_cursor ?? null,
+    };
+  } catch {
+    return failure;
+  }
+}
+
+/**
+ * The outcome of a housekeeping mutation (T7): `conflict` (a 409) means the session is still going —
+ * only ended sessions can be archived or deleted — so the UI can say exactly that.
+ */
+export interface HousekeepingResult extends RelayMutationResult {
+  readonly conflict: boolean;
+}
+
+/** Shelve (archived: true) or restore a terminal session (session-token authed, RLS-scoped). */
+export async function setSessionArchived(
+  sessionToken: string,
+  sessionId: string,
+  archived: boolean,
+): Promise<HousekeepingResult> {
+  try {
+    const res = await fetch(
+      `${RELAY_HTTP_URL}/me/sessions/${encodeURIComponent(sessionId)}/archive`,
+      {
+        method: 'PATCH',
+        headers: { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ archived }),
+      },
+    );
+    return { ok: res.ok, notFound: res.status === 404, conflict: res.status === 409 };
+  } catch {
+    return { ok: false, notFound: false, conflict: false };
+  }
+}
+
+/** Permanently delete a terminal session (session-token authed, RLS-scoped). */
+export async function deleteSession(
+  sessionToken: string,
+  sessionId: string,
+): Promise<HousekeepingResult> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${sessionToken}` },
+    });
+    return { ok: res.ok, notFound: res.status === 404, conflict: res.status === 409 };
+  } catch {
+    return { ok: false, notFound: false, conflict: false };
+  }
 }
 
 /** A GitHub repo the user can launch a session against (for the launch picker). */

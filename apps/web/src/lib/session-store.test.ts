@@ -19,7 +19,10 @@ import {
   adoptStates,
   answer,
   answerHandover,
+  archiveSession,
   connect,
+  deleteSessionForever,
+  restoreSession,
   disconnect,
   launch,
   overlayMissingMetas,
@@ -28,6 +31,7 @@ import {
   resetSessionTitle,
   seedSessionMetas,
   seedSessionTitleOverrides,
+  sessionDevices,
   sessionMetas,
   sessionTitleOverrides,
   sessions,
@@ -372,6 +376,7 @@ describe('seedSessionMetas mid-flight race (T3)', () => {
     origin: 'launched',
     parentSessionId: null,
     createdAt: new Date('2026-07-01T10:00:00Z'),
+    updatedAt: new Date('2026-07-01T10:00:00Z'),
     sealedMeta,
     sealedMetaNonce,
     sealedTitle: null,
@@ -543,6 +548,7 @@ describe('session rename (ux Phase 6 T6)', () => {
       origin: 'launched',
       parentSessionId: null,
       createdAt: new Date('2026-07-01T10:00:00Z'),
+      updatedAt: new Date('2026-07-01T10:00:00Z'),
       sealedMeta: null,
       sealedMetaNonce: null,
       sealedTitle: JSON.stringify({ title: 'renamed before reload' }),
@@ -550,5 +556,125 @@ describe('session rename (ux Phase 6 T6)', () => {
     };
     seedSessionTitleOverrides([row], null);
     expect(get(sessionTitleOverrides).get('sess-seed')).toBe('renamed before reload');
+  });
+});
+
+describe('session housekeeping actions (ux Phase 6 T7)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A live session with state in every per-session map: live entry, route, meta, rename override. */
+  async function seedLiveSession(id: string): Promise<ReturnType<typeof makeFakeConnection>> {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started(id);
+    fake.emitMeta(id, { title: 'derived title' });
+    await renameSession(id, 'renamed');
+    expect(get(sessions).has(id)).toBe(true);
+    expect(get(sessionMetas).has(id)).toBe(true);
+    expect(get(sessionTitleOverrides).has(id)).toBe(true);
+    expect(get(sessionDevices).has(id)).toBe(true);
+    return fake;
+  }
+
+  it('archiveSession PATCHes the BFF and forgets the session locally (no ghost row can resurrect)', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await seedLiveSession('sess-arch');
+
+    const result = await archiveSession('sess-arch');
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sessions/sess-arch/archive',
+      expect.objectContaining({ method: 'PATCH' }),
+    );
+    const archiveCall = fetchMock.mock.calls.find((c) =>
+      String(c[0]).endsWith('/sess-arch/archive'),
+    );
+    expect(JSON.parse((archiveCall![1] as RequestInit).body as string)).toEqual({
+      archived: true,
+    });
+    // AD-13: the acting tab purges every per-session map so the shared merge can't resurrect the row.
+    expect(get(sessions).has('sess-arch')).toBe(false);
+    expect(get(sessionMetas).has('sess-arch')).toBe(false);
+    expect(get(sessionTitleOverrides).has('sess-arch')).toBe(false);
+    expect(get(sessionDevices).has('sess-arch')).toBe(false);
+  });
+
+  it('restoreSession PATCHes archived:false and does NOT purge local state (the row returns)', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await seedLiveSession('sess-back');
+
+    const result = await restoreSession('sess-back');
+    expect(result).toEqual({ ok: true });
+    const call = fetchMock.mock.calls.find((c) => String(c[0]).endsWith('/sess-back/archive'));
+    expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({ archived: false });
+    // The whole point of restore-vs-archive: every per-session map keeps its state.
+    expect(get(sessions).has('sess-back')).toBe(true);
+    expect(get(sessionMetas).has('sess-back')).toBe(true);
+    expect(get(sessionTitleOverrides).has('sess-back')).toBe(true);
+    expect(get(sessionDevices).has('sess-back')).toBe(true);
+  });
+
+  it('keeps local state and surfaces the reason when archiving is refused (409 — still running)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) =>
+        init?.method === 'PATCH' && String(url).endsWith('/archive')
+          ? new Response(null, { status: 409 })
+          : new Response(null, { status: 204 }),
+      ),
+    );
+    await seedLiveSession('sess-busy');
+
+    const result = await archiveSession('sess-busy');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('still going');
+    expect(get(sessions).has('sess-busy')).toBe(true);
+    expect(get(sessionMetas).has('sess-busy')).toBe(true);
+  });
+
+  it('deleteSessionForever DELETEs the BFF and forgets the session locally', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await seedLiveSession('sess-gone');
+
+    const result = await deleteSessionForever('sess-gone');
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sessions/sess-gone',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+    expect(get(sessions).has('sess-gone')).toBe(false);
+    expect(get(sessionMetas).has('sess-gone')).toBe(false);
+    expect(get(sessionTitleOverrides).has('sess-gone')).toBe(false);
+    expect(get(sessionDevices).has('sess-gone')).toBe(false);
+  });
+
+  it('keeps local state and reports failure when the delete is refused or unreachable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) =>
+        init?.method === 'DELETE'
+          ? new Response(null, { status: 502 })
+          : new Response(null, { status: 204 }),
+      ),
+    );
+    await seedLiveSession('sess-stays');
+
+    const result = await deleteSessionForever('sess-stays');
+    expect(result.ok).toBe(false);
+    expect(get(sessions).has('sess-stays')).toBe(true);
   });
 });

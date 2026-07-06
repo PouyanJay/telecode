@@ -115,6 +115,12 @@ export const sessions = pgTable(
      */
     sealedTitle: text('sealed_title'),
     sealedTitleNonce: text('sealed_title_nonce'),
+    /**
+     * When the user shelved this (terminal) session (ux Phase 6 T7) — hidden from the default dashboard
+     * list, shown in the archived view; null = not archived. Reversible (unarchive clears it), unlike
+     * delete. Added in `0010_session_archive`; to reverse: drop `sessions_user_activity_idx`, then this.
+     */
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     endedAt: timestamp('ended_at', { withTimezone: true }),
@@ -123,6 +129,12 @@ export const sessions = pgTable(
     userIdx: index('sessions_user_id_idx').on(t.userId),
     deviceIdx: index('sessions_device_id_idx').on(t.deviceId),
     parentIdx: index('sessions_parent_session_id_idx').on(t.parentSessionId),
+    // Serves the last-activity list ordering AND the keyset pagination cursor (updated_at, id) — T7.
+    userActivityIdx: index('sessions_user_activity_idx').on(
+      t.userId,
+      t.updatedAt.desc(),
+      t.id.desc(),
+    ),
   }),
 );
 

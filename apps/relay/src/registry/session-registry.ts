@@ -1,11 +1,24 @@
 import {
+  SESSION_END_STATUSES,
   type SessionEndedPayload,
   type SessionOrigin,
   type SessionStatusName,
 } from '@telecode/protocol';
-import { and, count, desc, eq, inArray } from 'drizzle-orm';
+import {
+  and,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  notInArray,
+  or,
+  type SQL,
+} from 'drizzle-orm';
 
-import { type DbHandle } from '../db/client';
+import { type Database, type DbHandle } from '../db/client';
 import { sessions } from '../db/schema';
 import { withUserContext } from '../db/user-context';
 
@@ -39,10 +52,33 @@ export interface SessionSummary {
    */
   readonly sealedTitle: string | null;
   readonly sealedTitleNonce: string | null;
+  /** When the user shelved this terminal session (ux Phase 6 T7); null = not archived. */
+  readonly archivedAt: Date | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly endedAt: Date | null;
 }
+
+/**
+ * One page of the paged session list (ux Phase 6 T7): ACTIVE sessions always in full (live counts must
+ * never be short), ENDED ones behind a keyset cursor. `nextCursor` names the last ended row served —
+ * null once the list is drained. `(updatedAt, id)` because `updated_at` alone isn't unique.
+ */
+export interface SessionPageCursor {
+  readonly updatedAt: Date;
+  readonly id: string;
+}
+
+export interface SessionPage {
+  readonly sessions: SessionSummary[];
+  readonly nextCursor: SessionPageCursor | null;
+}
+
+/**
+ * The outcome of a housekeeping mutation (archive/unarchive/delete, ux Phase 6 T7): `not_ended`
+ * distinguishes "still going — refuse" (a 409 for the route) from "not yours / gone" (`not_found`, 404).
+ */
+export type SessionMutationOutcome = 'ok' | 'not_found' | 'not_ended';
 
 /**
  * The relay's view of the session registry: it persists only routing metadata it can see on the
@@ -65,8 +101,24 @@ export interface SessionRegistry {
     /** Link to the adopted session this one continues (free-form handover, Journey 4). */
     parentSessionId?: string;
   }): Promise<string>;
-  /** List the user's sessions, newest first (RLS-scoped). Powers the dashboard list + reconnect. */
+  /**
+   * List EVERY session of the user (RLS-scoped), ordered by last activity (`updated_at` desc, id desc
+   * tiebreak), archived included. The internal full-list read — reconcile and other relay-side sweeps
+   * need totality; the HTTP route serves {@link SessionRegistry.listPage} instead.
+   */
   listByUser(userId: string): Promise<SessionSummary[]>;
+  /**
+   * The dashboard's paged read (ux Phase 6 T7). Default view (`archived: false`): all ACTIVE sessions +
+   * one `endedLimit`-sized page of ended, un-archived ones. Archived view: pages of archived sessions
+   * only (they are all terminal). A `cursor` names where the previous ended/archived page stopped — a
+   * cursor'd call returns ONLY the next page (the caller already holds the active rows). RLS-scoped.
+   */
+  listPage(input: {
+    userId: string;
+    endedLimit: number;
+    cursor?: SessionPageCursor;
+    archived?: boolean;
+  }): Promise<SessionPage>;
   /** Flip a session to `running` once the daemon reports it started. No-op if the row isn't the user's. */
   markRunning(input: { userId: string; sessionId: string }): Promise<void>;
   /** Flip a session to `awaiting_input` while a tool request blocks on a human decision. No-op if not the user's. */
@@ -93,6 +145,22 @@ export interface SessionRegistry {
     sealedTitle: string | null;
     sealedTitleNonce: string | null;
   }): Promise<{ deviceId: string } | null>;
+  /**
+   * Shelve (or restore) a TERMINAL session (ux Phase 6 T7). Archive is reversible housekeeping — it must
+   * never bump `updated_at` (AD-15: shelving isn't activity; unarchive restores the row at its true
+   * recency). Refuses a session that is still going (`not_ended`).
+   */
+  setArchived(input: {
+    userId: string;
+    sessionId: string;
+    archived: boolean;
+  }): Promise<SessionMutationOutcome>;
+  /**
+   * Permanently delete a TERMINAL session's row (ux Phase 6 T7). The caller evicts the relay's
+   * ciphertext replay cache for the id on `ok`. A continuation keeps its row — the parent link nulls
+   * (FK `set null`), it is never cascade-deleted. Refuses a session that is still going (`not_ended`).
+   */
+  deleteSession(input: { userId: string; sessionId: string }): Promise<SessionMutationOutcome>;
   /** Mark a session terminal (any ended state, ux Phase 6 split) with an end timestamp. No-op if not the user's. */
   markEnded(input: {
     userId: string;
@@ -113,6 +181,46 @@ export interface SessionRegistry {
   countByDevice(userId: string): Promise<ReadonlyMap<string, number>>;
 }
 
+/** The columns {@link SessionSummary} carries, shared by the full-list and paged reads. */
+const summaryColumns = {
+  id: sessions.id,
+  deviceId: sessions.deviceId,
+  title: sessions.title,
+  status: sessions.status,
+  origin: sessions.origin,
+  parentSessionId: sessions.parentSessionId,
+  sealedMeta: sessions.sealedMeta,
+  sealedMetaNonce: sessions.sealedMetaNonce,
+  sealedTitle: sessions.sealedTitle,
+  sealedTitleNonce: sessions.sealedTitleNonce,
+  archivedAt: sessions.archivedAt,
+  createdAt: sessions.createdAt,
+  updatedAt: sessions.updatedAt,
+  endedAt: sessions.endedAt,
+} as const;
+
+const endStatuses = [...SESSION_END_STATUSES];
+
+/**
+ * The paged section's row scope: ended + un-archived by default; archived rows in the archived view.
+ * The archived branch ALSO filters terminal — belt-and-suspenders with 0011's CHECK, so a non-terminal
+ * row can never surface as "archived" no matter how archived_at got set.
+ */
+function pagedScopeFor(archived: boolean | undefined): SQL | undefined {
+  return archived
+    ? and(isNotNull(sessions.archivedAt), inArray(sessions.status, endStatuses))
+    : and(inArray(sessions.status, endStatuses), isNull(sessions.archivedAt));
+}
+
+/** Keyset over (updated_at, id) — strictly after where the previous page stopped. */
+function afterCursor(cursor: SessionPageCursor | undefined): SQL | undefined {
+  if (!cursor) return undefined;
+  return or(
+    lt(sessions.updatedAt, cursor.updatedAt),
+    and(eq(sessions.updatedAt, cursor.updatedAt), lt(sessions.id, cursor.id)),
+  );
+}
+
 export function createSessionRegistry(db: DbHandle): SessionRegistry {
   /** Set a session's non-terminal status under the owner's RLS scope. No-op if the row isn't theirs. */
   async function setStatus(
@@ -123,9 +231,30 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
     await withUserContext(db, userId, async (scoped) => {
       await scoped
         .update(sessions)
-        .set({ status, updatedAt: new Date() })
+        // A session coming back to life leaves the shelf: an archived `turn_limit` session is still
+        // followable, and without clearing `archivedAt` here the resumed row would show on the live
+        // board AND in the archived view at once (archived ⇒ terminal, enforced by 0011's CHECK —
+        // this same UPDATE must clear the shelf or that constraint would reject the resume).
+        .set({ status, archivedAt: null, updatedAt: new Date() })
         .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
     });
+  }
+
+  /**
+   * A terminal-only mutation's outcome: `ok` when the guarded write landed; otherwise a follow-up
+   * existence read splits "still going" (`not_ended`) from "not yours / gone" (`not_found`).
+   */
+  async function resolveMissOutcome(
+    scoped: Database,
+    userId: string,
+    sessionId: string,
+  ): Promise<SessionMutationOutcome> {
+    const [exists] = await scoped
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)))
+      .limit(1);
+    return exists ? 'not_ended' : 'not_found';
   }
 
   return {
@@ -163,26 +292,41 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
     async listByUser(userId): Promise<SessionSummary[]> {
       return withUserContext(db, userId, async (scoped) => {
         return await scoped
-          .select({
-            id: sessions.id,
-            deviceId: sessions.deviceId,
-            title: sessions.title,
-            status: sessions.status,
-            origin: sessions.origin,
-            parentSessionId: sessions.parentSessionId,
-            sealedMeta: sessions.sealedMeta,
-            sealedMetaNonce: sessions.sealedMetaNonce,
-            sealedTitle: sessions.sealedTitle,
-            sealedTitleNonce: sessions.sealedTitleNonce,
-            createdAt: sessions.createdAt,
-            updatedAt: sessions.updatedAt,
-            endedAt: sessions.endedAt,
-          })
+          .select(summaryColumns)
           .from(sessions)
           // Defense in depth: RLS already scopes to the user; the explicit predicate keeps the read
           // correct even if the policy is toggled off (as some tests do), matching `setStatus`.
           .where(eq(sessions.userId, userId))
-          .orderBy(desc(sessions.createdAt));
+          .orderBy(desc(sessions.updatedAt), desc(sessions.id));
+      });
+    },
+
+    async listPage({ userId, endedLimit, cursor, archived }): Promise<SessionPage> {
+      return withUserContext(db, userId, async (scoped) => {
+        const paged = await scoped
+          .select(summaryColumns)
+          .from(sessions)
+          .where(and(eq(sessions.userId, userId), pagedScopeFor(archived), afterCursor(cursor)))
+          .orderBy(desc(sessions.updatedAt), desc(sessions.id))
+          // One extra row decides has-more without a count query.
+          .limit(endedLimit + 1);
+        const hasMore = paged.length > endedLimit;
+        const page = hasMore ? paged.slice(0, endedLimit) : paged;
+        const last = page[page.length - 1];
+        const nextCursor = hasMore && last ? { updatedAt: last.updatedAt, id: last.id } : null;
+
+        // Active sessions ride only the FIRST page of the default view — a cursor'd caller (and the
+        // archived view) already holds them; re-sending would duplicate rows client-side.
+        const active =
+          archived || cursor
+            ? []
+            : await scoped
+                .select(summaryColumns)
+                .from(sessions)
+                .where(and(eq(sessions.userId, userId), notInArray(sessions.status, endStatuses)))
+                .orderBy(desc(sessions.updatedAt), desc(sessions.id));
+
+        return { sessions: [...active, ...page], nextCursor };
       });
     },
 
@@ -216,6 +360,44 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
           .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)))
           .returning({ deviceId: sessions.deviceId });
         return updated ?? null;
+      });
+    },
+
+    async setArchived({ userId, sessionId, archived }): Promise<SessionMutationOutcome> {
+      return withUserContext(db, userId, async (scoped) => {
+        const [updated] = await scoped
+          .update(sessions)
+          // No updatedAt bump (AD-15): shelving isn't activity; unarchive restores true recency.
+          .set({ archivedAt: archived ? new Date() : null })
+          .where(
+            and(
+              eq(sessions.id, sessionId),
+              eq(sessions.userId, userId),
+              // Terminal-only: a session that is still going can't be shelved out of sight.
+              inArray(sessions.status, endStatuses),
+            ),
+          )
+          .returning({ id: sessions.id });
+        if (updated) return 'ok';
+        return resolveMissOutcome(scoped, userId, sessionId);
+      });
+    },
+
+    async deleteSession({ userId, sessionId }): Promise<SessionMutationOutcome> {
+      return withUserContext(db, userId, async (scoped) => {
+        const [deleted] = await scoped
+          .delete(sessions)
+          .where(
+            and(
+              eq(sessions.id, sessionId),
+              eq(sessions.userId, userId),
+              // Terminal-only: deleting a live session would strand a running agent unwatchable.
+              inArray(sessions.status, endStatuses),
+            ),
+          )
+          .returning({ id: sessions.id });
+        if (deleted) return 'ok';
+        return resolveMissOutcome(scoped, userId, sessionId);
       });
     },
 
