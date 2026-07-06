@@ -5,8 +5,10 @@ import type { SessionState, TranscriptEntry } from './session';
  * live sessions, flattened into actionable items. Three ask kinds get three names in the UI — an
  * approval (inline-actionable), a question, and a handover (both link into the session, where their
  * richer pickers live). Oldest ask first: the one that has waited longest is the most urgent, and an
- * ask with no `askedAt` (it predates this page's load) is treated as oldest of all. Pure and
- * unit-tested; the dashboard renders it. (`InboxAsk` is this builder's tightly-coupled result type.)
+ * ask with no known time (an unstamped backfill from an old daemon) is treated as oldest of all.
+ * `askedAt` comes from the entry's `at` — the daemon's wire stamp when it sent one (honest across
+ * reloads), else this client's receive-time. Pure and unit-tested; the dashboard renders it.
+ * (`InboxAsk` is this builder's tightly-coupled result type.)
  */
 export type InboxAsk =
   | {
@@ -66,7 +68,7 @@ function permissionAsk(
     toolName: entry.toolName,
     input: entry.input,
     decision: entry.decision,
-    ...(entry.askedAt !== undefined ? { askedAt: entry.askedAt } : {}),
+    ...(entry.at !== undefined ? { askedAt: entry.at } : {}),
   };
 }
 
@@ -80,7 +82,7 @@ function questionAsk(
     ...ctx,
     requestId: entry.requestId,
     prompt: entry.questions[0]?.question ?? 'The agent has a question for you.',
-    ...(entry.askedAt !== undefined ? { askedAt: entry.askedAt } : {}),
+    ...(entry.at !== undefined ? { askedAt: entry.at } : {}),
   };
 }
 
@@ -94,7 +96,7 @@ function handoverAsk(
     ...ctx,
     requestId: entry.requestId,
     question: entry.question,
-    ...(entry.askedAt !== undefined ? { askedAt: entry.askedAt } : {}),
+    ...(entry.at !== undefined ? { askedAt: entry.at } : {}),
   };
 }
 

@@ -42,14 +42,21 @@ export type AnswerState = 'pending' | 'answering' | 'answered' | 'closed';
  */
 export type HandoverState = 'pending' | 'submitting' | 'submitted' | 'closed';
 
+/**
+ * When an entry was created, epoch ms (Phase 3 threads & lineage): the daemon's wire `ts` when it sent
+ * one (authoritative — survives reloads), else this client's receive-time (an old daemon stamps
+ * nothing), else undefined (a backfilled entry from an old daemon: unknown, never invented). Waiting
+ * timers and lineage times read this.
+ */
 export type TranscriptEntry =
-  | { readonly kind: 'user'; readonly id: string; readonly text: string }
-  | { readonly kind: 'message'; readonly id: string; readonly text: string }
+  | { readonly kind: 'user'; readonly id: string; readonly text: string; readonly at?: number }
+  | { readonly kind: 'message'; readonly id: string; readonly text: string; readonly at?: number }
   | {
       readonly kind: 'tool';
       readonly id: string;
       readonly toolName: string;
       readonly input: Record<string, unknown>;
+      readonly at?: number;
     }
   | {
       readonly kind: 'permission';
@@ -58,8 +65,7 @@ export type TranscriptEntry =
       readonly toolName: string;
       readonly input: Record<string, unknown>;
       readonly decision: DecisionState;
-      /** Client receive-time of the ask (ms epoch) — waiting timers until the wire gains timestamps. */
-      readonly askedAt?: number;
+      readonly at?: number;
     }
   | {
       readonly kind: 'question';
@@ -67,8 +73,7 @@ export type TranscriptEntry =
       readonly requestId: string;
       readonly questions: readonly AgentQuestionItem[];
       readonly answer: AnswerState;
-      /** Client receive-time of the ask (ms epoch) — waiting timers until the wire gains timestamps. */
-      readonly askedAt?: number;
+      readonly at?: number;
       /** The human's pick(s), one per question — present once answering/answered. */
       readonly answers?: readonly QuestionAnswerItem[];
     }
@@ -81,8 +86,7 @@ export type TranscriptEntry =
       /** Deterministic handover summary of recent context (may be empty). */
       readonly summary: string;
       readonly state: HandoverState;
-      /** Client receive-time of the ask (ms epoch) — waiting timers until the wire gains timestamps. */
-      readonly askedAt?: number;
+      readonly at?: number;
       /** The user's free-text answer — present once they took it over (submitting/submitted). */
       readonly answerText?: string;
       /** The forked continuation this handover launched — present once the daemon registered it (link target). */
@@ -277,7 +281,15 @@ export function applyEnvelope(
       if (!parsed.success) return base;
       return {
         ...base,
-        entries: [...base.entries, { kind: 'message', id: `e${base.seq}`, text: parsed.data.text }],
+        entries: [
+          ...base.entries,
+          {
+            kind: 'message',
+            id: `e${base.seq}`,
+            text: parsed.data.text,
+            at: parsed.data.ts ?? now,
+          },
+        ],
         seq: base.seq + 1,
       };
     }
@@ -294,6 +306,7 @@ export function applyEnvelope(
             id: `e${base.seq}`,
             toolName: parsed.data.toolName,
             input: parsed.data.input,
+            at: parsed.data.ts ?? now,
           },
         ],
         seq: base.seq + 1,
@@ -315,7 +328,7 @@ export function applyEnvelope(
             toolName: parsed.data.toolName,
             input: parsed.data.input,
             decision: 'pending',
-            askedAt: now,
+            at: parsed.data.ts ?? now,
           },
         ],
         seq: base.seq + 1,
@@ -337,7 +350,7 @@ export function applyEnvelope(
             requestId: parsed.data.requestId,
             questions: parsed.data.questions,
             answer: 'pending',
-            askedAt: now,
+            at: parsed.data.ts ?? now,
           },
         ],
         seq: base.seq + 1,
@@ -361,7 +374,7 @@ export function applyEnvelope(
             question: parsed.data.question,
             summary: parsed.data.summary,
             state: 'pending',
-            askedAt: now,
+            at: parsed.data.ts ?? now,
           },
         ],
         seq: base.seq + 1,
@@ -398,13 +411,16 @@ export function applyEnvelope(
       }
       const entries: TranscriptEntry[] = parsed.data.entries.map((entry, i) => {
         const id = `e${i}`;
+        // A backfilled entry's time is the daemon's stamp or nothing — the fold clock would claim
+        // every historic entry was created "now", so it is never used here.
+        const at = entry.ts !== undefined ? { at: entry.ts } : {};
         switch (entry.kind) {
           case 'user':
-            return { kind: 'user', id, text: entry.text };
+            return { kind: 'user', id, text: entry.text, ...at };
           case 'message':
-            return { kind: 'message', id, text: entry.text };
+            return { kind: 'message', id, text: entry.text, ...at };
           case 'tool':
-            return { kind: 'tool', id, toolName: entry.toolName, input: entry.input };
+            return { kind: 'tool', id, toolName: entry.toolName, input: entry.input, ...at };
           case 'permission':
             return {
               kind: 'permission',
@@ -418,6 +434,7 @@ export function applyEnvelope(
                   : entry.decision === 'deny'
                     ? 'rejected'
                     : 'pending',
+              ...at,
             };
           case 'question':
             // A backfilled question replays as decided (answered, no picker) when it carries answers, or
@@ -429,6 +446,7 @@ export function applyEnvelope(
               questions: entry.questions,
               answer: entry.answers !== undefined ? 'answered' : 'pending',
               ...(entry.answers !== undefined ? { answers: entry.answers } : {}),
+              ...at,
             };
           case 'handover':
             // A backfilled handover replays as submitted (taken over) when it carries the user's answerText,
@@ -441,6 +459,7 @@ export function applyEnvelope(
               summary: entry.summary,
               state: entry.answerText !== undefined ? 'submitted' : 'pending',
               ...(entry.answerText !== undefined ? { answerText: entry.answerText } : {}),
+              ...at,
             };
           default: {
             // Exhaustiveness: a new history-entry kind must be handled here (parse already rejects
@@ -467,10 +486,14 @@ export function applyEnvelope(
 }
 
 /** Append the human's own message (the launch prompt or a follow-up) to the transcript. */
-export function appendUserMessage(state: SessionState, text: string): SessionState {
+export function appendUserMessage(
+  state: SessionState,
+  text: string,
+  now: number = Date.now(),
+): SessionState {
   return {
     ...state,
-    entries: [...state.entries, { kind: 'user', id: `e${state.seq}`, text }],
+    entries: [...state.entries, { kind: 'user', id: `e${state.seq}`, text, at: now }],
     seq: state.seq + 1,
   };
 }

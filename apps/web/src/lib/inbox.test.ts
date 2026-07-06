@@ -60,9 +60,9 @@ describe('askedAt stamping (client receive-time)', () => {
       state.entries.find((e) => e.kind === 'question'),
       state.entries.find((e) => e.kind === 'handover'),
     ];
-    expect(gate && 'askedAt' in gate ? gate.askedAt : undefined).toBe(NOW - 60_000);
-    expect(question && 'askedAt' in question ? question.askedAt : undefined).toBe(NOW - 30_000);
-    expect(handover && 'askedAt' in handover ? handover.askedAt : undefined).toBe(NOW - 10_000);
+    expect(gate?.at).toBe(NOW - 60_000);
+    expect(question?.at).toBe(NOW - 30_000);
+    expect(handover?.at).toBe(NOW - 10_000);
   });
 });
 

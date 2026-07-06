@@ -4,9 +4,11 @@ import {
   adoptConfigPayloadSchema,
   adoptStatePayloadSchema,
   agentHandoverPayloadSchema,
+  agentMessagePayloadSchema,
   agentNoticePayloadSchema,
   agentPermissionRequestPayloadSchema,
   agentQuestionPayloadSchema,
+  agentToolUsePayloadSchema,
   handoverAnswerPayloadSchema,
   permissionDecisionPayloadSchema,
   questionAnswerPayloadSchema,
@@ -451,6 +453,90 @@ describe('sessionHistoryPayloadSchema', () => {
       entries: [{ kind: 'diff', text: 'x' }],
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('per-entry timestamps (Phase 3 threads & lineage)', () => {
+  const TS = 1_783_290_000_000; // an arbitrary daemon-stamped epoch-ms instant
+
+  it('live entry-producing payloads carry an optional daemon-stamped ts (epoch ms)', () => {
+    expect(agentMessagePayloadSchema.parse({ text: 'hi', ts: TS }).ts).toBe(TS);
+    expect(agentToolUsePayloadSchema.parse({ toolName: 'Read', input: {}, ts: TS }).ts).toBe(TS);
+    expect(
+      agentPermissionRequestPayloadSchema.parse({
+        requestId: 'r1',
+        toolName: 'Write',
+        input: {},
+        ts: TS,
+      }).ts,
+    ).toBe(TS);
+    expect(
+      agentQuestionPayloadSchema.parse({
+        requestId: 'q1',
+        questions: [
+          { question: 'Which?', header: 'DB', multiSelect: false, options: [{ label: 'pg' }] },
+        ],
+        ts: TS,
+      }).ts,
+    ).toBe(TS);
+    expect(
+      agentHandoverPayloadSchema.parse({ requestId: 'h1', question: 'ok?', summary: '', ts: TS })
+        .ts,
+    ).toBe(TS);
+  });
+
+  it('ts is optional everywhere — an old daemon that stamps nothing still parses', () => {
+    expect(agentMessagePayloadSchema.parse({ text: 'hi' }).ts).toBeUndefined();
+    const history = sessionHistoryPayloadSchema.parse({
+      status: 'running',
+      entries: [{ kind: 'message', text: 'no stamp' }],
+    });
+    expect(history.entries[0]?.ts).toBeUndefined();
+  });
+
+  it('every history entry kind carries ts through a backfill round-trip', () => {
+    const entries = [
+      { kind: 'user', text: 'do it', ts: TS },
+      { kind: 'message', text: 'working', ts: TS + 1 },
+      { kind: 'tool', toolName: 'Read', input: {}, ts: TS + 2 },
+      {
+        kind: 'permission',
+        requestId: 'r1',
+        toolName: 'Write',
+        input: {},
+        decision: 'allow',
+        ts: TS + 3,
+      },
+      {
+        kind: 'question',
+        requestId: 'q1',
+        questions: [
+          { question: 'Which?', header: 'DB', multiSelect: false, options: [{ label: 'pg' }] },
+        ],
+        ts: TS + 4,
+      },
+      { kind: 'handover', requestId: 'h1', question: 'ok?', summary: '', ts: TS + 5 },
+    ];
+    const parsed = sessionHistoryPayloadSchema.parse({ status: 'running', entries });
+    expect(parsed.entries.map((entry) => entry.ts)).toEqual([
+      TS,
+      TS + 1,
+      TS + 2,
+      TS + 3,
+      TS + 4,
+      TS + 5,
+    ]);
+  });
+
+  it('rejects a non-integer or negative ts (a stamp is a whole epoch-ms instant)', () => {
+    expect(agentMessagePayloadSchema.safeParse({ text: 'x', ts: 1.5 }).success).toBe(false);
+    expect(agentMessagePayloadSchema.safeParse({ text: 'x', ts: -1 }).success).toBe(false);
+    expect(
+      sessionHistoryPayloadSchema.safeParse({
+        status: 'running',
+        entries: [{ kind: 'message', text: 'x', ts: 'yesterday' }],
+      }).success,
+    ).toBe(false);
   });
 });
 

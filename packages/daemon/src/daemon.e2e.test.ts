@@ -230,6 +230,8 @@ describe('daemon E2E encryption (Task 6)', () => {
     expect(JSON.stringify(messageFrame)).not.toContain('planning the change');
     expect(await decryptWithContentKey(messageFrame, contentKey)).toEqual({
       text: 'planning the change',
+      // The daemon stamps every entry-producing frame at record time (Phase 3 threads & lineage).
+      ts: expect.any(Number) as number,
     });
 
     // 4. session.ended carries the cleartext status (for the relay) AND the encrypted payload.

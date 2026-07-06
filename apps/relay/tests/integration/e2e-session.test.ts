@@ -151,7 +151,11 @@ describe('full-stack E2E session through the real relay', () => {
     const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
     const messageFrame = received.find((e) => e.type === 'agent.message');
     if (!messageFrame) throw new Error('expected an agent.message frame');
-    expect(await decryptWithContentKey(messageFrame, contentKey)).toEqual({ text: AGENT_TEXT });
+    expect(await decryptWithContentKey(messageFrame, contentKey)).toEqual({
+      text: AGENT_TEXT,
+      // The daemon stamps entry-producing frames at record time (Phase 3 threads & lineage).
+      ts: expect.any(Number) as number,
+    });
 
     browser.close();
     return { received, sessionId: keyFrame.session_id, sealedLaunch };
