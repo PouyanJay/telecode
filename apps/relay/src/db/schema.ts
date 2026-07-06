@@ -107,6 +107,14 @@ export const sessions = pgTable(
      */
     sealedMeta: text('sealed_meta'),
     sealedMetaNonce: text('sealed_meta_nonce'),
+    /**
+     * The user's rename override (ux Phase 6 T6): the title they set, sealed under the per-session content
+     * key — kept SEPARATE from `sealed_meta` (the daemon-owned identity) so a later derived title never
+     * clobbers a rename; the browser merges override-wins. OPAQUE to the relay (invariant #5). Both null
+     * until a rename, and cleared again by a reset-to-derived. Added in `0009_session_sealed_title`.
+     */
+    sealedTitle: text('sealed_title'),
+    sealedTitleNonce: text('sealed_title_nonce'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     endedAt: timestamp('ended_at', { withTimezone: true }),

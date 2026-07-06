@@ -422,4 +422,113 @@ describe('relay device listing: GET /me/devices', () => {
     });
     expect(bad.statusCode).toBe(401);
   });
+
+  // Device rename (ux Phase 6 T6): a device name is a hostname — cleartext — so a rename is a plain
+  // `name` update, RLS-scoped so a user can only touch their own, and 404 for revoked/unknown/cross-user.
+  it('renames the user’s own device (the new name shows in the list)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'alice-laptop',
+      deviceTokenHash: 'hash-alice',
+    });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: { name: '  Work MacBook  ' },
+    });
+    expect(res.statusCode).toBe(204);
+    const list = await app.inject({
+      method: 'GET',
+      url: '/me/devices',
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    // The name is trimmed before it's stored.
+    expect(list.json<{ devices: { id: string; name: string }[] }>().devices[0]).toMatchObject({
+      id: deviceId,
+      name: 'Work MacBook',
+    });
+  });
+
+  it('cannot rename another user’s device (RLS-scoped → 404)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const bob = await auth.createSession({ provider: 'dev', providerUserId: 'bob' });
+    const bobDeviceId = await registry.createDevice({
+      userId: bob.userId,
+      name: 'bob-laptop',
+      deviceTokenHash: 'hash-bob',
+    });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/me/devices/${bobDeviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: { name: 'hijacked' },
+    });
+    expect(res.statusCode).toBe(404);
+    const bobList = await app.inject({
+      method: 'GET',
+      url: '/me/devices',
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    expect(bobList.json<{ devices: { name: string }[] }>().devices[0]?.name).toBe('bob-laptop');
+  });
+
+  it('rejects a blank device name (400)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'alice-laptop',
+      deviceTokenHash: 'hash-alice',
+    });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: { name: '   ' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects an oversized device name (400)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'alice-laptop',
+      deviceTokenHash: 'hash-alice',
+    });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: { name: 'x'.repeat(129) },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('cannot rename a revoked device (404)', async () => {
+    const alice = await auth.createSession({ provider: 'dev', providerUserId: 'alice' });
+    const deviceId = await registry.createDevice({
+      userId: alice.userId,
+      name: 'alice-laptop',
+      deviceTokenHash: 'hash-alice',
+    });
+    await registry.revoke(alice.userId, deviceId);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/me/devices/${deviceId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: { name: 'too late' },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('rejects an unauthenticated device rename', async () => {
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/me/devices/00000000-0000-0000-0000-000000000000',
+      payload: { name: 'x' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
 });

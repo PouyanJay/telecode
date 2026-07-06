@@ -72,6 +72,12 @@ export const MESSAGE_TYPES = [
   // forwards/replays it; only browsers holding the session key can read it (invariant #5 — the registry
   // never sees plaintext metadata for a sealed session).
   'session.meta',
+  // session rename override (relay -> web, ux Phase 6 T6): the user's title override, broadcast after a
+  // `PATCH /me/sessions/:id`. Kept SEPARATE from `session.meta` (the daemon-owned identity) so the two
+  // never race — the browser merges override-wins. A SET carries the sealed `{ title }` ciphertext; a
+  // RESET-to-derived carries the cleartext `{ reset: true }` marker (no secret). The relay stores the
+  // opaque blob in `sealed_title`/`sealed_title_nonce` and never reads a set title (invariant #5).
+  'session.title',
   // device presence (relay -> web): the daemon behind the channel (dis)connected, so the browser can
   // flip its live sessions to `offline_paused` and resume them on reconnect. Cleartext routing metadata
   // the relay generates itself — it carries no session payload.

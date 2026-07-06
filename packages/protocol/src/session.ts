@@ -296,6 +296,20 @@ export const sessionMetaPayloadSchema = z.object({
 export type SessionMetaPayload = z.infer<typeof sessionMetaPayloadSchema>;
 
 /**
+ * Payload for `session.title` (relay → web, ux Phase 6 T6): the user's rename override, kept in a blob
+ * SEPARATE from `session.meta` (the daemon-owned identity) so the two never race — the browser merges
+ * override-wins, and a later derived `session.meta` can never clobber a rename. The relay broadcasts this
+ * frame after a `PATCH /me/sessions/:id`. A SET is sealed (this `{ title }` shape is what the ciphertext
+ * decrypts to, so the relay never reads it); a RESET-to-derived is the cleartext `{ reset: true }` marker
+ * (it carries no secret). The `title` bound mirrors {@link sessionMetaPayloadSchema}'s.
+ */
+export const sessionTitlePayloadSchema = z.union([
+  z.object({ title: z.string().min(1).max(512) }),
+  z.object({ reset: z.literal(true) }),
+]);
+export type SessionTitlePayload = z.infer<typeof sessionTitlePayloadSchema>;
+
+/**
  * Payload for `agent.permission_request` (daemon → web): a consequential tool call the agent wants to
  * run, paused at the {@link https://docs.claude.com SDK `canUseTool` gate} until a human decides. The
  * `requestId` correlates this request with the human's {@link permissionDecisionPayloadSchema} reply.

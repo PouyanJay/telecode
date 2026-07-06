@@ -64,6 +64,13 @@
       "when": 1783320108589,
       "tag": "0008_sealed_meta_bounds",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1783420000000,
+      "tag": "0009_session_sealed_title",
+      "breakpoints": true
     }
   ]
 }

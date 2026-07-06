@@ -32,6 +32,13 @@ export interface SessionSummary {
    */
   readonly sealedMeta: string | null;
   readonly sealedMetaNonce: string | null;
+  /**
+   * The user's sealed rename override (ux Phase 6 T6), separate from `sealedMeta` so a later derived title
+   * never clobbers it — the browser merges override-wins. Both `null` until a rename (and after a reset).
+   * Ciphertext the relay stores but can never read (invariant #5).
+   */
+  readonly sealedTitle: string | null;
+  readonly sealedTitleNonce: string | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly endedAt: Date | null;
@@ -74,6 +81,18 @@ export interface SessionRegistry {
     sealedMeta: string;
     sealedMetaNonce: string;
   }): Promise<void>;
+  /**
+   * Set (or clear) a session's sealed rename override (ux Phase 6 T6). A rename passes the sealed blob +
+   * nonce; a reset-to-derived passes both `null`. Bumps `updatedAt` (a rename is session activity).
+   * Returns the session's `deviceId` so the caller can broadcast the change on that device's channel, or
+   * `null` when no row is the user's (a 404 for the route). RLS-scoped.
+   */
+  setSealedTitle(input: {
+    userId: string;
+    sessionId: string;
+    sealedTitle: string | null;
+    sealedTitleNonce: string | null;
+  }): Promise<{ deviceId: string } | null>;
   /** Mark a session terminal (any ended state, ux Phase 6 split) with an end timestamp. No-op if not the user's. */
   markEnded(input: {
     userId: string;
@@ -153,6 +172,8 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             parentSessionId: sessions.parentSessionId,
             sealedMeta: sessions.sealedMeta,
             sealedMetaNonce: sessions.sealedMetaNonce,
+            sealedTitle: sessions.sealedTitle,
+            sealedTitleNonce: sessions.sealedTitleNonce,
             createdAt: sessions.createdAt,
             updatedAt: sessions.updatedAt,
             endedAt: sessions.endedAt,
@@ -179,6 +200,22 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
           .update(sessions)
           .set({ sealedMeta, sealedMetaNonce, updatedAt: new Date() })
           .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
+      });
+    },
+
+    async setSealedTitle({
+      userId,
+      sessionId,
+      sealedTitle,
+      sealedTitleNonce,
+    }): Promise<{ deviceId: string } | null> {
+      return withUserContext(db, userId, async (scoped) => {
+        const [updated] = await scoped
+          .update(sessions)
+          .set({ sealedTitle, sealedTitleNonce, updatedAt: new Date() })
+          .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)))
+          .returning({ deviceId: sessions.deviceId });
+        return updated ?? null;
       });
     },
 

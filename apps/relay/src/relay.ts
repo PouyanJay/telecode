@@ -29,12 +29,13 @@ import { type PushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { registerRateLimit, type RateLimitConfig } from './rate-limit';
 import { createTelemetry, type Telemetry } from './telemetry';
+import { MAX_SEALED_BLOB_CHARS, MAX_SEALED_BLOB_NONCE_CHARS } from './db/sealed-blob-bounds';
 import { registerInfraRoutes } from './infra/infra-routes';
 import { type InfraScaler } from './infra/infra-scaler';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceRoutes } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
-import { registerSessionListRoute } from './registry/session-routes';
+import { registerSessionRoutes, type SessionRenamedEvent } from './registry/session-routes';
 
 /**
  * The relay / control plane. Both the daemon and the browser dial *out* to it (loopback in
@@ -177,31 +178,25 @@ const UNDELIVERABLE_REPLY_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Bounds for the stored `session.meta` blob (ux Phase 6). The plaintext schema caps title/cwd/model
- * (512+1024+128 chars), so even with AES-GCM + base64 overhead a legitimate blob is well under 8 KiB;
- * the nonce is a 12-byte GCM IV (16 base64 chars). Enforced relay-side — and by matching DB CHECK
- * constraints (migration 0008) — so a hostile daemon can't bloat rows the relay can't read.
- */
-const MAX_SEALED_META_CHARS = 8192;
-const MAX_SEALED_META_NONCE_CHARS = 64;
-
 /**
  * The storable form of a `session.meta` payload, WITHOUT reading sealed content. Ciphertext mode
  * (non-empty nonce): the payload must be a bounded string — size is the only checkable property.
  * Cleartext mode (legacy pre-E2E daemons): the payload must actually parse as session metadata — the
  * same trust-boundary validation `session.adopted`/`session.chained` get. `null` = drop the frame.
+ * Bounds are the shared {@link MAX_SEALED_BLOB_CHARS}/{@link MAX_SEALED_BLOB_NONCE_CHARS} (also the DB
+ * CHECK in migration 0008), so a hostile daemon can't bloat rows the relay can't read.
  */
 function storableSealedMeta(envelope: Envelope): string | null {
-  if (envelope.nonce.length > MAX_SEALED_META_NONCE_CHARS) return null;
+  if (envelope.nonce.length > MAX_SEALED_BLOB_NONCE_CHARS) return null;
   if (envelope.nonce !== '') {
-    return typeof envelope.payload === 'string' && envelope.payload.length <= MAX_SEALED_META_CHARS
+    return typeof envelope.payload === 'string' && envelope.payload.length <= MAX_SEALED_BLOB_CHARS
       ? envelope.payload
       : null;
   }
   const parsed = sessionMetaPayloadSchema.safeParse(envelope.payload);
   if (!parsed.success) return null;
   const json = JSON.stringify(parsed.data);
-  return json.length <= MAX_SEALED_META_CHARS ? json : null;
+  return json.length <= MAX_SEALED_BLOB_CHARS ? json : null;
 }
 
 function channelKey(userId: string, deviceId: string): string {
@@ -368,6 +363,26 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     );
   }
 
+  /**
+   * A `session.title` (relay → browsers, ux Phase 6 T6): the user's rename override, broadcast after a
+   * successful `PATCH /me/sessions/:id`. A SET forwards the opaque ciphertext + its nonce verbatim (the
+   * relay never reads it — invariant #5); a RESET-to-derived (null blob) carries the cleartext
+   * `{ reset: true }` marker with an empty nonce (it holds no secret).
+   */
+  function sessionTitleFrame(event: SessionRenamedEvent): string {
+    const isSealed = event.sealedTitle !== null && event.sealedTitleNonce !== null;
+    return JSON.stringify(
+      makeEnvelope({
+        type: 'session.title',
+        userId: event.userId,
+        deviceId: event.deviceId,
+        sessionId: event.sessionId,
+        payload: isSealed ? event.sealedTitle : { reset: true },
+        ...(isSealed ? { nonce: event.sealedTitleNonce } : {}),
+      }),
+    );
+  }
+
   /** A `relay.error` (relay → the sending browser): its frame could not reach the (offline) daemon. */
   function relayErrorFrame(params: {
     readonly userId: string;
@@ -510,11 +525,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // Presence frames are relay-generated routing metadata (`viewer.presence` relay→daemon, `device.presence`
     // relay→browser) — never legitimately browser-originated. Drop them so an authenticated browser can't
     // forge a `viewer.presence` to flip the daemon's adopted-session gating: the relay is the sole authority
-    // on whether anyone is watching. `relay.error` is likewise relay-generated only.
+    // on whether anyone is watching. `relay.error` and `session.title` are likewise relay-generated only —
+    // a rename must go through `PATCH /me/sessions/:id` (which persists + bounds it), never a raw frame.
     if (
       envelope.type === 'viewer.presence' ||
       envelope.type === 'device.presence' ||
-      envelope.type === 'relay.error'
+      envelope.type === 'relay.error' ||
+      envelope.type === 'session.title'
     ) {
       log.warn(
         { channel, type: envelope.type },
@@ -608,13 +625,16 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
-    // Symmetry with the browser-side guard: presence and relay.error are RELAY-generated routing
-    // metadata. A daemon is trusted for its channel's content, but must not be able to impersonate the
-    // relay's own control frames either.
+    // Symmetry with the browser-side guard: presence, relay.error, and session.title are RELAY-generated
+    // routing metadata. A daemon is trusted for its channel's content, but must not be able to impersonate
+    // the relay's own control frames — a forged `session.title` would otherwise fall through to a verbatim,
+    // unbounded, unpersisted broadcast that clobbers the title on every open tab (the exact clobber the
+    // sealed_meta/sealed_title split exists to prevent). A rename is REST-only (`PATCH /me/sessions/:id`).
     if (
       envelope.type === 'viewer.presence' ||
       envelope.type === 'device.presence' ||
-      envelope.type === 'relay.error'
+      envelope.type === 'relay.error' ||
+      envelope.type === 'session.title'
     ) {
       log.warn(
         { channel, type: envelope.type },
@@ -920,9 +940,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         options.infra.operatorEmails,
       );
     }
-    // The dashboard + reconnect list the user's sessions (status, device, title).
+    // The dashboard + reconnect list the user's sessions; a rename (PATCH) broadcasts a `session.title`
+    // frame on the session's device channel so every open tab updates the title without a refresh.
     if (sessionRegistry) {
-      registerSessionListRoute(app, options.auth.service, sessionRegistry);
+      registerSessionRoutes(app, options.auth.service, sessionRegistry, {
+        onSessionRenamed: (event) => {
+          broadcastToBrowsers(channelKey(event.userId, event.deviceId), sessionTitleFrame(event));
+        },
+      });
     }
     // The launch picker lists the user's GitHub repos (only when a token store is configured).
     if (oauthTokenStore) {
