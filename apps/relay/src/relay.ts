@@ -238,10 +238,17 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // stream frames, all stored as the opaque forwarded strings (the relay never decrypts them).
   const cacheMaxFrames = options.cache?.maxFramesPerSession ?? 64;
   const cacheMaxSessions = options.cache?.maxSessions ?? 256;
-  const ciphertextCache = new Map<string, { key?: string; meta?: string; stream: string[] }>();
+  // Each entry records the CHANNEL its frames came in on — a session runs on exactly one device, so a
+  // browser may only replay a session cached on its own channel. Without this, a browser could pull
+  // another tenant's cached ciphertext by guessing a session UUID (payload stays E2E-sealed, but even
+  // its existence/size must not cross the channel boundary).
+  const ciphertextCache = new Map<
+    string,
+    { channel: string; key?: string; meta?: string; stream: string[] }
+  >();
 
   /** Record a forwarded daemon→browser frame for later replay (ciphertext string, never read). */
-  function cacheFrame(sessionId: string, type: string, frame: string): void {
+  function cacheFrame(sessionId: string, channel: string, type: string, frame: string): void {
     let entry = ciphertextCache.get(sessionId);
     if (!entry) {
       // Bound the number of cached sessions: evict the oldest (Map preserves insertion order).
@@ -249,7 +256,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         const oldest = ciphertextCache.keys().next().value;
         if (oldest !== undefined) ciphertextCache.delete(oldest);
       }
-      entry = { stream: [] };
+      entry = { channel, stream: [] };
       ciphertextCache.set(sessionId, entry);
     }
     if (type === 'session.key') {
@@ -262,10 +269,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
   }
 
-  /** Replay a session's cached frames to one browser (the `session.key` first, so the stream decrypts). */
-  function replayCache(sessionId: string, browser: WebSocket): void {
+  /**
+   * Replay a session's cached frames to one browser (the `session.key` first, so the stream decrypts).
+   * Scoped to the requesting `channel`: a session cached on another channel is never replayed, so a
+   * browser can't read a session it doesn't own out of the shared cache (authorization boundary).
+   */
+  function replayCache(sessionId: string, channel: string, browser: WebSocket): void {
     const entry = ciphertextCache.get(sessionId);
-    if (!entry) return;
+    if (!entry || entry.channel !== channel) return;
     try {
       if (entry.key !== undefined) browser.send(entry.key);
       if (entry.meta !== undefined) browser.send(entry.meta);
@@ -439,7 +450,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // so recent history shows even while the daemon is offline/reconnecting (Task 8). The daemon's
     // authoritative `session.history` backfill follows when it forwards the subscribe below.
     if (envelope.type === 'session.subscribe' && envelope.session_id) {
-      replayCache(envelope.session_id, replyTo);
+      replayCache(envelope.session_id, channel, replyTo);
     }
     if (envelope.type === 'session.launch' && sessionRegistry) {
       // The relay owns the session registry: mint the row (and its id) from envelope metadata, never
@@ -762,7 +773,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         });
         log.info({ channel, sessionId: envelope.session_id }, 'relay: session meta stored');
       }
-      cacheFrame(envelope.session_id, envelope.type, text);
+      cacheFrame(envelope.session_id, channel, envelope.type, text);
       broadcastToBrowsers(channel, text);
       return;
     }
@@ -772,7 +783,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // ordering for `agent.permission_request` is deliberately the opposite: persist `awaiting_input` first.)
     if (envelope.type === 'session.ended') {
       if (envelope.session_id && CACHEABLE_TYPES.has(envelope.type)) {
-        cacheFrame(envelope.session_id, envelope.type, text);
+        cacheFrame(envelope.session_id, channel, envelope.type, text);
       }
       broadcastToBrowsers(channel, text);
       if (sessionRegistry && envelope.session_id) {
@@ -818,7 +829,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
     // Cache the recent ciphertext for an instant reopen (Task 8) — the forwarded string, never decrypted.
     if (envelope.session_id && CACHEABLE_TYPES.has(envelope.type)) {
-      cacheFrame(envelope.session_id, envelope.type, text);
+      cacheFrame(envelope.session_id, channel, envelope.type, text);
     }
     broadcastToBrowsers(channel, text);
   }
@@ -976,6 +987,18 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
      * authn/authz boundary.
      */
     async function handleHello(envelope: Envelope, channel: string): Promise<void> {
+      // Identity is established ONCE (session-identity T2a): a second hello on a registered socket is
+      // never a legitimate client (both the web and daemon open a fresh socket per (re)connect and hello
+      // once). Reject it rather than silently rebinding `peer`, which would strand the old channel's map
+      // entry pointing at this socket. Closing forces the client's own reconnect path.
+      if (peer.role !== 'unknown') {
+        log.warn(
+          { channel: peer.channel },
+          'relay: rejected a second hello on a registered socket',
+        );
+        socket.close(WS_CLOSE_UNAUTHORIZED, 'hello already sent');
+        return;
+      }
       const hello = helloPayloadSchema.safeParse(envelope.payload);
       if (!hello.success) {
         log.warn({ channel }, 'relay: dropped hello with invalid payload');
@@ -1076,7 +1099,29 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
       if (envelope.type === 'hello') {
         await handleHello(envelope, channel);
-      } else if (peer.role === 'browser') {
+        return;
+      }
+      // Identity binding (session-identity T2a): a peer's (user_id, device_id) is authenticated ONCE,
+      // at hello — every later frame must carry the same pair. The envelope fields are an unauthenticated
+      // claim; without this check an authed daemon could stamp another user's ids on a frame and write
+      // into their registry or broadcast into their channel (RLS + a guessed session UUID were the only
+      // barriers). The socket is the truth. Forged frames are dropped, never re-routed.
+      if (envelope.user_id !== peer.userId || envelope.device_id !== peer.deviceId) {
+        // A registered peer forging ANOTHER identity is the actionable signal — log it loudly with both
+        // its real channel and the one it claimed. A frame before `hello` (unknown role) is routine
+        // client noise (a racing/early send); keep it at debug so it can't drown the real signal or be
+        // used as an unauthenticated log-spam vector.
+        if (peer.role === 'unknown') {
+          log.debug({ type: envelope.type }, 'relay: dropped a frame received before hello');
+        } else {
+          log.warn(
+            { peerChannel: peer.channel, claimedChannel: channel, type: envelope.type },
+            'relay: dropped a frame whose identity does not match the authenticated peer',
+          );
+        }
+        return;
+      }
+      if (peer.role === 'browser') {
         await routeFromBrowser(envelope, channel, text, socket);
       } else if (peer.role === 'daemon') {
         await routeFromDaemon(envelope, channel, text);
