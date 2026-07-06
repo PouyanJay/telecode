@@ -1,21 +1,19 @@
-import { rm } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
-import { encodeKey, generateKeyPair } from '@telecode/protocol';
 import { pino } from 'pino';
 
 import { runHookBridge } from './adopt/hook-bridge';
 import { installHooks } from './adopt/hooks-install';
 import { readHooksStatus } from './adopt/hooks-status';
 import { uninstallHooks } from './adopt/hooks-uninstall';
-import { loadCredentials, saveCredentials, type StoredCredentials } from './credentials';
+import { loadCredentials, type StoredCredentials } from './credentials';
 import { createDaemon, type Daemon } from './daemon';
 import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
 import { runDoctorCli } from './doctor-cli';
 import { detectOs } from './os-info';
-import { pairDevice } from './pairing';
+import { pairAndSaveCredentials } from './pair-and-save';
 import { resolveRelayUrl } from './relay-url';
 import { createExecCommandRunner } from './service/exec-command-runner';
 import { offerBackgroundService } from './service/offer-background-service';
@@ -45,6 +43,13 @@ const log = pino({
       'prompt',
       'channel_token',
       'device_token',
+      '*.device_token',
+      'deviceToken',
+      '*.deviceToken',
+      'priorDeviceToken',
+      '*.priorDeviceToken',
+      'prior_device_token',
+      '*.prior_device_token',
       'nonce',
       '*.nonce',
       'privateKey',
@@ -185,29 +190,23 @@ if (!lock.acquired) {
 // Release once, on the single `exit` event; a signal simply routes to `exit` via `process.exit(0)`.
 releaseLockOnExit(lock.release);
 
-// Pair this device: generate a keypair, run the device-authorization grant (prints a code to approve in
-// the web app), and persist the credentials. Extracted so a re-pair (after a revocation) reuses it.
+// Pair this device: run the device-authorization grant (prints a code to approve in the web app) and
+// persist the credentials. `pairAndSaveCredentials` is identity-preserving — after a revoke it keeps
+// the keypair and presents the dead token as restore evidence so the relay re-authorizes the SAME
+// device row (history intact) once the owner approves.
 const credentialsPath = join(homedir(), '.telecode', 'credentials.json');
-async function pairAndSaveCredentials(): Promise<StoredCredentials> {
-  log.info('daemon: pairing this device');
-  const keyPair = await generateKeyPair();
-  const publicKey = encodeKey(keyPair.publicKey);
-  const paired = await pairDevice({
+const runPairing = (): Promise<StoredCredentials> =>
+  pairAndSaveCredentials({
     relayHttpUrl,
+    credentialsPath,
     name: hostname(),
     os: detectOs(),
-    publicKey,
     logger: log,
   });
-  const creds = { ...paired, publicKey, privateKey: encodeKey(keyPair.privateKey) };
-  await saveCredentials(creds);
-  log.info({ deviceId: creds.deviceId }, 'daemon: paired; credentials saved');
-  return creds;
-}
 
-let credentials = await loadCredentials();
+let credentials = await loadCredentials(credentialsPath);
 const wasJustPaired = !credentials;
-if (!credentials) credentials = await pairAndSaveCredentials();
+if (!credentials) credentials = await runPairing();
 
 // First run only: offer to host the daemon as a background login service, so there is no terminal to keep
 // open. On yes it installs the service and hands off by exiting — the service takes over this session (the
@@ -300,18 +299,18 @@ function buildDaemon(creds: StoredCredentials): Daemon {
 let activeDaemon: Daemon | null = null;
 let isRepairing = false;
 
-// A revoked/invalid device token can never be accepted, so clear it and re-pair (prints a fresh code to
-// approve in the web app), then relaunch. Guarded so concurrent 4001s trigger a single re-pair. A pairing
-// failure (network hiccup, user cancels) is fatal: exit non-zero so a service manager restarts + retries,
-// rather than leaving the guard stuck true and silently wedging every future re-pair.
+// A revoked/invalid device token can never be accepted, so re-pair (prints a fresh code to approve in
+// the web app), then relaunch. The stale credentials are deliberately KEPT until the new grant succeeds:
+// they carry the keypair + the restore evidence that lets the relay re-authorize the same device row.
+// Guarded so concurrent 4001s trigger a single re-pair. A pairing failure (network hiccup, user cancels)
+// is fatal: exit non-zero so a service manager restarts + retries — the retry re-presents the evidence.
 async function repairAndRelaunch(): Promise<void> {
   if (isRepairing) return;
   isRepairing = true;
   try {
     log.warn('daemon: device token rejected by the relay (revoked?) — re-pairing this machine');
     await activeDaemon?.stop().catch(() => undefined);
-    await rm(credentialsPath, { force: true });
-    const creds = await pairAndSaveCredentials();
+    const creds = await runPairing();
     await launchDaemon(creds);
   } catch (err) {
     log.error({ err }, 'daemon: re-pairing failed');

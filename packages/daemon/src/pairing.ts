@@ -14,6 +14,12 @@ export interface PairDeviceOptions {
   readonly os?: string;
   /** This device's X25519 public key (base64), registered at pairing for E2E in Phase 3. */
   readonly publicKey?: string;
+  /**
+   * Restore evidence when re-pairing after a revoke: the prior (dead) device token. The relay
+   * hash-matches it against the revoked device row so approval re-authorizes the SAME identity —
+   * device id and session history preserved — instead of minting a new device.
+   */
+  readonly priorDeviceToken?: string;
   readonly intervalMs?: number;
   readonly maxAttempts?: number;
   /** Invoked with the user code to display/enter. Awaited before polling begins. */
@@ -39,6 +45,9 @@ export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCred
       ...(options.name !== undefined ? { name: options.name } : {}),
       ...(options.os !== undefined ? { os: options.os } : {}),
       ...(options.publicKey !== undefined ? { public_key: options.publicKey } : {}),
+      ...(options.priorDeviceToken !== undefined
+        ? { prior_device_token: options.priorDeviceToken }
+        : {}),
     }),
   });
   if (!codeRes.ok) {
