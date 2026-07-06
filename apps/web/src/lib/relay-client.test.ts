@@ -431,3 +431,51 @@ describe('sealTitle: rename is E2E-gated (ux Phase 6 T6)', () => {
     conn.close();
   });
 });
+
+describe('resumeNew: sealed like a launch (ux Phase 6 T8)', () => {
+  beforeEach(() => {
+    vi.useRealTimers(); // real WebCrypto keygen/derivation needs real event-loop turns
+  });
+
+  it('box-seals the payload to the daemon on an E2E channel (parent id on the envelope)', async () => {
+    const daemonKp = await generateKeyPair();
+    const { sockets, conn } = connectWithFakes({
+      daemonPublicKey: encodeKey(daemonKp.publicKey),
+      keyPairFactory: () => generateIdentityKeyPair(false),
+    });
+    const s = sockets[0]!;
+    s.fireOpen();
+    await flush();
+    s.fireMessage(helloAck());
+    await flush();
+
+    conn.resumeNew('parent-1', { prompt: 'continue the work', clientRef: 'ref-9' });
+    await vi.waitFor(() =>
+      expect(s.sent.some((f) => f.includes('"session.resume_new"'))).toBe(true),
+    );
+    const frame = JSON.parse(s.sent.find((f) => f.includes('"session.resume_new"'))!) as Envelope;
+    expect(frame.session_id).toBe('parent-1');
+    // Sealed: an opaque ciphertext string + nonce + our announced pubkey — never the plaintext prompt.
+    expect(typeof frame.payload).toBe('string');
+    expect(frame.nonce).not.toBe('');
+    expect(frame.sender_public_key).toBeDefined();
+    expect(JSON.stringify(frame)).not.toContain('continue the work');
+  });
+
+  it('sends cleartext on a pre-E2E channel (no daemon key)', async () => {
+    const { sockets, conn } = connectWithFakes({});
+    const s = sockets[0]!;
+    s.fireOpen();
+    await flush();
+    s.fireMessage(helloAck());
+    await flush();
+
+    conn.resumeNew('parent-2', { prompt: 'plain resume', clientRef: 'ref-c' });
+    await vi.waitFor(() =>
+      expect(s.sent.some((f) => f.includes('"session.resume_new"'))).toBe(true),
+    );
+    const frame = JSON.parse(s.sent.find((f) => f.includes('"session.resume_new"'))!) as Envelope;
+    expect(frame.session_id).toBe('parent-2');
+    expect(frame.payload).toEqual({ prompt: 'plain resume', clientRef: 'ref-c' });
+  });
+});

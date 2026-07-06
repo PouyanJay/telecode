@@ -2,7 +2,7 @@
   import { Button, IconButton, Input } from '@telecode/ui';
   import { tick } from 'svelte';
 
-  import type { RenameResult } from '$lib/session-store';
+  import type { SessionActionResult } from '$lib/session-store';
 
   /**
    * The session title with an inline rename affordance (ux Phase 6 T6). View mode shows the title + a
@@ -19,8 +19,8 @@
     title: string;
     /** Whether a user override exists (so "Reset to default" is offered). */
     canReset: boolean;
-    onrename: (title: string) => Promise<RenameResult>;
-    onreset: () => Promise<RenameResult>;
+    onrename: (title: string) => Promise<SessionActionResult>;
+    onreset: () => Promise<SessionActionResult>;
   } = $props();
 
   let editing = $state(false);

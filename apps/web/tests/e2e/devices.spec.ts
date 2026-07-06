@@ -82,7 +82,9 @@ test('revoke a device, then re-authorize it back to the same identity with its h
   ).toBeVisible();
 
   // Complete the restore by approving a fresh code from the daemon (same prior token) on /activate.
-  const restore = await pairDevice(serviceSecret, deviceName, paired.deviceToken);
+  const restore = await pairDevice(serviceSecret, deviceName, {
+    priorDeviceToken: paired.deviceToken,
+  });
   expect(restore.deviceId).toBe(paired.deviceId); // SAME identity restored
 
   await gotoDevices(page);

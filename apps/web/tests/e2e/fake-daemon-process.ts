@@ -16,6 +16,12 @@ export interface FakeDaemonOptions {
   readonly adoptAnnounce?: string;
   /** Title for the chain-a-takeover parent — pass a per-run unique one (see fake-daemon.ts). */
   readonly chainTitle?: string;
+  /**
+   * OPT-IN E2E mode (T9): the daemon's X25519 PRIVATE key, base64. Pair the device with the matching
+   * public key (see `pairDevice`'s `publicKey` option) so the browser opens an encrypted channel;
+   * the daemon itself only ever needs the private half.
+   */
+  readonly privateKey?: string;
 }
 
 export async function spawnFakeDaemon(options: FakeDaemonOptions): Promise<ChildProcess> {
@@ -35,6 +41,7 @@ export async function spawnFakeDaemon(options: FakeDaemonOptions): Promise<Child
           ? { FAKE_ADOPT_ANNOUNCE: options.adoptAnnounce }
           : {}),
         ...(options.chainTitle !== undefined ? { FAKE_CHAIN_TITLE: options.chainTitle } : {}),
+        ...(options.privateKey !== undefined ? { FAKE_PRIVATE_KEY: options.privateKey } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },

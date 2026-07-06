@@ -30,6 +30,12 @@ export interface SessionRow {
    */
   readonly parentSessionId: string | null;
   readonly createdAt: Date;
+  /**
+   * When the session last did something (T7): the registry's `updated_at` — status flips, metadata,
+   * endings all bump it. Groups sort by THIS, so a recently-touched old session leads. A live-only row
+   * (launched this visit, no registry row yet) stamps the injected clock.
+   */
+  readonly lastActivityAt: Date;
 }
 
 /** A persisted-registry session, as the layout load delivers it (the fields the dashboard renders). */
@@ -41,6 +47,8 @@ export interface RegistrySessionRow {
   readonly origin: SessionOrigin;
   readonly parentSessionId: string | null;
   readonly createdAt: Date;
+  /** Last activity (`updated_at`) — the board's sort key (T7). */
+  readonly updatedAt: Date;
   /**
    * The persisted sealed `session.meta` blob + nonce (ux Phase 6) — decoded client-side into the meta
    * map (`seedRegistryMetas`); ciphertext blobs stay opaque until this browser holds the session key.
@@ -81,6 +89,7 @@ function rowFromRegistry(input: {
     isContinuation: session.parentSessionId !== null,
     parentSessionId: session.parentSessionId,
     createdAt: session.createdAt,
+    lastActivityAt: session.updatedAt,
   };
 }
 
@@ -120,6 +129,8 @@ function mergeLiveRow(input: {
     isContinuation: parentSessionId !== null,
     parentSessionId,
     createdAt: existing?.createdAt ?? input.now ?? new Date(),
+    // The registry's stamp survives a live overlay — frames alone must not resort the board.
+    lastActivityAt: existing?.lastActivityAt ?? input.now ?? new Date(),
   };
 }
 
@@ -208,15 +219,16 @@ function groupKey(status: SessionStatus): SessionGroupKey {
   }
 }
 
-/** Partition rows into the dashboard's three groups, newest-first within each. */
+/** Partition rows into the dashboard's three groups, most recent activity first within each (T7). */
 export function groupSessions<Row extends SessionRow>(rows: readonly Row[]): SessionGroups<Row> {
   const groups: Record<SessionGroupKey, Row[]> = { awaiting: [], active: [], recent: [] };
   for (const row of rows) groups[groupKey(row.status)].push(row);
-  const newestFirst = (a: Row, b: Row): number => b.createdAt.getTime() - a.createdAt.getTime();
+  const byActivity = (a: Row, b: Row): number =>
+    b.lastActivityAt.getTime() - a.lastActivityAt.getTime();
   return {
-    awaiting: groups.awaiting.sort(newestFirst),
-    active: groups.active.sort(newestFirst),
-    recent: groups.recent.sort(newestFirst),
+    awaiting: groups.awaiting.sort(byActivity),
+    active: groups.active.sort(byActivity),
+    recent: groups.recent.sort(byActivity),
   };
 }
 

@@ -3,7 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { initialSessionState, type SessionStatus } from './session';
 import { buildSessionRows, groupSessions, sessionCounts, type SessionRow } from './session-groups';
 
-function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
+function row(
+  id: string,
+  status: SessionStatus,
+  createdAt: string,
+  lastActivity?: string,
+): SessionRow {
   return {
     id,
     title: id,
@@ -14,6 +19,7 @@ function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
     isContinuation: false,
     parentSessionId: null,
     createdAt: new Date(createdAt),
+    lastActivityAt: new Date(lastActivity ?? createdAt),
   };
 }
 
@@ -51,6 +57,16 @@ describe('groupSessions', () => {
     expect(groups.active.map((r) => r.id)).toEqual(['new', 'mid', 'old']);
   });
 
+  it('orders by LAST ACTIVITY, not creation time (ux Phase 6 T7 — a recently-touched old session leads)', () => {
+    const groups = groupSessions([
+      // Created first but touched last — must lead its group despite the oldest createdAt.
+      row('touched', 'done', '2026-06-01T09:00:00Z', '2026-06-29T12:00:00Z'),
+      row('fresh', 'done', '2026-06-29T11:00:00Z', '2026-06-29T11:00:00Z'),
+      row('stale', 'done', '2026-06-29T10:00:00Z', '2026-06-29T10:30:00Z'),
+    ]);
+    expect(groups.recent.map((r) => r.id)).toEqual(['touched', 'fresh', 'stale']);
+  });
+
   it('returns empty buckets rather than omitting them', () => {
     expect(groupSessions([])).toEqual({ awaiting: [], active: [], recent: [] });
   });
@@ -86,6 +102,7 @@ describe('sessionCounts', () => {
 
 describe('buildSessionRows', () => {
   const NOW = new Date('2026-07-05T12:00:00Z');
+  const REG_UPDATED_AT = new Date('2026-07-05T11:00:00Z');
   const registry = [
     {
       id: 's-reg',
@@ -95,6 +112,7 @@ describe('buildSessionRows', () => {
       origin: 'launched' as const,
       parentSessionId: null,
       createdAt: new Date('2026-07-05T10:00:00Z'),
+      updatedAt: REG_UPDATED_AT,
       sealedMeta: null,
       sealedMetaNonce: null,
       sealedTitle: null,
@@ -158,7 +176,32 @@ describe('buildSessionRows', () => {
       origin: 'launched',
       isContinuation: false,
       createdAt: NOW,
+      // A live-only row has no registry updated_at yet — its activity stamp is the injected clock.
+      lastActivityAt: NOW,
     });
+  });
+
+  it('maps the registry updated_at to lastActivityAt — the board sorts by real last activity (T7)', () => {
+    const rows = buildSessionRows({
+      registry,
+      live: new Map(),
+      deviceNameOf,
+      deviceIdOf,
+      now: NOW,
+    });
+    expect(rows[0]!.lastActivityAt).toEqual(REG_UPDATED_AT);
+  });
+
+  it('a live overlay keeps the registry lastActivityAt (frames alone must not resort the board)', () => {
+    const live = new Map([['s-reg', { ...initialSessionState, status: 'running' as const }]]);
+    const rows = buildSessionRows({
+      registry,
+      live,
+      deviceNameOf,
+      deviceIdOf,
+      now: NOW,
+    });
+    expect(rows[0]!.lastActivityAt).toEqual(REG_UPDATED_AT);
   });
 
   it('marks a continuation from either the registry link or a live session.chained frame', () => {
@@ -239,6 +282,7 @@ describe('buildSessionRows variants', () => {
           origin: 'external',
           parentSessionId: null,
           createdAt: new Date('2026-07-01T00:00:00Z'),
+          updatedAt: new Date('2026-07-01T02:00:00Z'),
           sealedMeta: null,
           sealedMetaNonce: null,
           sealedTitle: null,
@@ -260,6 +304,7 @@ describe('buildSessionRows variants', () => {
         isContinuation: false,
         parentSessionId: null,
         createdAt: new Date('2026-07-01T00:00:00Z'),
+        lastActivityAt: new Date('2026-07-01T02:00:00Z'),
       },
     ]);
   });

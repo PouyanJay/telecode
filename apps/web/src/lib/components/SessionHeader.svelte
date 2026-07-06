@@ -4,7 +4,7 @@
   import SessionTitleEditor from '$lib/components/SessionTitleEditor.svelte';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionStatus } from '$lib/session';
-  import type { RenameResult } from '$lib/session-store';
+  import type { SessionActionResult } from '$lib/session-store';
 
   /**
    * The session-view header (enterprise-ui §7): a back link to the list, the session title (with inline
@@ -22,10 +22,14 @@
     showControls,
     connected,
     canReset,
+    canHousekeep = false,
+    houseBusy = false,
     onrename,
     onreset,
     oninterrupt,
     onend,
+    onarchive,
+    ondelete,
   }: {
     title: string;
     deviceName: string | null;
@@ -37,10 +41,16 @@
     connected: boolean;
     /** Whether a user rename override exists (offer "Reset to default"). */
     canReset: boolean;
-    onrename: (title: string) => Promise<RenameResult>;
-    onreset: () => Promise<RenameResult>;
+    /** Whether the session is ENDED and persisted — Archive/Delete appear only then (T7). */
+    canHousekeep?: boolean;
+    /** True while an archive is in flight — shows the pending label and blocks a double-fire. */
+    houseBusy?: boolean;
+    onrename: (title: string) => Promise<SessionActionResult>;
+    onreset: () => Promise<SessionActionResult>;
     oninterrupt: () => void;
     onend: () => void;
+    onarchive?: () => void;
+    ondelete?: () => void;
   } = $props();
 
   const display = $derived(SESSION_DISPLAY[status]);
@@ -69,6 +79,17 @@
       {#if !isTerminal}
         <Button variant="danger" size="sm" disabled={!connected} onclick={onend}>End</Button>
       {/if}
+    </div>
+  {/if}
+
+  {#if canHousekeep && onarchive && ondelete}
+    <!-- Housekeeping for an ENDED session (T7): shelve it out of the board, or remove it for good.
+         Not media-hidden like .ctrls — on a phone these ARE the reason to open a finished session. -->
+    <div class="house">
+      <Button variant="ghost" size="sm" disabled={houseBusy} onclick={onarchive}>
+        {houseBusy ? 'Archiving…' : 'Archive'}
+      </Button>
+      <Button variant="danger" size="sm" disabled={houseBusy} onclick={ondelete}>Delete</Button>
     </div>
   {/if}
 </header>
@@ -118,7 +139,8 @@
   .dev {
     color: var(--text-secondary);
   }
-  .ctrls {
+  .ctrls,
+  .house {
     display: flex;
     align-items: center;
     gap: var(--space-2);

@@ -69,6 +69,19 @@ export const sessionLaunchPayloadSchema = z.object({
 export type SessionLaunchPayload = z.infer<typeof sessionLaunchPayloadSchema>;
 
 /**
+ * Payload for `session.resume_new` (web → daemon, ux Phase 6 T8): continue a TERMINAL session as a NEW
+ * linked one. The envelope's `session_id` names the PARENT (routing + link); `prompt` seeds the child's
+ * first turn; `clientRef` rides the child's `session.started` so the acting browser can navigate to it,
+ * exactly like a launch. Sealed like `session.launch` (box-sealed to the daemon) — never under the
+ * parent's content key, which a needs_restart parent may no longer have.
+ */
+export const sessionResumeNewPayloadSchema = z.object({
+  prompt: z.string().min(1),
+  clientRef: z.string().min(1).optional(),
+});
+export type SessionResumeNewPayload = z.infer<typeof sessionResumeNewPayloadSchema>;
+
+/**
  * Payload for `session.started` (daemon → web): the session is now running. The id is on the envelope;
  * `clientRef` echoes the launch's correlation id so the launching browser can pair its request to the id.
  */

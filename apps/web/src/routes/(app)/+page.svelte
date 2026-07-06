@@ -16,17 +16,26 @@
     deviceFilterFromSearch,
     filterRowsByDevice,
   } from '$lib/device-filter';
+  import { appendSessionRows } from '$lib/housekeeping';
+  import { createSessionPager } from '$lib/session-pager.svelte';
   import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { buildInboxAsks } from '$lib/inbox';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildOnboardingSteps } from '$lib/onboarding';
   import { pairingInstructions } from '$lib/pairing-instructions';
-  import { buildSessionRows, groupSessions, sessionCounts } from '$lib/session-groups';
+  import {
+    buildSessionRows,
+    groupSessions,
+    sessionCounts,
+    type RegistrySessionRow,
+  } from '$lib/session-groups';
   import { buildThreadRows } from '$lib/threads';
   import {
     connectionState,
     decide,
     deviceChannels,
+    seedSessionMetas,
+    seedSessionTitleOverrides,
     sessionDevices,
     sessionMetas,
     sessionTitleOverrides,
@@ -36,6 +45,20 @@
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
+
+  // Ended pages past the first (T7): the layout load delivers page 1 + its cursor; the shared pager
+  // appends more. Newly fetched rows carry sealed blobs too — seed their titles like the layout does.
+  const pager = createSessionPager({
+    onPage: (rows) => {
+      seedSessionMetas(rows);
+      seedSessionTitleOverrides(rows);
+    },
+  });
+  $effect(() => pager.reset(data.sessionsCursor));
+
+  const registryRows = $derived(
+    appendSessionRows<RegistrySessionRow>(data.sessions, pager.extraRows),
+  );
 
   const paired = $derived(data.devices.length > 0);
   // The board's device scope (chips, plan B4) — URL state, so /devices deep-links it and reload
@@ -116,7 +139,7 @@
   const rows = $derived(
     buildThreadRows(
       buildSessionRows({
-        registry: data.sessions,
+        registry: registryRows,
         live: $liveSessions,
         metas: $sessionMetas,
         titleOverrides: $sessionTitleOverrides,
@@ -240,12 +263,26 @@
           </ul>
         {/if}
         {#if groups.recent.length > 0}
-          <SessionGroupHeader label="Recent" />
+          <SessionGroupHeader label="Recent" actionHref="/archived" actionLabel="Archived →" />
           <ul class="rows" role="list">
             {#each groups.recent as row (row.id)}
               <li><SessionRow {row} /></li>
             {/each}
           </ul>
+          {#if pager.cursor !== null && deviceFilter === null}
+            <!-- More ended sessions exist beyond this page (T7). Hidden while a device chip filters
+                 the board — a page fetch is unscoped and would mostly append rows the filter hides. -->
+            <div class="load-more">
+              <Button variant="ghost" size="sm" disabled={pager.loading} onclick={pager.loadMore}>
+                {pager.loading ? 'Loading…' : 'Load more'}
+              </Button>
+              {#if pager.failed}
+                <span class="load-more-error" role="status">
+                  Couldn’t load more sessions — try again.
+                </span>
+              {/if}
+            </div>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -314,6 +351,16 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+  }
+  .load-more {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-2);
+  }
+  .load-more-error {
+    font-size: var(--text-xs);
+    color: var(--danger);
   }
 
   .empty {

@@ -1,11 +1,21 @@
 <script lang="ts">
-  /** An eyebrow label + hairline rule separating the dashboard's session groups (enterprise-ui §1). */
-  let { label }: { label: string } = $props();
+  /**
+   * An eyebrow label + hairline rule separating the dashboard's session groups (enterprise-ui §1).
+   * An optional trailing link (e.g. "Archived →" on the Recent group, T7) sits after the rule.
+   */
+  let {
+    label,
+    actionHref,
+    actionLabel,
+  }: { label: string; actionHref?: string; actionLabel?: string } = $props();
 </script>
 
 <div class="group">
   <span class="eyebrow">{label}</span>
   <span class="rule" aria-hidden="true"></span>
+  {#if actionHref && actionLabel}
+    <a class="action" href={actionHref}>{actionLabel}</a>
+  {/if}
 </div>
 
 <style>
@@ -27,5 +37,28 @@
     flex: 1;
     height: 1px;
     background: var(--border);
+  }
+  .action {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    text-decoration: none;
+    white-space: nowrap;
+    border-radius: var(--radius-sm);
+    /* Pad the hit area up to target size without shifting the visual baseline. */
+    padding: var(--space-2);
+    margin: calc(-1 * var(--space-2));
+  }
+  .action:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+  .action:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--bg),
+      0 0 0 4px var(--focus-ring);
   }
 </style>

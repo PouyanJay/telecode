@@ -33,6 +33,7 @@ function row(overrides: Partial<SessionRow> & Pick<SessionRow, 'id' | 'deviceId'
     isContinuation: false,
     parentSessionId: null,
     createdAt: new Date(NOW),
+    lastActivityAt: new Date(NOW),
     ...overrides,
   };
 }

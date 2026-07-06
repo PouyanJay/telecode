@@ -151,12 +151,18 @@ importers:
       '@types/dompurify':
         specifier: ^3.2.0
         version: 3.2.0
+      '@types/pg':
+        specifier: ^8.20.0
+        version: 8.20.0
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1
+      pg:
+        specifier: ^8.22.0
+        version: 8.22.0
       svelte:
         specifier: ^5.15.0
         version: 5.56.3(@typescript-eslint/types@8.62.0)

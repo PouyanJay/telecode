@@ -947,6 +947,10 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         onSessionRenamed: (event) => {
           broadcastToBrowsers(channelKey(event.userId, event.deviceId), sessionTitleFrame(event));
         },
+        // A deleted session's cached ciphertext must never replay to a later subscriber (T7).
+        onSessionDeleted: ({ sessionId }) => {
+          ciphertextCache.delete(sessionId);
+        },
       });
     }
     // The launch picker lists the user's GitHub repos (only when a token store is configured).

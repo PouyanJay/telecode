@@ -1,5 +1,12 @@
 <script lang="ts">
-  import type { QuestionAnswerItem, SessionControlAction } from '@telecode/protocol';
+  import {
+    isSessionEndStatus,
+    type QuestionAnswerItem,
+    type SessionControlAction,
+  } from '@telecode/protocol';
+  import { ConfirmDialog } from '@telecode/ui';
+
+  import { goto } from '$app/navigation';
 
   import Composer from '$lib/components/Composer.svelte';
   import InheritedContext from '$lib/components/InheritedContext.svelte';
@@ -17,14 +24,18 @@
   import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
+  import { canResumeAsNew } from '$lib/resume-as-new';
   import {
     answer,
     answerHandover,
+    archiveSession,
     connectionState,
     decide,
+    deleteSessionForever,
     deviceChannels,
     renameSession,
     resetSessionTitle,
+    resumeAsNew,
     sendControl,
     sendUserMessage,
     sessionDevices,
@@ -110,6 +121,51 @@
   // A "Reset to default name" affordance appears only when the user has actually set an override.
   const hasTitleOverride = $derived($sessionTitleOverrides.has(sessionId));
 
+  // Housekeeping (T7): Archive/Delete appear only for an ENDED, PERSISTED session. The effective
+  // status prefers live frames but falls back to the registry row — a cold-loaded ended session whose
+  // daemon is offline has no live status, yet must still be archivable.
+  const registryRow = $derived(data.sessions.find((s) => s.id === sessionId));
+  const effectiveStatus = $derived(
+    known && session.status !== 'idle' ? session.status : registryRow?.status,
+  );
+  const canHousekeep = $derived(registryRow !== undefined && isSessionEndStatus(effectiveStatus));
+  let confirmDeleteOpen = $state(false);
+  let deleteBusy = $state(false);
+  let archiveBusy = $state(false);
+  let houseError = $state<string | null>(null);
+  // The one irreversible action's consequence copy, derived here so the markup stays scannable.
+  const deleteBody = $derived(
+    'This permanently removes the session, its encrypted history, and its titles from your ' +
+      `dashboard — on every device and browser. Files and code${device?.name ? ` on ${device.name}` : ' on your machine'} ` +
+      'are not touched.',
+  );
+
+  async function onArchive(): Promise<void> {
+    houseError = null;
+    archiveBusy = true;
+    const result = await archiveSession(sessionId);
+    archiveBusy = false;
+    if (!result.ok) {
+      houseError = result.error;
+      return;
+    }
+    // The row left the board's default list — return to the (re-loaded) board.
+    await goto('/', { invalidateAll: true });
+  }
+
+  async function onDeleteConfirm(): Promise<void> {
+    houseError = null;
+    deleteBusy = true;
+    const result = await deleteSessionForever(sessionId);
+    deleteBusy = false;
+    confirmDeleteOpen = false;
+    if (!result.ok) {
+      houseError = result.error;
+      return;
+    }
+    await goto('/', { invalidateAll: true });
+  }
+
   // A forked handover continuation links back to the adopted session it continues (Journey 4): live from
   // the daemon's session.chained, or from the persisted registry on a cold reload.
   const parentSessionId = $derived(
@@ -174,7 +230,37 @@
     }),
   );
 
+  // Resume-as-new (T8): a session that CANNOT continue in place (needs_restart any origin; ended
+  // adopted) routes its composer to a forked continuation instead of a dead-end follow-up.
+  const resumeMode = $derived(
+    effectiveStatus !== undefined &&
+      canResumeAsNew(effectiveStatus, registryRow?.origin ?? 'launched'),
+  );
+  let resuming = $state(false);
+  let resumeError = $state<string | null>(null);
+  // Standing copy for the flipped composer, derived here so the markup stays scannable.
+  const resumeNotice =
+    'This session can’t continue here. Your next message starts a new linked session ' +
+    'that picks up where it left off.';
+
+  async function submitResumeAsNew(text: string): Promise<void> {
+    resumeError = null;
+    resuming = true;
+    try {
+      const childId = await resumeAsNew(sessionId, text);
+      await goto(`/sessions/${childId}`, { invalidateAll: true });
+    } catch (err) {
+      resumeError = err instanceof Error ? err.message : 'Could not resume. Please try again.';
+    } finally {
+      resuming = false;
+    }
+  }
+
   function submitPrompt(text: string): void {
+    if (resumeMode) {
+      void submitResumeAsNew(text);
+      return;
+    }
     sendUserMessage(sessionId, text);
   }
 
@@ -233,11 +319,21 @@
     {showControls}
     {connected}
     canReset={hasTitleOverride}
+    {canHousekeep}
+    houseBusy={archiveBusy}
     onrename={(title) => renameSession(sessionId, title)}
     onreset={() => resetSessionTitle(sessionId)}
     oninterrupt={() => onControl('interrupt')}
     onend={() => onControl('end')}
+    onarchive={onArchive}
+    ondelete={() => (confirmDeleteOpen = true)}
   />
+
+  {#if houseError}
+    <div class="house-error">
+      <SessionNotice message={houseError} tone="danger" ondismiss={() => (houseError = null)} />
+    </div>
+  {/if}
 
   {#if lineage.length > 0}
     <LineageStrip segments={lineage} {entryCountOf} />
@@ -313,7 +409,7 @@
 
       {#if known}
         <div class="dock hairline-t">
-          {#if session.status === 'turn_limit'}
+          {#if session.status === 'turn_limit' && !resumeMode}
             <!-- The honest affordance for a budget-exhausted run (B5): a pause, not a death. Standing
                  (no dismiss) — it reads for as long as the state does. -->
             <SessionNotice
@@ -321,10 +417,24 @@
               message="Turn limit reached — the run stopped early. Send a message to continue it."
             />
           {/if}
+          {#if resumeMode}
+            <!-- Resume-as-new (T8): the honest affordance for a session that CANNOT continue in
+                 place. Standing (no dismiss) — it reads for as long as the state does. -->
+            <SessionNotice tone="warning" message={resumeNotice} />
+          {/if}
+          {#if resumeError}
+            <SessionNotice
+              message={resumeError}
+              tone="danger"
+              ondismiss={() => (resumeError = null)}
+            />
+          {/if}
           <Composer
-            isBusy={isBusy}
-            submitLabel="Send"
-            placeholder="Send a follow-up instruction…"
+            isBusy={isBusy || resuming}
+            submitLabel={resumeMode ? 'Resume as new' : 'Send'}
+            placeholder={resumeMode
+              ? 'Continue this work in a new session…'
+              : 'Send a follow-up instruction…'}
             onsend={submitPrompt}
           />
         </div>
@@ -341,6 +451,16 @@
     {/if}
   </div>
 </div>
+
+<ConfirmDialog
+  bind:open={confirmDeleteOpen}
+  title="Delete this session?"
+  body={deleteBody}
+  confirmLabel="Delete session"
+  confirmTone="danger"
+  busy={deleteBusy}
+  onconfirm={onDeleteConfirm}
+/>
 
 <style>
   .view {
@@ -406,6 +526,9 @@
   .dock {
     padding: var(--space-3) var(--space-4);
     padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
+  }
+  .house-error {
+    padding: var(--space-3) var(--space-4) 0;
   }
 
   /* Below the rail breakpoint the stream takes the full width; the rail is detail, not load-bearing. */

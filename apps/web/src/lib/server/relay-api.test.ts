@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   approveDevice,
+  deleteSession,
   listDevices,
   listRevokedDevices,
   listSessions,
   renameDevice,
   renameSession,
+  setSessionArchived,
 } from './relay-api';
 
 /**
@@ -222,13 +224,57 @@ describe('listSessions', () => {
   it('returns ok:false when the relay responds with an error status', async () => {
     stubFetch(() => Promise.resolve(new Response('nope', { status: 500 })));
     const result = await listSessions('tok');
-    expect(result).toEqual({ ok: false, items: [] });
+    expect(result).toEqual({ ok: false, items: [], nextCursor: null });
   });
 
   it('returns ok:false when the relay is unreachable (fetch rejects)', async () => {
     stubFetch(() => Promise.reject(new Error('network down')));
     const result = await listSessions('tok');
-    expect(result).toEqual({ ok: false, items: [] });
+    expect(result).toEqual({ ok: false, items: [], nextCursor: null });
+  });
+
+  it('passes limit/cursor/archived as query params and returns the relay cursor (T7)', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(okJson({ sessions: [], next_cursor: 'CURSOR-2' })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await listSessions('tok', { cursor: 'CURSOR-1', archived: true, limit: 25 });
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain('/me/sessions?');
+    expect(url).toContain('cursor=CURSOR-1');
+    expect(url).toContain('archived=true');
+    expect(url).toContain('limit=25');
+    expect(result.nextCursor).toBe('CURSOR-2');
+  });
+
+  it('treats a missing next_cursor as complete (old relay, deploy skew)', async () => {
+    stubFetch(() => Promise.resolve(okJson({ sessions: [] })));
+    const result = await listSessions('tok');
+    expect(result).toEqual({ ok: true, items: [], nextCursor: null });
+  });
+
+  it('maps archived_at (T7)', async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        okJson({
+          sessions: [
+            {
+              id: 's1',
+              device_id: 'd1',
+              title: null,
+              status: 'done',
+              archived_at: '2026-07-06T10:00:00.000Z',
+              created_at: '2026-07-05T09:00:00.000Z',
+              updated_at: '2026-07-05T09:30:00.000Z',
+              ended_at: '2026-07-05T09:30:00.000Z',
+            },
+          ],
+          next_cursor: null,
+        }),
+      ),
+    );
+    const result = await listSessions('tok');
+    expect(result.items[0]!.archivedAt).toEqual(new Date('2026-07-06T10:00:00.000Z'));
   });
 
   it('maps the sealed rename override fields (ux Phase 6 T6)', async () => {
@@ -315,5 +361,76 @@ describe('renameDevice (ux Phase 6 T6)', () => {
   it('reports ok:false when the relay is unreachable', async () => {
     stubFetch(() => Promise.reject(new Error('down')));
     expect(await renameDevice('tok', 'd1', 'x')).toEqual({ ok: false, notFound: false });
+  });
+});
+
+describe('setSessionArchived / deleteSession (ux Phase 6 T7)', () => {
+  it('PATCHes the archive flag and reports ok on 204', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await setSessionArchived('tok', 's1', true);
+    expect(result).toEqual({ ok: true, notFound: false, conflict: false });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('http://127.0.0.1:8080/me/sessions/s1/archive');
+    expect(init).toMatchObject({ method: 'PATCH' });
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ archived: true });
+  });
+
+  it('DELETEs the session and reports ok on 204', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await deleteSession('tok', 's1');
+    expect(result).toEqual({ ok: true, notFound: false, conflict: false });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('http://127.0.0.1:8080/me/sessions/s1');
+    expect(init).toMatchObject({ method: 'DELETE' });
+  });
+
+  it('setSessionArchived reports notFound on a 404 and conflict on a 409', async () => {
+    stubFetch(() => Promise.resolve(new Response(null, { status: 404 })));
+    expect(await setSessionArchived('tok', 's1', true)).toEqual({
+      ok: false,
+      notFound: true,
+      conflict: false,
+    });
+    stubFetch(() => Promise.resolve(new Response(null, { status: 409 })));
+    expect(await setSessionArchived('tok', 's1', true)).toEqual({
+      ok: false,
+      notFound: false,
+      conflict: true,
+    });
+  });
+
+  it('deleteSession reports notFound on a 404 and conflict on a 409', async () => {
+    stubFetch(() => Promise.resolve(new Response(null, { status: 404 })));
+    expect(await deleteSession('tok', 's1')).toEqual({
+      ok: false,
+      notFound: true,
+      conflict: false,
+    });
+    stubFetch(() => Promise.resolve(new Response(null, { status: 409 })));
+    expect(await deleteSession('tok', 's1')).toEqual({
+      ok: false,
+      notFound: false,
+      conflict: true,
+    });
+  });
+
+  it('reports ok:false when the relay is unreachable, never throws', async () => {
+    stubFetch(() => Promise.reject(new Error('down')));
+    expect(await setSessionArchived('tok', 's1', false)).toEqual({
+      ok: false,
+      notFound: false,
+      conflict: false,
+    });
+    expect(await deleteSession('tok', 's1')).toEqual({
+      ok: false,
+      notFound: false,
+      conflict: false,
+    });
   });
 });
