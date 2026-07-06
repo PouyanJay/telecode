@@ -41,6 +41,12 @@ export interface RelayDevice {
   lastSeenAt: Date | null;
   /** The device daemon's X25519 public key (base64) for E2E key exchange; null if paired pre-E2E. */
   publicKey: string | null;
+  /**
+   * Presence snapshot (ux Phase 5): whether the device's daemon was on its relay channel when this
+   * list was fetched — live `device.presence` frames take over once the WS lands. Null against a
+   * pre-snapshot relay (deploy skew): unknown, not a claim.
+   */
+  online: boolean | null;
 }
 
 /** A revoked device the user still owns — shown in the Devices page's Revoked section. */
@@ -169,6 +175,8 @@ const deviceListBodySchema = z.object({
       os: z.string().nullable(),
       last_seen_at: z.string().nullable(),
       public_key: z.string().nullable(),
+      // Optional: a pre-snapshot relay (deploy skew) omits it — presence then reads unknown.
+      online: z.boolean().optional(),
     }),
   ),
 });
@@ -184,6 +192,7 @@ export async function listDevices(sessionToken: string): Promise<RelayListResult
       os: device.os,
       lastSeenAt: device.last_seen_at ? new Date(device.last_seen_at) : null,
       publicKey: device.public_key,
+      online: device.online ?? null,
     }));
   });
 }

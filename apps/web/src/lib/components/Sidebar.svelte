@@ -3,30 +3,28 @@
   import { page } from '$app/stores';
   import { BrandLogo, Button, Pill } from '@telecode/ui';
 
-  import { deviceStatus } from '$lib/devices';
+  import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { isActive } from '$lib/nav';
   import type { RelayDevice } from '$lib/server/relay-api';
-  import type { ConnectionState } from '$lib/session-store';
+  import type { DeviceChannelState } from '$lib/session-store';
 
   /**
    * The persistent left rail (enterprise-ui §2): brand, the primary "Launch session" action, route-aware
    * navigation with the 2px amber active indicator, the paired-device list, and the account footer. Real
-   * `<a href>` links so Cmd/middle-click and Back work. The device rows truncate long names with a
-   * tooltip + show honest presence (the long-name defect this redesign fixes).
+   * `<a href>` links so Cmd/middle-click and Back work. Each device row shows ITS OWN honest presence
+   * (its channel's live signal, seeded by the REST snapshot — ux Phase 5).
    */
   let {
     user,
     devices,
-    connection,
-    daemonOnline,
+    channels,
     sessionTotal,
     onlaunch,
   }: {
     user: { displayName?: string | null; email?: string | null } | null;
     devices: RelayDevice[];
-    connection: ConnectionState;
-    /** Whether the watched device's daemon is on the channel (null = no presence frame yet). */
-    daemonOnline: boolean | null;
+    /** Per-device channel state from the pool (`deviceChannels`), keyed by device id. */
+    channels: ReadonlyMap<string, DeviceChannelState>;
     sessionTotal: number;
     onlaunch: () => void;
   } = $props();
@@ -84,12 +82,13 @@
   <div class="foot">
     {#if devices.length > 0}
       <ul class="devices" aria-label="Paired devices">
-        {#each devices as device, i (device.id)}
+        {#each devices as device (device.id)}
+          {@const channel = deviceChannelOf(channels, device.id)}
           {@const status = deviceStatus({
             lastSeenAt: device.lastSeenAt,
-            isWatched: i === 0,
-            connection,
-            daemonOnline,
+            connection: channel.connection,
+            daemonOnline: channel.daemonOnline,
+            restOnline: device.online,
           })}
           <li class="device">
             <span class="device-dot" data-tone={status.tone} aria-hidden="true"></span>

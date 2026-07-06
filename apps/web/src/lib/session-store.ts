@@ -110,23 +110,6 @@ export const connectionState: Readable<ConnectionState> = derived(deviceChannelM
   return sawConnecting ? 'connecting' : sawError ? 'error' : 'idle';
 });
 
-/**
- * Whether ANY paired device's daemon is online — a bridge kept only for surfaces not yet
- * per-device (T2 replaces every consumer with {@link deviceChannels}). Null = no presence frame
- * from any channel yet.
- */
-export const watchedDaemonOnline: Readable<boolean | null> = derived(
-  deviceChannelMap,
-  (channels) => {
-    let sawKnown = false;
-    for (const channel of channels.values()) {
-      if (channel.daemonOnline === true) return true;
-      if (channel.daemonOnline !== null) sawKnown = true;
-    }
-    return sawKnown ? false : null;
-  },
-);
-
 /** The daemon's current adoption policy for the Settings UI; null until first received (Journey 3). */
 export const adoptState: Readable<AdoptStatePayload | null> = {
   subscribe: adoptStateStore.subscribe,

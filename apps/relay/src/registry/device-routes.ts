@@ -32,6 +32,12 @@ export interface DeviceRouteOptions {
   readonly onSessionsEnded?: (event: SessionsEndedEvent) => void;
   /** Devices with a live verified restore request — the "awaiting re-authorization" flag per row. */
   readonly pendingRestoreDeviceIds?: () => readonly string[];
+  /**
+   * Whether a device's daemon is on its relay channel right now (the in-memory presence truth).
+   * Feeds the `online` snapshot in `GET /me/devices`, so a cold page load renders honest presence
+   * before its WebSocket lands (ux Phase 5). Absent → every device reports offline.
+   */
+  readonly isDeviceOnline?: (userId: string, deviceId: string) => boolean;
 }
 
 export function registerDeviceRoutes(
@@ -74,6 +80,8 @@ export function registerDeviceRoutes(
         os: device.os,
         last_seen_at: device.lastSeenAt?.toISOString() ?? null,
         public_key: device.publicKey,
+        // Live presence snapshot (ux Phase 5): whether this device's daemon is on its channel NOW.
+        online: options.isDeviceOnline?.(userId, device.id) ?? false,
       })),
     });
   });

@@ -5,9 +5,9 @@
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import { deviceConsequences, revokeConsequenceText } from '$lib/device-consequences';
-  import { deviceStatus } from '$lib/devices';
+  import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { pairingInstructions } from '$lib/pairing-instructions';
-  import { connectionState, sessions as liveSessions, watchedDaemonOnline } from '$lib/session-store';
+  import { deviceChannels, sessions as liveSessions } from '$lib/session-store';
   import type { SessionStatus } from '$lib/session';
   import type { ActionData, PageData } from './$types';
 
@@ -75,12 +75,13 @@
       {#if data.devices.length > 0}
         <Panel title="Paired devices" meta="{data.devices.length} total">
           <ul class="devices" role="list">
-            {#each data.devices as device, i (device.id)}
+            {#each data.devices as device (device.id)}
+              {@const channel = deviceChannelOf($deviceChannels, device.id)}
               {@const status = deviceStatus({
                 lastSeenAt: device.lastSeenAt,
-                isWatched: i === 0,
-                connection: $connectionState,
-                daemonOnline: $watchedDaemonOnline,
+                connection: channel.connection,
+                daemonOnline: channel.daemonOnline,
+                restOnline: device.online,
               })}
               <li class="row hairline-b">
                 <span class="dot" data-tone={status.tone} aria-hidden="true"></span>

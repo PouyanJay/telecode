@@ -17,10 +17,10 @@
   import { buildThreadRows } from '$lib/threads';
   import {
     connectionState,
+    deviceChannels,
     ensureConnections,
     seedSessionDevices,
     sessions as liveSessions,
-    watchedDaemonOnline,
   } from '$lib/session-store';
   import {
     DEFAULT_SIDEBAR_WIDTH,
@@ -105,8 +105,7 @@
   <Sidebar
     user={data.user}
     devices={data.devices}
-    connection={$connectionState}
-    daemonOnline={$watchedDaemonOnline}
+    channels={$deviceChannels}
     {sessionTotal}
     onlaunch={openLaunchDrawer}
   />

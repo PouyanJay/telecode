@@ -1,26 +1,29 @@
 import type { Tone } from './session-display';
-import type { ConnectionState } from './session-store';
+import type { ConnectionState, DeviceChannelState } from './session-store';
 import { relativeTime } from './time';
 
 /**
- * Honest presence for a paired device, the single source for the sidebar device list and the Devices
- * page. We only hold a live channel to the *watched* device, so only it can be truly "online" — and only
- * when the DAEMON is present on that channel (`daemonOnline`, from the relay's `device.presence`), not
- * merely because the browser's own socket is up: a dead daemon must never read "online". Any other
- * paired device has no live signal, so we report it offline with its last-seen time rather than guess.
- * Pure (clock injected) so it unit-tests without a connection.
+ * Honest presence for a paired device, the single source for the sidebar device list, the Devices
+ * page, and the dashboard's online tally. Every device has its OWN channel (ux Phase 5), so the
+ * inputs are that device's channel state plus the REST `online` snapshot the page loaded with.
+ * Truth priority: a LIVE claim needs a healthy authenticated channel (daemon presence frames);
+ * without one, the relay's page-load snapshot speaks; with neither, we say connecting/offline —
+ * never a guess. Pure (clock injected) so it unit-tests without a connection.
  */
 export interface DeviceStatusInput {
   readonly lastSeenAt: Date | null;
-  /** The device whose channel this browser is watching (the relay multiplexes one at a time). */
-  readonly isWatched: boolean;
+  /** THIS device's channel state (`idle` when not pooled yet — e.g. the SSR pre-effect window). */
   readonly connection: ConnectionState;
   /**
-   * Whether the daemon is present on the watched channel: the relay's `device.presence` signal (every
-   * connecting browser receives a snapshot). `null` while the snapshot hasn't arrived yet — unknown, not
-   * a claim either way.
+   * Whether the daemon is present on this device's channel: the relay's `device.presence` signal.
+   * `null` while no frame has arrived yet — unknown, not a claim either way.
    */
   readonly daemonOnline: boolean | null;
+  /**
+   * The relay's `GET /me/devices` snapshot: whether the daemon was on its channel at page load.
+   * Older than any live frame (so live wins), `null` against a pre-snapshot relay (deploy skew).
+   */
+  readonly restOnline: boolean | null;
 }
 
 export interface DeviceStatus {
@@ -32,20 +35,46 @@ export interface DeviceStatus {
   readonly lastSeen: string;
 }
 
+const ONLINE: Omit<DeviceStatus, 'lastSeen'> = { tone: 'success', label: 'ONLINE', online: true };
+const OFFLINE: Omit<DeviceStatus, 'lastSeen'> = { tone: 'muted', label: 'OFFLINE', online: false };
+const CONNECTING: Omit<DeviceStatus, 'lastSeen'> = {
+  tone: 'warning',
+  label: 'CONNECTING…',
+  online: false,
+};
+
 export function deviceStatus(input: DeviceStatusInput, now: number = Date.now()): DeviceStatus {
   const lastSeen = input.lastSeenAt ? relativeTime(input.lastSeenAt, now) : 'never';
+  const withSeen = (base: Omit<DeviceStatus, 'lastSeen'>): DeviceStatus => ({
+    ...base,
+    lastSeen: base.online ? 'now' : lastSeen,
+  });
 
-  if (input.isWatched && input.connection === 'connected' && input.daemonOnline === true) {
-    return { tone: 'success', label: 'ONLINE', online: true, lastSeen: 'now' };
+  // A LIVE presence claim is only valid on a healthy authenticated channel — a frame that predates
+  // a dropped socket is not a live claim anymore.
+  if (input.connection === 'connected' && input.daemonOnline !== null) {
+    return withSeen(input.daemonOnline ? ONLINE : OFFLINE);
   }
-  if (
-    input.isWatched &&
-    (input.connection === 'connecting' ||
-      // Channel up but the presence snapshot hasn't landed yet: unknown, so still "connecting" — never
-      // an online claim the daemon hasn't made.
-      (input.connection === 'connected' && input.daemonOnline === null))
-  ) {
-    return { tone: 'warning', label: 'CONNECTING…', online: false, lastSeen };
+  // A failing channel: we can verify nothing right now; claim the conservative state.
+  if (input.connection === 'error') {
+    return withSeen(OFFLINE);
   }
-  return { tone: 'muted', label: 'OFFLINE', online: false, lastSeen };
+  // No live signal (yet): the page-load snapshot is the best remaining truth — this is what lets a
+  // cold load render who is online before any WebSocket lands.
+  if (input.restOnline !== null) {
+    return withSeen(input.restOnline ? ONLINE : OFFLINE);
+  }
+  // Nothing known at all (pre-snapshot relay): while a channel is coming up, say so; else offline.
+  if (input.connection === 'connecting' || input.connection === 'connected') {
+    return withSeen(CONNECTING);
+  }
+  return withSeen(OFFLINE);
+}
+
+/** A device's channel state out of the pool map — the idle default when it is not pooled yet. */
+export function deviceChannelOf(
+  channels: ReadonlyMap<string, DeviceChannelState>,
+  deviceId: string,
+): DeviceChannelState {
+  return channels.get(deviceId) ?? { connection: 'idle', daemonOnline: null };
 }

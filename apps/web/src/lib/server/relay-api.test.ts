@@ -43,6 +43,30 @@ describe('listDevices', () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0]).toMatchObject({ id: 'd1', name: 'mbp', os: 'macOS 15.4' });
     expect(result.items[0]!.lastSeenAt).toEqual(new Date('2026-07-05T10:00:00.000Z'));
+    // A pre-snapshot relay omits `online` → unknown (null), never a false offline claim.
+    expect(result.items[0]!.online).toBeNull();
+  });
+
+  it('maps the presence snapshot when the relay provides it (ux Phase 5)', async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        okJson({
+          devices: [
+            { id: 'd1', name: 'mbp', os: null, last_seen_at: null, public_key: null, online: true },
+            {
+              id: 'd2',
+              name: 'mini',
+              os: null,
+              last_seen_at: null,
+              public_key: null,
+              online: false,
+            },
+          ],
+        }),
+      ),
+    );
+    const result = await listDevices('tok');
+    expect(result.items.map((d) => d.online)).toEqual([true, false]);
   });
 
   it('returns ok:true with no items when the user genuinely has no devices', async () => {

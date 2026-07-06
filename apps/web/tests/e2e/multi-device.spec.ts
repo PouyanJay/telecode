@@ -67,6 +67,24 @@ async function signIn(page: Page): Promise<void> {
   await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
 }
 
+test('both devices show honest per-device presence (REST snapshot + live channels)', async ({
+  page,
+}) => {
+  await signIn(page);
+
+  // Every paired device row reports ITS OWN presence — before this phase only devices[0] could
+  // ever read online, whatever the rest of the fleet was doing.
+  const deviceList = page.getByRole('list', { name: 'Paired devices' });
+  await expect(deviceList.getByRole('listitem').filter({ hasText: 'e2e-mac' })).toContainText(
+    'online',
+    { timeout: 10_000 },
+  );
+  await expect(deviceList.getByRole('listitem').filter({ hasText: 'e2e-mini' })).toContainText(
+    'online',
+    { timeout: 10_000 },
+  );
+});
+
 test('an approval raised on a second device arrives and resolves through its own channel', async ({
   page,
 }) => {

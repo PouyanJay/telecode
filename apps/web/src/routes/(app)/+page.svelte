@@ -7,7 +7,7 @@
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import SessionGroupHeader from '$lib/components/SessionGroupHeader.svelte';
   import SessionRow from '$lib/components/SessionRow.svelte';
-  import { deviceStatus } from '$lib/devices';
+  import { deviceChannelOf, deviceStatus } from '$lib/devices';
   import { buildInboxAsks } from '$lib/inbox';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildOnboardingSteps } from '$lib/onboarding';
@@ -17,9 +17,9 @@
   import {
     connectionState,
     decide,
+    deviceChannels,
     sessions as liveSessions,
     subscribe,
-    watchedDaemonOnline,
   } from '$lib/session-store';
   import type { PageData } from './$types';
 
@@ -91,15 +91,15 @@
   const groups = $derived(groupSessions(rows));
   const counts = $derived(sessionCounts(rows));
   const devicesOnline = $derived(
-    data.devices.filter(
-      (d, i) =>
-        deviceStatus({
-          lastSeenAt: d.lastSeenAt,
-          isWatched: i === 0,
-          connection: $connectionState,
-          daemonOnline: $watchedDaemonOnline,
-        }).online,
-    ).length,
+    data.devices.filter((d) => {
+      const channel = deviceChannelOf($deviceChannels, d.id);
+      return deviceStatus({
+        lastSeenAt: d.lastSeenAt,
+        connection: channel.connection,
+        daemonOnline: channel.daemonOnline,
+        restOnline: d.online,
+      }).online;
+    }).length,
   );
 
   // First-run path (T14): pair → launch, shown when no device is paired yet.
