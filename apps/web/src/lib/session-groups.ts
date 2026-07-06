@@ -48,6 +48,13 @@ export interface RegistrySessionRow {
    */
   readonly sealedMeta: string | null;
   readonly sealedMetaNonce: string | null;
+  /**
+   * The persisted sealed rename override blob + nonce (ux Phase 6 T6) — decoded client-side into the
+   * title-override map (`seedRegistryTitles`), which beats `sealedMeta`'s title on display. Both null
+   * until a rename (and after a reset), or against a pre-T6 relay.
+   */
+  readonly sealedTitle: string | null;
+  readonly sealedTitleNonce: string | null;
 }
 
 function firstPrompt(entries: SessionState['entries']): string | undefined {
@@ -55,18 +62,21 @@ function firstPrompt(entries: SessionState['entries']): string | undefined {
 }
 
 /** A persisted registry row as a dashboard row (live overlay happens in {@link mergeLiveRow}). */
-function rowFromRegistry(
-  session: RegistrySessionRow,
-  deviceNameOf: (deviceId: string) => string | null,
-  meta: SessionMetaPayload | undefined,
-): SessionRow {
+function rowFromRegistry(input: {
+  readonly session: RegistrySessionRow;
+  readonly deviceNameOf: (deviceId: string) => string | null;
+  readonly meta: SessionMetaPayload | undefined;
+  readonly titleOverride: string | undefined;
+}): SessionRow {
+  const { session, meta, titleOverride } = input;
   return {
     id: session.id,
-    // Decrypted metadata beats the registry's legacy cleartext title (sealed is the fresher source).
-    title: meta?.title ?? session.title,
+    // Precedence: the user's rename override (ux Phase 6 T6) beats decrypted metadata, which beats the
+    // registry's legacy cleartext title (each is a fresher source than the next).
+    title: titleOverride ?? meta?.title ?? session.title,
     status: session.status,
     deviceId: session.deviceId,
-    deviceName: deviceNameOf(session.deviceId),
+    deviceName: input.deviceNameOf(session.deviceId),
     origin: session.origin,
     isContinuation: session.parentSessionId !== null,
     parentSessionId: session.parentSessionId,
@@ -80,6 +90,7 @@ function mergeLiveRow(input: {
   readonly state: SessionState;
   readonly existing: SessionRow | undefined;
   readonly meta: SessionMetaPayload | undefined;
+  readonly titleOverride: string | undefined;
   readonly deviceNameOf: (deviceId: string) => string | null;
   readonly deviceIdOf: (sessionId: string) => string | null;
   readonly now: Date | undefined;
@@ -87,8 +98,14 @@ function mergeLiveRow(input: {
   const { id, state, existing } = input;
   // A live state that is still `idle` carries no frames yet — keep what the registry says.
   const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
-  // Title precedence: decrypted metadata → registry/legacy title → the first prompt seen this visit.
-  const title = input.meta?.title ?? existing?.title ?? firstPrompt(state.entries) ?? null;
+  // Title precedence: user rename override (T6) → decrypted metadata → registry/legacy title → the first
+  // prompt seen this visit.
+  const title =
+    input.titleOverride ??
+    input.meta?.title ??
+    existing?.title ??
+    firstPrompt(state.entries) ??
+    null;
   // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
   const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
   const deviceId = existing?.deviceId ?? input.deviceIdOf(id);
@@ -118,6 +135,8 @@ export function buildSessionRows(input: {
   readonly live: ReadonlyMap<string, SessionState>;
   /** Decrypted session metadata (ux Phase 6) — its title beats the registry's and the first prompt. */
   readonly metas?: ReadonlyMap<string, SessionMetaPayload>;
+  /** User rename overrides (ux Phase 6 T6) — the highest-precedence title source (override-wins). */
+  readonly titleOverrides?: ReadonlyMap<string, string>;
   readonly deviceNameOf: (deviceId: string) => string | null;
   /** The live routing map: which device a not-yet-persisted session's frames arrived on. */
   readonly deviceIdOf: (sessionId: string) => string | null;
@@ -128,7 +147,12 @@ export function buildSessionRows(input: {
   for (const session of input.registry) {
     byId.set(
       session.id,
-      rowFromRegistry(session, input.deviceNameOf, input.metas?.get(session.id)),
+      rowFromRegistry({
+        session,
+        deviceNameOf: input.deviceNameOf,
+        meta: input.metas?.get(session.id),
+        titleOverride: input.titleOverrides?.get(session.id),
+      }),
     );
   }
   for (const [id, state] of input.live) {
@@ -139,6 +163,7 @@ export function buildSessionRows(input: {
         state,
         existing: byId.get(id),
         meta: input.metas?.get(id),
+        titleOverride: input.titleOverrides?.get(id),
         deviceNameOf: input.deviceNameOf,
         deviceIdOf: input.deviceIdOf,
         now: input.now,

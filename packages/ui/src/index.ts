@@ -7,6 +7,7 @@ export { Button } from './Button';
 export { ConfirmDialog } from './ConfirmDialog';
 export { Drawer } from './Drawer';
 export { IconButton } from './IconButton';
+export { Input } from './Input';
 export { Panel } from './Panel';
 export { Pill, type PillTone } from './Pill';
 export { Spinner } from './Spinner';

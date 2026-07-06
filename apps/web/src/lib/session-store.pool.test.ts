@@ -73,6 +73,7 @@ function makeFakePool() {
       answer: () => undefined,
       answerHandover: () => undefined,
       control: () => undefined,
+      sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
       sendAdoptConfig: (set) => conn.adoptConfigs.push(set),
       close: () => {
         conn.closed = true;

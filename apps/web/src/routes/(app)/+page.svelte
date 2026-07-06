@@ -29,6 +29,7 @@
     deviceChannels,
     sessionDevices,
     sessionMetas,
+    sessionTitleOverrides,
     sessions as liveSessions,
     subscribe,
   } from '$lib/session-store';
@@ -118,6 +119,7 @@
         registry: data.sessions,
         live: $liveSessions,
         metas: $sessionMetas,
+        titleOverrides: $sessionTitleOverrides,
         deviceNameOf: (deviceId) => data.devices.find((d) => d.id === deviceId)?.name ?? null,
         deviceIdOf: (sessionId) => $sessionDevices.get(sessionId) ?? null,
       }),

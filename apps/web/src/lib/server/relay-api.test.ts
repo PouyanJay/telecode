@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { approveDevice, listDevices, listRevokedDevices, listSessions } from './relay-api';
+import {
+  approveDevice,
+  listDevices,
+  listRevokedDevices,
+  listSessions,
+  renameDevice,
+  renameSession,
+} from './relay-api';
 
 /**
  * Error ≠ empty (honesty pass T4): a relay outage must be distinguishable from "you have no devices /
@@ -222,5 +229,91 @@ describe('listSessions', () => {
     stubFetch(() => Promise.reject(new Error('network down')));
     const result = await listSessions('tok');
     expect(result).toEqual({ ok: false, items: [] });
+  });
+
+  it('maps the sealed rename override fields (ux Phase 6 T6)', async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        okJson({
+          sessions: [
+            {
+              id: 's1',
+              device_id: 'd1',
+              title: null,
+              status: 'running',
+              sealed_title: 'CIPHER',
+              sealed_title_nonce: 'NONCE',
+              created_at: '2026-07-05T09:00:00.000Z',
+              updated_at: '2026-07-05T09:30:00.000Z',
+              ended_at: null,
+            },
+          ],
+        }),
+      ),
+    );
+    const result = await listSessions('tok');
+    expect(result.items[0]).toMatchObject({ sealedTitle: 'CIPHER', sealedTitleNonce: 'NONCE' });
+  });
+});
+
+describe('renameSession (ux Phase 6 T6)', () => {
+  it('PATCHes the sealed blob to the relay and reports ok on 204', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await renameSession('tok', 's1', {
+      sealed_title: 'CIPHER',
+      sealed_title_nonce: 'NONCE',
+    });
+    expect(result).toEqual({ ok: true, notFound: false });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('http://127.0.0.1:8080/me/sessions/s1');
+    expect(init).toMatchObject({ method: 'PATCH' });
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      sealed_title: 'CIPHER',
+      sealed_title_nonce: 'NONCE',
+    });
+  });
+
+  it('reports notFound on a 404', async () => {
+    stubFetch(() => Promise.resolve(new Response(null, { status: 404 })));
+    expect(await renameSession('tok', 's1', { sealed_title: null })).toEqual({
+      ok: false,
+      notFound: true,
+    });
+  });
+
+  it('reports ok:false when the relay is unreachable', async () => {
+    stubFetch(() => Promise.reject(new Error('down')));
+    expect(await renameSession('tok', 's1', { sealed_title: null })).toEqual({
+      ok: false,
+      notFound: false,
+    });
+  });
+});
+
+describe('renameDevice (ux Phase 6 T6)', () => {
+  it('PATCHes the cleartext name and reports ok on 204', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await renameDevice('tok', 'd1', 'Work MacBook');
+    expect(result).toEqual({ ok: true, notFound: false });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('http://127.0.0.1:8080/me/devices/d1');
+    expect(init).toMatchObject({ method: 'PATCH' });
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ name: 'Work MacBook' });
+  });
+
+  it('reports notFound on a 404', async () => {
+    stubFetch(() => Promise.resolve(new Response(null, { status: 404 })));
+    expect(await renameDevice('tok', 'd1', 'x')).toEqual({ ok: false, notFound: true });
+  });
+
+  it('reports ok:false when the relay is unreachable', async () => {
+    stubFetch(() => Promise.reject(new Error('down')));
+    expect(await renameDevice('tok', 'd1', 'x')).toEqual({ ok: false, notFound: false });
   });
 });

@@ -10,6 +10,7 @@ import {
   type QuestionAnswerPayload,
   type SessionControlAction,
   type SessionLaunchPayload,
+  type SessionRenameBody,
 } from '@telecode/protocol';
 import { derived, get, writable, type Readable } from 'svelte/store';
 
@@ -34,6 +35,13 @@ import {
   type SealedMetaDecryptor,
   type SessionMetaMap,
 } from './session-meta';
+import {
+  applyTitleFrame,
+  overlayMissingTitles,
+  seedRegistryTitles,
+  seedRegistryTitlesAsync,
+  type SessionTitleMap,
+} from './session-title';
 import type { SessionMetaPayload } from '@telecode/protocol';
 import type { RegistrySessionRow } from './session-groups';
 import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
@@ -94,6 +102,10 @@ const adoptStatesMap = writable<ReadonlyMap<string, AdoptStatePayload>>(new Map(
 // Decrypted session metadata (ux Phase 6), keyed by session id: live `session.meta` frames merged
 // over the registry's persisted blobs (seeded on load). Titles here beat every other title source.
 const sessionMetaMap = writable<SessionMetaMap>(new Map());
+// The user's rename overrides (ux Phase 6 T6), keyed by session id: live `session.title` frames over
+// the registry's persisted `sealed_title` blobs. Kept SEPARATE from the meta map so the override always
+// wins on display — a later derived title from the daemon can never clobber a rename.
+const sessionTitleOverrideMap = writable<SessionTitleMap>(new Map());
 
 const connections = new Map<string, RelayConnection>();
 // Launches awaiting their relay-minted id, matched by the `clientRef` the daemon echoes on
@@ -113,6 +125,10 @@ export const sessionDevices: Readable<ReadonlyMap<string, string>> = {
 };
 /** Decrypted session metadata (ux Phase 6) for titles and session-view context. */
 export const sessionMetas: Readable<SessionMetaMap> = { subscribe: sessionMetaMap.subscribe };
+/** The user's rename overrides (ux Phase 6 T6) — the highest-precedence title source (override-wins). */
+export const sessionTitleOverrides: Readable<SessionTitleMap> = {
+  subscribe: sessionTitleOverrideMap.subscribe,
+};
 
 /**
  * The aggregate browser↔relay link state for the system bar. Every pooled socket dials the same
@@ -200,6 +216,11 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
   if (envelope.type === 'session.meta') {
     // Identity metadata, not transcript: it feeds the meta map (titles), never the session state.
     sessionMetaMap.update((map) => applyMetaFrame(map, envelope));
+    return;
+  }
+  if (envelope.type === 'session.title') {
+    // The user's rename override (ux Phase 6 T6): its own map, kept apart from meta so it wins on display.
+    sessionTitleOverrideMap.update((map) => applyTitleFrame(map, envelope));
     return;
   }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
@@ -449,6 +470,30 @@ export function seedSessionMetas(
   );
 }
 
+/**
+ * Seed the rename overrides from the registry's persisted `sealed_title` blobs (ux Phase 6 T6) — the exact
+ * mirror of {@link seedSessionMetas} for the separate override map, so a rename survives a reload (cleartext
+ * synchronously; a ciphertext blob decrypted with this browser's persisted per-session content key). Live
+ * `session.title` frames always win. Called alongside `seedSessionMetas` on cold load.
+ */
+export function seedSessionTitleOverrides(
+  rows: readonly RegistrySessionRow[],
+  store: ContentKeyStore | null = defaultContentKeyStore(),
+): void {
+  sessionTitleOverrideMap.update((map) => seedRegistryTitles(map, rows));
+  if (
+    !store ||
+    !rows.some((row) => row.sealedTitle !== null && (row.sealedTitleNonce ?? '') !== '')
+  ) {
+    return;
+  }
+  const decrypt: SealedMetaDecryptor = (sessionId, payload, nonce) =>
+    openSealedWithStoredKey(store, sessionId, payload, nonce);
+  void seedRegistryTitlesAsync(get(sessionTitleOverrideMap), rows, decrypt).then((decrypted) =>
+    sessionTitleOverrideMap.update((live) => overlayMissingTitles(live, decrypted)),
+  );
+}
+
 /** Add only the decrypted metas whose ids the live map doesn't already hold (a live frame wins). */
 export function overlayMissingMetas(
   live: SessionMetaMap,
@@ -626,6 +671,68 @@ export function sendControl(sessionId: string, action: SessionControlAction): vo
   connectionFor(sessionId)?.control(sessionId, action);
 }
 
+/** The outcome of a rename (ux Phase 6 T6): success, or a human-readable reason the UI surfaces inline. */
+export type RenameResult = { ok: true } | { ok: false; error: string };
+
+/** PATCH the rename BFF (which forwards to the relay with the httpOnly token). Ok on 204. */
+async function patchSessionTitle(sessionId: string, body: SessionRenameBody): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rename a session (ux Phase 6 T6): seal the title under the session content key (so the relay never reads
+ * it), PATCH it, and reflect it immediately in the override map for the actor — the relay also broadcasts
+ * `session.title` to every other tab. Only E2E sessions can be renamed (the sealed blob must be real
+ * ciphertext); a cleartext session reports that honestly instead of sending a fake one.
+ */
+export async function renameSession(sessionId: string, title: string): Promise<RenameResult> {
+  const conn = connectionFor(sessionId);
+  if (!conn) return { ok: false, error: 'Not connected to this session’s device.' };
+  // Sealing is WebCrypto (can reject); keep it inside the Result contract so the caller never has to catch
+  // — an unhandled rejection here would strand the editor's Save button spinning forever.
+  let sealed: { payload: string; nonce: string } | null;
+  try {
+    sealed = await conn.sealTitle(sessionId, title);
+  } catch {
+    return { ok: false, error: 'Could not encrypt the new name. Please try again.' };
+  }
+  if (!sealed) {
+    return {
+      ok: false,
+      error: 'Renaming needs an active encrypted session — reopen it and try again.',
+    };
+  }
+  const ok = await patchSessionTitle(sessionId, {
+    sealed_title: sealed.payload,
+    sealed_title_nonce: sealed.nonce,
+  });
+  if (!ok) return { ok: false, error: 'Could not save the new name. Please try again.' };
+  sessionTitleOverrideMap.update((map) => new Map(map).set(sessionId, title));
+  return { ok: true };
+}
+
+/** Reset a session's title to the derived default (ux Phase 6 T6): clear the override on the relay + here. */
+export async function resetSessionTitle(sessionId: string): Promise<RenameResult> {
+  const ok = await patchSessionTitle(sessionId, { sealed_title: null });
+  if (!ok) return { ok: false, error: 'Could not reset the name. Please try again.' };
+  sessionTitleOverrideMap.update((map) => {
+    if (!map.has(sessionId)) return map;
+    const next = new Map(map);
+    next.delete(sessionId);
+    return next;
+  });
+  return { ok: true };
+}
+
 /** Ask ONE device's daemon for its adoption policy (Journey 3); the reply lands on {@link adoptStates}. */
 export function requestAdoptConfig(deviceId: string): void {
   connections.get(deviceId)?.sendAdoptConfig();
@@ -650,4 +757,5 @@ export function disconnect(): void {
   sessionMap.set(new Map());
   adoptStatesMap.set(new Map());
   sessionMetaMap.set(new Map());
+  sessionTitleOverrideMap.set(new Map());
 }

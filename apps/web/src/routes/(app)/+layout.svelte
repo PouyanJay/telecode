@@ -21,8 +21,10 @@
     ensureConnections,
     seedSessionDevices,
     seedSessionMetas,
+    seedSessionTitleOverrides,
     sessionDevices,
     sessionMetas,
+    sessionTitleOverrides,
     sessions as liveSessions,
   } from '$lib/session-store';
   import {
@@ -52,6 +54,7 @@
         registry: data.sessions,
         live: $liveSessions,
         metas: $sessionMetas,
+        titleOverrides: $sessionTitleOverrides,
         deviceNameOf: () => null,
         deviceIdOf: (sessionId) => $sessionDevices.get(sessionId) ?? null,
       }),
@@ -76,6 +79,7 @@
     if (browser) {
       seedSessionDevices(data.sessions);
       seedSessionMetas(data.sessions);
+      seedSessionTitleOverrides(data.sessions);
       ensureConnections({
         relayUrl: RELAY_URL,
         userId: data.user?.id ?? '',

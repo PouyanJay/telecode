@@ -9,6 +9,7 @@ import {
 } from './session-meta';
 import { buildSessionRows, type RegistrySessionRow } from './session-groups';
 import { initialSessionState, type SessionState } from './session';
+import { buildRegistryRow as buildRow } from './test-support/registry-row';
 
 /**
  * Sealed session metadata, web leg (session-identity T1). Live `session.meta` frames (decrypted upstream
@@ -16,21 +17,6 @@ import { initialSessionState, type SessionState } from './session';
  * prefers a meta title over the registry's legacy cleartext title over the first-prompt fallback.
  */
 const EMPTY: SessionMetaMap = new Map();
-
-/** A registry row with sensible defaults — shared across the cold-load seed suites. */
-function buildRow(over: Partial<RegistrySessionRow> & { id: string }): RegistrySessionRow {
-  return {
-    title: null,
-    status: 'done',
-    deviceId: 'd1',
-    origin: 'launched',
-    parentSessionId: null,
-    createdAt: new Date('2026-07-01T10:00:00Z'),
-    sealedMeta: null,
-    sealedMetaNonce: null,
-    ...over,
-  };
-}
 
 function metaEnvelope(sessionId: string, payload: unknown) {
   return makeEnvelope({
@@ -168,6 +154,8 @@ describe('buildSessionRows title precedence with metas', () => {
     createdAt: new Date('2026-07-01T10:00:00Z'),
     sealedMeta: null,
     sealedMetaNonce: null,
+    sealedTitle: null,
+    sealedTitleNonce: null,
   };
   const liveState: SessionState = {
     ...initialSessionState,
@@ -188,6 +176,34 @@ describe('buildSessionRows title precedence with metas', () => {
       deviceIdOf: noDevice,
     });
     expect(rows[0]?.title).toBe('meta title');
+  });
+
+  it('lets the user rename override beat the meta title in BOTH merge paths (ux Phase 6 T6)', () => {
+    // The override is the whole point of T6: a later derived meta title must never clobber a rename.
+    const metas = applyMetaFrame(EMPTY, metaEnvelope('s1', { title: 'derived by the daemon' }));
+    const titleOverrides = new Map([['s1', 'My renamed session']]);
+
+    // Registry-row path (rowFromRegistry): the persisted row exists, no live state.
+    const registryPath = buildSessionRows({
+      registry: [registryRow],
+      live: new Map(),
+      metas,
+      titleOverrides,
+      deviceNameOf: noDevice,
+      deviceIdOf: noDevice,
+    });
+    expect(registryPath[0]?.title).toBe('My renamed session');
+
+    // Live-merge path (mergeLiveRow): the same session also has a live state this visit.
+    const livePath = buildSessionRows({
+      registry: [registryRow],
+      live: new Map([['s1', liveState]]),
+      metas,
+      titleOverrides,
+      deviceNameOf: noDevice,
+      deviceIdOf: noDevice,
+    });
+    expect(livePath[0]?.title).toBe('My renamed session');
   });
 
   it('falls back to the registry title, then the first prompt, when no meta exists', () => {

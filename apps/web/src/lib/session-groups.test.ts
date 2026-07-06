@@ -97,6 +97,8 @@ describe('buildSessionRows', () => {
       createdAt: new Date('2026-07-05T10:00:00Z'),
       sealedMeta: null,
       sealedMetaNonce: null,
+      sealedTitle: null,
+      sealedTitleNonce: null,
     },
   ];
   const deviceNameOf = (deviceId: string): string | null =>
@@ -239,6 +241,8 @@ describe('buildSessionRows variants', () => {
           createdAt: new Date('2026-07-01T00:00:00Z'),
           sealedMeta: null,
           sealedMetaNonce: null,
+          sealedTitle: null,
+          sealedTitleNonce: null,
         },
       ],
       live: new Map(),

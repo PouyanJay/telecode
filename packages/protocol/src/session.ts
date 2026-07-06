@@ -310,6 +310,31 @@ export const sessionTitlePayloadSchema = z.union([
 export type SessionTitlePayload = z.infer<typeof sessionTitlePayloadSchema>;
 
 /**
+ * The single ceiling for every OPAQUE sealed blob the relay stores but can never read (`sealed_meta`,
+ * `sealed_title`, …). The plaintext schemas cap their fields (title 512, cwd 1024, model 128 chars), so
+ * even with AES-GCM + base64 overhead a legitimate blob is well under 8 KiB; the nonce is a 12-byte GCM IV
+ * (16 base64 chars). ONE source of truth so the relay's route zod, the relay's DB CHECK (migrations
+ * 0008/0009), and the web's BFF re-validation can never drift.
+ */
+export const MAX_SEALED_BLOB_CHARS = 8192;
+export const MAX_SEALED_BLOB_NONCE_CHARS = 64;
+
+/**
+ * The `PATCH /me/sessions/:id` rename body (ux Phase 6 T6): a SET carries the browser-sealed title blob +
+ * nonce; a RESET-to-derived is `{ sealed_title: null }`. Shared by the relay route and the web BFF (each
+ * re-validates at its own trust boundary) so the snake_case wire shape + bounds live in one place. The
+ * title itself is ciphertext neither the relay nor the web server ever reads (invariant #5).
+ */
+export const sessionRenameBodySchema = z.union([
+  z.object({
+    sealed_title: z.string().min(1).max(MAX_SEALED_BLOB_CHARS),
+    sealed_title_nonce: z.string().min(1).max(MAX_SEALED_BLOB_NONCE_CHARS),
+  }),
+  z.object({ sealed_title: z.null() }),
+]);
+export type SessionRenameBody = z.infer<typeof sessionRenameBodySchema>;
+
+/**
  * Payload for `agent.permission_request` (daemon → web): a consequential tool call the agent wants to
  * run, paused at the {@link https://docs.claude.com SDK `canUseTool` gate} until a human decides. The
  * `requestId` correlates this request with the human's {@link permissionDecisionPayloadSchema} reply.

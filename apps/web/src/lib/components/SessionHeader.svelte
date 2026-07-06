@@ -1,14 +1,16 @@
 <script lang="ts">
   import { Button, Pill, type PillTone } from '@telecode/ui';
 
+  import SessionTitleEditor from '$lib/components/SessionTitleEditor.svelte';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionStatus } from '$lib/session';
+  import type { RenameResult } from '$lib/session-store';
 
   /**
-   * The session-view header (enterprise-ui §7): a back link to the list, the session title + the machine
-   * it runs on, the live status pill, and the operator controls (Interrupt / End). Controls are disabled
-   * off a live channel and never optimistic — the daemon reports the resulting status. Only real metadata
-   * is shown (the device + short id; no invented repo/branch/worktree path).
+   * The session-view header (enterprise-ui §7): a back link to the list, the session title (with inline
+   * rename, ux Phase 6 T6) + the machine it runs on, the live status pill, and the operator controls
+   * (Interrupt / End). Controls are disabled off a live channel and never optimistic — the daemon reports
+   * the resulting status. Only real metadata is shown (the device + short id; no invented path).
    */
   let {
     title,
@@ -19,6 +21,9 @@
     isTerminal,
     showControls,
     connected,
+    canReset,
+    onrename,
+    onreset,
     oninterrupt,
     onend,
   }: {
@@ -30,6 +35,10 @@
     isTerminal: boolean;
     showControls: boolean;
     connected: boolean;
+    /** Whether a user rename override exists (offer "Reset to default"). */
+    canReset: boolean;
+    onrename: (title: string) => Promise<RenameResult>;
+    onreset: () => Promise<RenameResult>;
     oninterrupt: () => void;
     onend: () => void;
   } = $props();
@@ -44,7 +53,7 @@
   </a>
 
   <div class="mid">
-    <h1 class="ttl" title={title}>{title}</h1>
+    <SessionTitleEditor {title} {canReset} {onrename} {onreset} />
     <p class="path mono">
       {#if deviceName}<span class="dev">{deviceName}</span> · {/if}<span class="sid">{sessionId.slice(0, 12)}</span>
     </p>
@@ -97,15 +106,6 @@
   .mid {
     flex: 1;
     min-width: 0;
-  }
-  .ttl {
-    margin: 0;
-    font-size: var(--text-base);
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .path {
     margin: 2px 0 0;

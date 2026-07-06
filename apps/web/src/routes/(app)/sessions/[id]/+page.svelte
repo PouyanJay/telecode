@@ -23,10 +23,13 @@
     connectionState,
     decide,
     deviceChannels,
+    renameSession,
+    resetSessionTitle,
     sendControl,
     sendUserMessage,
     sessionDevices,
     sessionMetas,
+    sessionTitleOverrides,
     sessions as liveSessions,
     subscribe,
   } from '$lib/session-store';
@@ -95,14 +98,17 @@
     session.status === 'done' || session.status === 'error' || session.status === 'needs_restart',
   );
   const showControls = $derived(known && session.status !== 'idle');
-  // The session's name (header + browser tab): decrypted metadata first (ux Phase 6 — survives
-  // reloads), then the first prompt seen this visit, then a short id prefix as the last resort.
+  // The session's name (header + browser tab): the user's rename override first (ux Phase 6 T6), then
+  // decrypted metadata (survives reloads), then the first prompt seen this visit, then a short id prefix.
   const SESSION_ID_DISPLAY_LENGTH = 12;
   const sessionTitle = $derived(
-    $sessionMetas.get(sessionId)?.title ??
+    $sessionTitleOverrides.get(sessionId) ??
+      $sessionMetas.get(sessionId)?.title ??
       session.entries.find((e) => e.kind === 'user')?.text ??
       sessionId.slice(0, SESSION_ID_DISPLAY_LENGTH),
   );
+  // A "Reset to default name" affordance appears only when the user has actually set an override.
+  const hasTitleOverride = $derived($sessionTitleOverrides.has(sessionId));
 
   // A forked handover continuation links back to the adopted session it continues (Journey 4): live from
   // the daemon's session.chained, or from the persisted registry on a cold reload.
@@ -226,6 +232,9 @@
     {isTerminal}
     {showControls}
     {connected}
+    canReset={hasTitleOverride}
+    onrename={(title) => renameSession(sessionId, title)}
+    onreset={() => resetSessionTitle(sessionId)}
     oninterrupt={() => onControl('interrupt')}
     onend={() => onControl('end')}
   />

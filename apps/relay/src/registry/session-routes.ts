@@ -1,9 +1,9 @@
+import { sessionRenameBodySchema } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { type AuthService } from '../auth/auth-service';
 import { requireUser } from '../auth/require-auth';
-import { MAX_SEALED_BLOB_CHARS, MAX_SEALED_BLOB_NONCE_CHARS } from '../db/sealed-blob-bounds';
 import { type SessionRegistry } from './session-registry';
 
 /**
@@ -30,21 +30,6 @@ export interface SessionRouteOptions {
 
 /** A session id path param. */
 const idParamSchema = z.object({ id: z.string().uuid() });
-
-/**
- * The rename body (ux Phase 6 T6), a union: a SET carries the browser-sealed title blob + nonce; a
- * RESET-to-derived is `{ sealed_title: null }`. The relay validates shape + bounds only — the title
- * itself is ciphertext it never reads. Bounds are the shared sealed-blob ceilings (also the DB CHECK in
- * migration 0009), so a hostile client can't bloat a row the relay can't read; the DB constraint is the
- * real backstop and this rejects early with a clean 400.
- */
-const renameBodySchema = z.union([
-  z.object({
-    sealed_title: z.string().min(1).max(MAX_SEALED_BLOB_CHARS),
-    sealed_title_nonce: z.string().min(1).max(MAX_SEALED_BLOB_NONCE_CHARS),
-  }),
-  z.object({ sealed_title: z.null() }),
-]);
 
 /**
  * Web → relay session endpoints, session-token authed (the same bearer the web reads from its httpOnly
@@ -88,7 +73,7 @@ export function registerSessionRoutes(
     if (!userId) return reply;
     const params = idParamSchema.safeParse(request.params);
     if (!params.success) return reply.code(400).send({ error: 'invalid_request' });
-    const body = renameBodySchema.safeParse(request.body);
+    const body = sessionRenameBodySchema.safeParse(request.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid_request' });
 
     // A reset clears both columns; a set carries the browser-sealed blob. The ternary keys off the direct
