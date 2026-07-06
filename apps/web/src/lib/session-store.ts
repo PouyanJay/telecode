@@ -22,7 +22,19 @@ import {
   markDeciding,
   markHandoverSubmitting,
 } from './session';
-import { applyMetaFrame, seedRegistryMetas, type SessionMetaMap } from './session-meta';
+import {
+  defaultContentKeyStore,
+  openSealedWithStoredKey,
+  type ContentKeyStore,
+} from './content-key-store';
+import {
+  applyMetaFrame,
+  seedRegistryMetas,
+  seedRegistryMetasAsync,
+  type SealedMetaDecryptor,
+  type SessionMetaMap,
+} from './session-meta';
+import type { SessionMetaPayload } from '@telecode/protocol';
 import type { RegistrySessionRow } from './session-groups';
 import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
@@ -411,11 +423,60 @@ export function seedSessionDevices(
 
 /**
  * Seed decrypted metadata from the registry's persisted blobs (ux Phase 6) — called with the layout's
- * SSR rows so cold loads have titles before any live frame. Live meta always wins (see
- * {@link seedRegistryMetas}); ciphertext blobs stay opaque until this browser holds the session key.
+ * SSR rows so cold loads have titles before any live frame. Cleartext blobs decode synchronously; a
+ * CIPHERTEXT blob (E2E daemon) is decrypted with this browser's PERSISTED per-session content key
+ * (ux Phase 6 T3), so a title survives a reload even with no daemon and no relay cache. Live meta always
+ * wins. Fire-and-forget async: the cheap cleartext seed lands first, decrypted titles fill in after.
  */
-export function seedSessionMetas(rows: readonly RegistrySessionRow[]): void {
+export function seedSessionMetas(
+  rows: readonly RegistrySessionRow[],
+  store: ContentKeyStore | null = defaultContentKeyStore(),
+): void {
+  // Cheap, key-free path first so cleartext/legacy titles render immediately.
   sessionMetaMap.update((map) => seedRegistryMetas(map, rows));
+  if (
+    !store ||
+    !rows.some((row) => row.sealedMeta !== null && (row.sealedMetaNonce ?? '') !== '')
+  ) {
+    return;
+  }
+  const decrypt: SealedMetaDecryptor = (sessionId, payload, nonce) =>
+    openSealedWithStoredKey(store, sessionId, payload, nonce);
+  void seedRegistryMetasAsync(get(sessionMetaMap), rows, decrypt).then((decrypted) =>
+    // A live frame may have landed during decryption — it must still win, so overlay only the ids the
+    // CURRENT map lacks (re-read here, not the snapshot the async decode started from).
+    sessionMetaMap.update((live) => overlayMissingMetas(live, decrypted)),
+  );
+}
+
+/** Add only the decrypted metas whose ids the live map doesn't already hold (a live frame wins). */
+export function overlayMissingMetas(
+  live: SessionMetaMap,
+  decrypted: SessionMetaMap,
+): SessionMetaMap {
+  let merged: Map<string, SessionMetaPayload> | null = null;
+  for (const [id, meta] of decrypted) {
+    if (live.has(id)) continue;
+    merged ??= new Map(live);
+    merged.set(id, meta);
+  }
+  return merged ?? live;
+}
+
+/**
+ * Wipe every persisted per-session content key (sign-out, ux Phase 6 T3). Enforces the security
+ * guarantee that a shared machine can't decrypt this account's sealed titles after sign-out, so a
+ * failed wipe is surfaced (not silently swallowed) — the caller still resolves so logout proceeds.
+ */
+export function clearPersistedContentKeys(
+  store: ContentKeyStore | null = defaultContentKeyStore(),
+): Promise<void> {
+  return (
+    store?.clear().catch((err: unknown) => {
+      // Surface a security-relevant wipe failure for diagnosis (never silently swallow it).
+      console.error('telecode: failed to wipe persisted content keys on sign-out', err);
+    }) ?? Promise.resolve()
+  );
 }
 
 /**

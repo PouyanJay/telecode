@@ -60,3 +60,47 @@ function decodeCleartextMeta(blob: string): SessionMetaPayload | undefined {
     return undefined;
   }
 }
+
+/** Decrypt a ciphertext blob with a persisted content key; `null` when this browser can't open it. */
+export type SealedMetaDecryptor = (
+  sessionId: string,
+  payload: string,
+  nonce: string,
+) => Promise<unknown>;
+
+/**
+ * The cold-load seed WITH content-key durability (ux Phase 6 T3): cleartext blobs decode synchronously
+ * (as {@link seedRegistryMetas}), and CIPHERTEXT blobs are decrypted via `decrypt` — backed by the
+ * browser's persisted per-session content keys — so a session's title survives a reload even with no
+ * daemon and no relay cache. A blob this browser holds no key for is simply skipped (its title stays a
+ * fallback until a live key arrives). Live meta always wins over anything decoded here.
+ */
+export async function seedRegistryMetasAsync(
+  map: SessionMetaMap,
+  rows: readonly RegistrySessionRow[],
+  decrypt: SealedMetaDecryptor,
+): Promise<SessionMetaMap> {
+  // Start from the cleartext-only seed (fast, key-free), then layer decrypted ciphertext blobs on top.
+  const base = seedRegistryMetas(map, rows);
+  let next: Map<string, SessionMetaPayload> | null = null;
+
+  await Promise.all(
+    rows.map(async (row) => {
+      if (
+        map.has(row.id) ||
+        row.sealedMeta === null ||
+        row.sealedMetaNonce === null ||
+        row.sealedMetaNonce === '' // cleartext handled by the sync seed above
+      ) {
+        return;
+      }
+      const opened = await decrypt(row.id, row.sealedMeta, row.sealedMetaNonce);
+      if (opened === null) return;
+      const parsed = sessionMetaPayloadSchema.safeParse(opened);
+      if (!parsed.success) return;
+      next ??= new Map(base);
+      next.set(row.id, parsed.data);
+    }),
+  );
+  return next ?? base;
+}

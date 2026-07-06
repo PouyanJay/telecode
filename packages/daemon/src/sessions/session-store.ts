@@ -2,11 +2,14 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  base64KeySchema,
   permissionModeSchema,
   sessionHistoryEntrySchema,
+  sessionMetaPayloadSchema,
   sessionStatusSchema,
   type PermissionModeName,
   type SessionHistoryEntry,
+  type SessionMetaPayload,
   type SessionStatusName,
 } from '@telecode/protocol';
 import { z } from 'zod';
@@ -28,12 +31,21 @@ const persistedSessionSchema = z.object({
   status: sessionStatusSchema,
   permissionMode: permissionModeSchema,
   transcript: z.array(sessionHistoryEntrySchema),
+  // The session's E2E content key (base64) — persisted so a restart re-establishes the SAME key
+  // rather than rotating it, keeping any blob sealed under it (relay cache / Postgres) decryptable
+  // (ux Phase 6 T3). Absent for a cleartext-mode daemon or a pre-T3 file.
+  contentKey: base64KeySchema.optional(),
+  // The last sealed metadata the daemon emitted (title/cwd/model/mode) — persisted so a restored
+  // session re-emits its identity on subscribe instead of a bare UUID (ux Phase 6 T3).
+  meta: sessionMetaPayloadSchema.optional(),
 });
 
 export interface PersistedSession {
   readonly status: SessionStatusName;
   readonly permissionMode: PermissionModeName;
   readonly transcript: SessionHistoryEntry[];
+  readonly contentKey?: string | undefined;
+  readonly meta?: SessionMetaPayload | undefined;
 }
 
 export interface SessionStore {

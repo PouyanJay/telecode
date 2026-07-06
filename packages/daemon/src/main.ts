@@ -53,6 +53,9 @@ const log = pino({
       '*.cwd',
       'sealed_meta',
       '*.sealed_meta',
+      // The per-session E2E content key (ux Phase 6 T3) — actual key material, never log it (AD-6).
+      'contentKey',
+      '*.contentKey',
       'channel_token',
       'device_token',
       '*.device_token',

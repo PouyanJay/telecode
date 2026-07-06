@@ -1,7 +1,12 @@
 import { makeEnvelope } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { applyMetaFrame, seedRegistryMetas, type SessionMetaMap } from './session-meta';
+import {
+  applyMetaFrame,
+  seedRegistryMetas,
+  seedRegistryMetasAsync,
+  type SessionMetaMap,
+} from './session-meta';
 import { buildSessionRows, type RegistrySessionRow } from './session-groups';
 import { initialSessionState, type SessionState } from './session';
 
@@ -11,6 +16,21 @@ import { initialSessionState, type SessionState } from './session';
  * prefers a meta title over the registry's legacy cleartext title over the first-prompt fallback.
  */
 const EMPTY: SessionMetaMap = new Map();
+
+/** A registry row with sensible defaults — shared across the cold-load seed suites. */
+function buildRow(over: Partial<RegistrySessionRow> & { id: string }): RegistrySessionRow {
+  return {
+    title: null,
+    status: 'done',
+    deviceId: 'd1',
+    origin: 'launched',
+    parentSessionId: null,
+    createdAt: new Date('2026-07-01T10:00:00Z'),
+    sealedMeta: null,
+    sealedMetaNonce: null,
+    ...over,
+  };
+}
 
 function metaEnvelope(sessionId: string, payload: unknown) {
   return makeEnvelope({
@@ -62,21 +82,13 @@ describe('applyMetaFrame', () => {
 });
 
 describe('seedRegistryMetas', () => {
-  const row = (over: Partial<RegistrySessionRow> & { id: string }): RegistrySessionRow => ({
-    title: null,
-    status: 'done',
-    deviceId: 'd1',
-    origin: 'launched',
-    parentSessionId: null,
-    createdAt: new Date('2026-07-01T10:00:00Z'),
-    sealedMeta: null,
-    sealedMetaNonce: null,
-    ...over,
-  });
-
   it('decodes cleartext blobs (empty nonce) from the registry', () => {
     const map = seedRegistryMetas(EMPTY, [
-      row({ id: 's1', sealedMeta: JSON.stringify({ title: 'adopted run' }), sealedMetaNonce: '' }),
+      buildRow({
+        id: 's1',
+        sealedMeta: JSON.stringify({ title: 'adopted run' }),
+        sealedMetaNonce: '',
+      }),
     ]);
     expect(map.get('s1')).toMatchObject({ title: 'adopted run' });
   });
@@ -84,16 +96,64 @@ describe('seedRegistryMetas', () => {
   it('never overwrites live meta and skips ciphertext or malformed blobs', () => {
     const live = applyMetaFrame(EMPTY, metaEnvelope('s1', { title: 'live title' }));
     const map = seedRegistryMetas(live, [
-      row({ id: 's1', sealedMeta: JSON.stringify({ title: 'stale' }), sealedMetaNonce: '' }),
+      buildRow({ id: 's1', sealedMeta: JSON.stringify({ title: 'stale' }), sealedMetaNonce: '' }),
       // Ciphertext (non-empty nonce) is undecryptable without the session key — skipped in T1.
-      row({ id: 's2', sealedMeta: 'AAAA', sealedMetaNonce: 'AAAAAAAAAAAAAAAA' }),
-      row({ id: 's3', sealedMeta: 'not json', sealedMetaNonce: '' }),
-      row({ id: 's4', sealedMeta: null, sealedMetaNonce: null }),
+      buildRow({ id: 's2', sealedMeta: 'AAAA', sealedMetaNonce: 'AAAAAAAAAAAAAAAA' }),
+      buildRow({ id: 's3', sealedMeta: 'not json', sealedMetaNonce: '' }),
+      buildRow({ id: 's4', sealedMeta: null, sealedMetaNonce: null }),
     ]);
     expect(map.get('s1')).toMatchObject({ title: 'live title' });
     expect(map.has('s2')).toBe(false);
     expect(map.has('s3')).toBe(false);
     expect(map.has('s4')).toBe(false);
+  });
+});
+
+describe('seedRegistryMetasAsync (cold-load ciphertext decode, T3)', () => {
+  // A fake decryptor stands in for the content-key store + openPayload: it knows only s1's key.
+  const decryptS1 = (sessionId: string, payload: string, nonce: string): Promise<unknown> =>
+    Promise.resolve(
+      sessionId === 's1' && payload === 'CIPHER' && nonce === 'NONCE'
+        ? { title: 'decrypted on cold load' }
+        : null,
+    );
+
+  it('decrypts a ciphertext blob when the persisted key opens it', async () => {
+    const map = await seedRegistryMetasAsync(
+      EMPTY,
+      [buildRow({ id: 's1', sealedMeta: 'CIPHER', sealedMetaNonce: 'NONCE' })],
+      decryptS1,
+    );
+    expect(map.get('s1')).toMatchObject({ title: 'decrypted on cold load' });
+  });
+
+  it('skips a ciphertext blob this browser holds no key for', async () => {
+    const map = await seedRegistryMetasAsync(
+      EMPTY,
+      [buildRow({ id: 's2', sealedMeta: 'OTHER', sealedMetaNonce: 'NONCE' })],
+      decryptS1,
+    );
+    expect(map.has('s2')).toBe(false);
+  });
+
+  it('still decodes cleartext blobs via the sync path (no key needed)', async () => {
+    const map = await seedRegistryMetasAsync(
+      EMPTY,
+      [buildRow({ id: 's3', sealedMeta: JSON.stringify({ title: 'clear' }), sealedMetaNonce: '' })],
+      decryptS1,
+    );
+    expect(map.get('s3')).toMatchObject({ title: 'clear' });
+  });
+
+  it('never overwrites live meta already in the map', async () => {
+    const live = applyMetaFrame(EMPTY, metaEnvelope('s1', { title: 'live' }));
+    const decrypt = (): Promise<unknown> => Promise.resolve({ title: 'stale from cold decode' });
+    const map = await seedRegistryMetasAsync(
+      live,
+      [buildRow({ id: 's1', sealedMeta: 'CIPHER', sealedMetaNonce: 'NONCE' })],
+      decrypt,
+    );
+    expect(map.get('s1')).toMatchObject({ title: 'live' });
   });
 });
 

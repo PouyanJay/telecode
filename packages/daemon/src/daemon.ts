@@ -322,13 +322,38 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // full transcript is already recorded by the time a turn settles, so this captures it (turn_limit is
     // settled-but-followable — its transcript matters most, the run stopped mid-task). A running/awaiting
     // session is intentionally not persisted — it can't be resumed across a restart anyway (until T4).
-    if ((status === 'done' || status === 'error' || status === 'turn_limit') && sessionStore) {
+    if (status === 'done' || status === 'error' || status === 'turn_limit') {
+      persistSession(sessionId, rec);
+    }
+  }
+
+  /**
+   * Persist a session's record to disk (best-effort, fire-and-forget): its transcript + the E2E content
+   * key (so a restart never rotates it) + its sealed metadata (so a restored session re-emits its
+   * identity). Exporting the key is async, so this is separated from the sync {@link setStatus}.
+   */
+  function persistSession(sessionId: string, rec: SessionRecord): void {
+    if (!sessionStore) return;
+    void (async (): Promise<void> => {
+      // A failed export silently degrades the no-rotation guarantee (T3) back to a rotating key — log it
+      // so a "titles stopped decrypting after a restart" report is diagnosable rather than a mystery.
+      const contentKey = await cipher.exportKey(sessionId).catch((err: unknown) => {
+        log.warn(
+          { err, sessionId },
+          'daemon: failed to export session content key for persistence',
+        );
+        return undefined;
+      });
       sessionStore.save(sessionId, {
-        status,
+        status: rec.status,
         permissionMode: rec.permissionMode,
         transcript: rec.transcript,
+        ...(contentKey !== undefined ? { contentKey } : {}),
+        ...(rec.meta !== undefined ? { meta: rec.meta } : {}),
       });
-    }
+    })().catch((err: unknown) => {
+      log.error({ err, sessionId }, 'daemon: failed to persist session');
+    });
   }
 
   /**
@@ -357,7 +382,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
             status: persisted.status,
             transcript: persisted.transcript,
             permissionMode: persisted.permissionMode,
+            ...(persisted.meta !== undefined ? { meta: persisted.meta } : {}),
           });
+          // Restore the session's content key (ux Phase 6 T3) so a subscribe re-delivers the SAME key
+          // and re-emits the sealed metadata under it — a browser holding the old key (or the relay's
+          // cached blob) stays decryptable, and the daemon never rotates a restored session's key.
+          if (persisted.contentKey !== undefined) {
+            cipher.restoreKey(sessionId, persisted.contentKey);
+          }
         }
       }
       log.info({ deviceId: options.deviceId }, 'daemon: restored persisted sessions');

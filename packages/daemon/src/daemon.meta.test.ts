@@ -1,12 +1,17 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import {
   encodeKey,
   generateKeyPair,
   makeEnvelope,
   sessionMetaPayloadSchema,
+  type KeyPair,
   type SessionMetaPayload,
 } from '@telecode/protocol';
 import { pino } from 'pino';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createFakeAgentAdapter, type AgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
@@ -22,6 +27,7 @@ import {
   type E2eIds,
   type SealedFields,
 } from './e2e-harness';
+import { createSessionStore } from './sessions/session-store';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
 /**
@@ -236,4 +242,88 @@ describe('daemon session.meta on launch (session-identity T1)', () => {
     const meta = await openMeta(metaFrame, contentKey);
     expect(meta.title).toBe('first prompt wins');
   });
+});
+
+describe('daemon session.meta key durability across restart (session-identity T3)', () => {
+  it(
+    're-delivers the SAME content key and re-emits the sealed metadata after a restart',
+    { timeout: 30000 },
+    async () => {
+      const ids = mkE2eIds();
+      const daemonKp = await generateKeyPair();
+      const browserKp = await generateKeyPair();
+      const dir = await mkdtemp(join(tmpdir(), 'telecode-t3-'));
+      const kpFields = (kp: KeyPair) => ({
+        publicKey: encodeKey(kp.publicKey),
+        privateKey: encodeKey(kp.privateKey),
+      });
+      try {
+        // Daemon A: launch an E2E session to completion so its transcript + content key + meta persist.
+        const relayA = await startFakeRelay(ids.userId, ids.deviceId);
+        const daemonA = createDaemon({
+          relayUrl: relayA.url,
+          userId: ids.userId,
+          deviceId: ids.deviceId,
+          keyPair: kpFields(daemonKp),
+          agentAdapter: createFakeAgentAdapter([{ type: 'message', text: 'done' }], {
+            sessionId: 'sdk-t3',
+          }),
+          sessionStore: createSessionStore({ dir }),
+          logger: silent,
+        });
+        await daemonA.start();
+
+        await sendSealedLaunch(relayA, ids, daemonKp, browserKp, { prompt: 'the durable title' });
+        const keyA = await unwrapContentKey(
+          await relayA.waitForFrame(ofType('session.key', ids.sessionId)),
+          daemonKp.publicKey,
+          browserKp.privateKey,
+        );
+        await relayA.waitForFrame(ofType('session.ended', ids.sessionId));
+        // Wait for the coalesced async persist (transcript + content key) to land on disk.
+        await vi.waitFor(
+          async () => {
+            const persisted = (await createSessionStore({ dir }).loadAll()).get(ids.sessionId);
+            expect(persisted?.contentKey).toEqual(expect.any(String));
+          },
+          { timeout: 5000, interval: 50 },
+        );
+        await daemonA.stop();
+        await relayA.close();
+
+        // Daemon B: same identity + store, fresh process — the restored session must NOT rotate its key.
+        const relayB = await startFakeRelay(ids.userId, ids.deviceId);
+        relays.push(relayB);
+        const daemonB = createDaemon({
+          relayUrl: relayB.url,
+          userId: ids.userId,
+          deviceId: ids.deviceId,
+          keyPair: kpFields(daemonKp),
+          agentAdapter: createFakeAgentAdapter([], { sessionId: 'sdk-t3' }),
+          sessionStore: createSessionStore({ dir }),
+          logger: silent,
+        });
+        daemons.push(daemonB);
+        await daemonB.start();
+
+        // A browser reopens: it gets the SAME key (a pre-restart blob stays decryptable) AND the meta.
+        const browser2 = await generateKeyPair();
+        sendSubscribe(relayB, ids, encodeKey(browser2.publicKey));
+        const keyB = await unwrapContentKey(
+          await relayB.waitForFrame(ofType('session.key', ids.sessionId)),
+          daemonKp.publicKey,
+          browser2.privateKey,
+        );
+        expect(keyB).toBe(keyA); // the decisive property: the key did NOT rotate across the restart
+
+        const meta = await openMeta(
+          await relayB.waitForFrame(ofType('session.meta', ids.sessionId)),
+          keyB,
+        );
+        expect(meta.title).toBe('the durable title');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
