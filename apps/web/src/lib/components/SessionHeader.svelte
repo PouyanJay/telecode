@@ -15,6 +15,7 @@
   let {
     title,
     deviceName,
+    cwd = null,
     sessionId,
     status,
     isBusy,
@@ -33,6 +34,8 @@
   }: {
     title: string;
     deviceName: string | null;
+    /** The session's working directory (from its sealed metadata) — provenance in the header line. */
+    cwd?: string | null;
     sessionId: string;
     status: SessionStatus;
     isBusy: boolean;
@@ -65,7 +68,9 @@
   <div class="mid">
     <SessionTitleEditor {title} {canReset} {onrename} {onreset} />
     <p class="path mono">
-      {#if deviceName}<span class="dev">{deviceName}</span> · {/if}<span class="sid">{sessionId.slice(0, 12)}</span>
+      {#if deviceName}<span class="dev">{deviceName}</span> · {/if}
+      {#if cwd}<span class="cwd" title={cwd}>{cwd}</span> · {/if}
+      <span class="sid">{sessionId.slice(0, 12)}</span>
     </p>
   </div>
 
@@ -138,6 +143,16 @@
   }
   .dev {
     color: var(--text-secondary);
+  }
+  /* The cwd shares the device's tone; capped so a deep path can't push the session id out of view. */
+  .cwd {
+    color: var(--text-secondary);
+    display: inline-block;
+    max-width: 28ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
   }
   .ctrls,
   .house {

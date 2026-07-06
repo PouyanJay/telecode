@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { QuestionAnswerItem } from '@telecode/protocol';
 
+  import { clockTime } from '$lib/clock-time';
   import type { TranscriptEntry } from '$lib/session';
 
   import HandoverCard from './HandoverCard.svelte';
@@ -31,15 +32,23 @@
     onanswer: (requestId: string, answers: QuestionAnswerItem[]) => void;
     onhandover: (requestId: string, answerText: string) => void;
   } = $props();
+
+  // When this entry happened (ux Phase 3 wire ts) — absent on entries from pre-timestamp daemons,
+  // whose eyebrows then degrade to the bare speaker label.
+  const entryTime = $derived(entry.at !== undefined ? clockTime(new Date(entry.at)) : null);
 </script>
+
+{#snippet eyebrow(label: string)}
+  <p class="who">{label}{#if entryTime}<span class="when"> · {entryTime}</span>{/if}</p>
+{/snippet}
 
 {#if entry.kind === 'user'}
   <div class="from-user">
-    <p class="who">YOU</p>
+    {@render eyebrow('YOU')}
     <div class="message"><MessageBody text={entry.text} /></div>
   </div>
 {:else if entry.kind === 'message'}
-  <p class="who">AGENT</p>
+  {@render eyebrow('AGENT')}
   <div class="message"><MessageBody text={entry.text} /></div>
 {:else if entry.kind === 'tool'}
   <ToolEntry toolName={entry.toolName} input={entry.input} />
@@ -74,6 +83,11 @@
     font-size: 10px;
     letter-spacing: 0.14em;
     color: var(--text-muted);
+  }
+  /* The entry's clock time rides the eyebrow, quieter than the speaker label. */
+  .when {
+    letter-spacing: 0.08em;
+    text-transform: none;
   }
   /* A flow container for MessageBody: prose spans own their own pre-wrap, so the container stays
      `normal` and collapses template whitespace (no stray indentation between segments). */

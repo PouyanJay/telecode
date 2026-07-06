@@ -112,6 +112,8 @@ test('reopen = reconnect: the transcript restores after a reload (daemon backfil
   // The previously-approved gate replays as decided, not as a fresh actionable prompt.
   await expect(page.getByText('APPROVED')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0);
+  // These backfilled entries carry no wire ts — the eyebrow degrades honestly, never inventing a time.
+  await expect(page.getByText(/AGENT\s*·\s*\d{1,2}:\d{2}/)).toHaveCount(0);
 
   // Session identity survives the reload (ux Phase 6): the session view's header names the session
   // from its metadata, and the dashboard row does the same from the persisted `session.meta` blob —
@@ -243,6 +245,10 @@ test('a taken-over conversation reads as ONE thread: crumb, lineage strip, takeo
   await disclosure.click();
   await expect(page.getByText('Found the race in the token poll')).toBeVisible();
   await expect(page.getByText(/Taken over in telecode/)).toBeVisible();
+  // Entry eyebrows carry their clock time (mockup §02-5) — these entries have real wire timestamps.
+  // Loose shape (label … clock): the accessible text collapses element-boundary spaces, and an entry
+  // from before local midnight renders with a date prefix ("Jun 27 · 2:14 PM").
+  await expect(page.getByText(/YOU.*\d{1,2}:\d{2}\s?(AM|PM)/).first()).toBeVisible();
 
   // Jumping to segment 1 (the superseded parent) shows the forward pointer instead of a dead end…
   await strip.getByRole('link', { name: /SEGMENT 1/ }).click();
