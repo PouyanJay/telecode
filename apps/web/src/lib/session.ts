@@ -1,4 +1,5 @@
 import {
+  isSessionEndStatus,
   agentHandoverPayloadSchema,
   relayErrorPayloadSchema,
   agentMessagePayloadSchema,
@@ -304,7 +305,7 @@ export function applyEnvelope(
   if (envelope.type === 'relay.error') {
     const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) return state;
-    const isTerminal = state.status === 'done' || state.status === 'error';
+    const isTerminal = isSessionEndStatus(state.status);
     return {
       ...state,
       entries: revertInFlightActions(state.entries),
@@ -463,7 +464,7 @@ export function applyEnvelope(
       // bug. Keep our entries; keep a terminal status (a done session stays DONE, not OFFLINE), but let an
       // in-flight session adopt the backfilled status so it can honestly show offline.
       if (parsed.data.entries.length === 0 && base.entries.length > 0) {
-        const terminal = base.status === 'done' || base.status === 'error';
+        const terminal = isSessionEndStatus(base.status);
         return {
           ...base,
           sessionId: envelope.session_id ?? base.sessionId,

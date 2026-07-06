@@ -1,3 +1,5 @@
+import { isSessionEndStatus } from '@telecode/protocol';
+
 import type { SessionStatus } from './session';
 
 /** What revoking a device will do to its sessions — the confirmation dialog's real numbers. */
@@ -15,9 +17,6 @@ interface RegistrySession {
   readonly status: SessionStatus;
 }
 
-// A revoke ends every non-terminal session on the device; these are already over.
-const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['done', 'error']);
-
 /**
  * Count what revoking `deviceId` will end. Live status (from the demuxed channel, keyed by session id)
  * overlays the registry row — the registry lags reality (a dead daemon's rows stay `running` in
@@ -34,7 +33,8 @@ export function deviceConsequences(
   for (const session of registry) {
     if (session.deviceId !== deviceId) continue;
     const status = liveStatus.get(session.id) ?? session.status;
-    if (TERMINAL_STATUSES.has(status)) continue;
+    // A revoke ends every non-terminal session on the device; ended ones are already over.
+    if (isSessionEndStatus(status)) continue;
     ending += 1;
     if (status === 'awaiting_input') awaiting += 1;
   }

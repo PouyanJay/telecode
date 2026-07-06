@@ -341,7 +341,7 @@ describe('daemon E2E: subscribe never mints keys for unknown sessions (bounded)'
 describe('daemon E2E: key delivery on subscribe for a restored session', () => {
   it(
     're-keys and encrypts the backfill after a restart (no cleartext history, no missing key)',
-    { timeout: 15000 },
+    { timeout: 30000 }, // generous: real keygen + two daemon lifecycles, slow under parallel suite load
     async () => {
       const ids = mkIds();
       const daemonKp = await generateKeyPair();

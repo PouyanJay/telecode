@@ -5,6 +5,7 @@ import type { WebSocket } from 'ws';
 
 import {
   helloPayloadSchema,
+  isSessionEndStatus,
   makeEnvelope,
   parseEnvelope,
   sessionAdoptedPayloadSchema,
@@ -14,6 +15,7 @@ import {
   sessionReconcilePayloadSchema,
   WS_CLOSE_UNAUTHORIZED,
   type Envelope,
+  type SessionEndedPayload,
 } from '@telecode/protocol';
 
 import { type AuthService } from './auth/auth-service';
@@ -315,8 +317,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
    * payload is ciphertext the relay can't read), fall back to the payload for cleartext-mode peers, and
    * default to `done`. Routing metadata only — the relay never reads the agent payload.
    */
-  function resolveEndedStatus(envelope: Envelope): 'done' | 'error' {
-    if (envelope.status === 'done' || envelope.status === 'error') return envelope.status;
+  function resolveEndedStatus(envelope: Envelope): SessionEndedPayload['status'] {
+    if (isSessionEndStatus(envelope.status)) return envelope.status;
     const fromPayload = sessionEndedPayloadSchema.safeParse(envelope.payload);
     return fromPayload.success ? fromPayload.data.status : 'done';
   }
@@ -337,15 +339,20 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
    * (stale-row reconcile, device revoke) with no daemon to announce it. Cleartext `status` — the relay
    * holds no session key, and browsers read the terminal state off the field.
    */
-  function sessionEndedFrame(userId: string, deviceId: string, sessionId: string): string {
+  function sessionEndedFrame(
+    userId: string,
+    deviceId: string,
+    sessionId: string,
+    status: SessionEndedPayload['status'] = 'done',
+  ): string {
     return JSON.stringify(
       makeEnvelope({
         type: 'session.ended',
         userId,
         deviceId,
         sessionId,
-        status: 'done',
-        payload: { status: 'done' },
+        status,
+        payload: { status },
       }),
     );
   }
@@ -536,7 +543,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   /**
    * Reconcile the registry against what the daemon actually holds (`session.reconcile`, sent on every
-   * (re)connect). Retire — mark `done` — any non-terminal session for this device the daemon no longer has,
+   * (re)connect). Retire — mark `needs_restart` — any non-terminal session for this device the daemon no longer has,
    * clearing the phantom `awaiting_input`/`running` rows a revoke/restart leaves behind (they otherwise
    * resurrect on every dashboard refresh), and tell watching browsers so a live dashboard clears without one.
    * `'starting'` is deliberately NOT retired: a session just launched + forwarded to the daemon but not yet
@@ -564,14 +571,18 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // Retire the stale rows concurrently — independent DB writes; one failure must not block the rest.
     const results = await Promise.allSettled(
       stale.map(async (row) => {
-        // Mark `done`, not `error`: the session wasn't failing — it was abandoned during a revoke/restart.
-        // `done` is the closest available terminal state (there is no distinct "lost" status); the browser
-        // renders both terminal states as ended, moving the phantom out of "awaiting" into recent.
-        await registry.markEnded({ userId: envelope.user_id, sessionId: row.id, status: 'done' });
+        // `needs_restart` (status split, ux Phase 6 T2): the daemon LOST this conversation — it wasn't
+        // completed and it didn't fail; it can only continue as a new session. The honest state moves
+        // the phantom out of "awaiting" and tells the user exactly what a follow-up would need.
+        await registry.markEnded({
+          userId: envelope.user_id,
+          sessionId: row.id,
+          status: 'needs_restart',
+        });
         // Tell watching browsers so a live dashboard clears the phantom without a refresh.
         broadcastToBrowsers(
           channel,
-          sessionEndedFrame(envelope.user_id, envelope.device_id, row.id),
+          sessionEndedFrame(envelope.user_id, envelope.device_id, row.id, 'needs_restart'),
         );
       }),
     );

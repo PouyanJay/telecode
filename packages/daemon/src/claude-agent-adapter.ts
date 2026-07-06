@@ -9,6 +9,7 @@ import { pino, type Logger } from 'pino';
 
 import type {
   AgentAdapter,
+  AgentEndReason,
   AgentRunOptions,
   AgentRunResult,
   PermissionRequest,
@@ -34,6 +35,16 @@ export interface ClaudeAgentAdapterOptions {
   readonly logger?: Logger;
 }
 
+/**
+ * The SDK's terminal `result` subtype in telecode's vocabulary. Anything that is neither a success nor
+ * an explicit turn-limit ending is an execution error — unknown future subtypes fail safe as errors.
+ */
+function resolveEndReason(subtype: string): AgentEndReason {
+  if (subtype === 'success') return 'completed';
+  if (subtype === 'error_max_turns') return 'turn_limit';
+  return 'execution_error';
+}
+
 /** The SDK types a tool block's `input` as `unknown`; narrow it to an object instead of casting blindly. */
 function toToolInput(input: unknown): Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input)
@@ -53,6 +64,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
       const allowed: string[] = [];
       const denied: string[] = [];
       let sessionId: string | undefined;
+      let endReason: AgentEndReason | undefined;
 
       // The session's mode drives both the SDK and telecode's own gate. `bypassPermissions` is never honored
       // (telecode never surrenders the approval gate), so it is clamped to `default` for the SDK below.
@@ -129,6 +141,11 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           if (message.type === 'system' && message.subtype === 'init') {
             sessionId = message.session_id;
           }
+          // The terminal result is the ONLY place a turn-limit ending is distinguishable from a clean
+          // finish (the iterator just ends either way) — surface it so the daemon reports honestly.
+          if (message.type === 'result') {
+            endReason = resolveEndReason(message.subtype);
+          }
           // Map SDK assistant messages onto our streamed event contract. canUseTool above records
           // every interception; tool_use blocks here are the (allowed) tools the agent actually ran.
           if (message.type === 'assistant') {
@@ -154,8 +171,17 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
         log.debug({ sessionId }, 'agent session aborted (interrupt/end)');
       }
 
-      log.debug({ intercepted: intercepted.length, sessionId }, 'agent session complete');
-      return { intercepted, allowed, denied, ...(sessionId ? { sessionId } : {}) };
+      log.debug(
+        { intercepted: intercepted.length, sessionId, endReason },
+        'agent session complete',
+      );
+      return {
+        intercepted,
+        allowed,
+        denied,
+        ...(sessionId ? { sessionId } : {}),
+        ...(endReason ? { endReason } : {}),
+      };
     },
   };
 }

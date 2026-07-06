@@ -92,6 +92,8 @@ export {
   agentMessagePayloadSchema,
   agentNoticePayloadSchema,
   agentToolUsePayloadSchema,
+  SESSION_END_STATUSES,
+  isSessionEndStatus,
   sessionEndedPayloadSchema,
   sessionKeyPayloadSchema,
   agentPermissionRequestPayloadSchema,

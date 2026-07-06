@@ -46,6 +46,16 @@ describe('deviceConsequences', () => {
     expect(deviceConsequences('dev-a', registry, new Map())).toEqual({ ending: 1, awaiting: 0 });
   });
 
+  it('never counts an already-ended turn_limit/needs_restart session as one the revoke ends', () => {
+    // Both are ended states (status split, ux Phase 6 T2): the run is over; revoke changes nothing.
+    const registry = [
+      reg('s1', 'dev-a', 'turn_limit'),
+      reg('s2', 'dev-a', 'needs_restart'),
+      reg('s3', 'dev-a', 'running'),
+    ];
+    expect(deviceConsequences('dev-a', registry, new Map())).toEqual({ ending: 1, awaiting: 0 });
+  });
+
   it('treats idle and offline_paused as non-terminal (still ended by a revoke)', () => {
     const registry = [reg('s1', 'dev-a', 'offline_paused'), reg('s2', 'dev-a', 'idle')];
     expect(deviceConsequences('dev-a', registry, new Map())).toEqual({ ending: 2, awaiting: 0 });

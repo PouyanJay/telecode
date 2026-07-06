@@ -6,6 +6,7 @@ import WebSocket from 'ws';
 
 import {
   adoptConfigPayloadSchema,
+  isSessionEndStatus,
   echoPayloadSchema,
   handoverAnswerPayloadSchema,
   makeEnvelope,
@@ -317,10 +318,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (sessionId === undefined) return;
     const rec = recordFor(sessionId);
     rec.status = status;
-    // Persist on the terminal states so a finished session survives a daemon restart (invariant #7). The
-    // full transcript is already recorded by the time a turn settles to done/error, so this captures it. A
-    // running/awaiting session is intentionally not persisted — it can't be resumed across a restart anyway.
-    if ((status === 'done' || status === 'error') && sessionStore) {
+    // Persist on the settled states so a finished session survives a daemon restart (invariant #7). The
+    // full transcript is already recorded by the time a turn settles, so this captures it (turn_limit is
+    // settled-but-followable — its transcript matters most, the run stopped mid-task). A running/awaiting
+    // session is intentionally not persisted — it can't be resumed across a restart anyway (until T4).
+    if ((status === 'done' || status === 'error' || status === 'turn_limit') && sessionStore) {
       sessionStore.save(sessionId, {
         status,
         permissionMode: rec.permissionMode,
@@ -790,9 +792,35 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (sessionId !== undefined && result.sessionId !== undefined) {
         sdkSessions.set(sessionId, result.sessionId);
       }
-      log.info({ deviceId: options.deviceId, sessionId }, 'daemon: turn ended');
-      setStatus(sessionId, 'done');
-      sendForSession(envelope, 'session.ended', { status: 'done' });
+      // Status split (ux Phase 6 T2): report HOW the turn settled. A turn-limit ending is a pause —
+      // the conversation id above is kept, so the next user.message resumes it. An SDK-internal soft
+      // failure ends as `error` (it used to read as a dishonest `done`). No terminal result = completed.
+      // An abort that RACED the natural end (the adapter returns normally with a captured endReason
+      // after its signal fired): the operator's interrupt wins — the turn ends `done`, exactly as the
+      // catch path treats an abort that landed mid-stream.
+      const endReason = abort.signal.aborted ? 'completed' : (result.endReason ?? 'completed');
+      log.info({ deviceId: options.deviceId, sessionId, endReason }, 'daemon: turn ended');
+      switch (endReason) {
+        case 'turn_limit':
+          setStatus(sessionId, 'turn_limit');
+          sendForSession(envelope, 'session.ended', { status: 'turn_limit' });
+          break;
+        case 'execution_error':
+          setStatus(sessionId, 'error');
+          sendForSession(envelope, 'session.ended', {
+            status: 'error',
+            error: 'the agent run failed',
+          });
+          break;
+        case 'completed':
+          setStatus(sessionId, 'done');
+          sendForSession(envelope, 'session.ended', { status: 'done' });
+          break;
+        default: {
+          const _exhaustive: never = endReason;
+          return _exhaustive;
+        }
+      }
     } catch (err) {
       // An aborted run is an operator interrupt/end, not a failure — end the turn cleanly as `done`.
       if (abort.signal.aborted) {
@@ -1667,7 +1695,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (cipher.enabled) cipher.establish(knownId);
       await mirrorTranscript(knownId, event.transcript_path);
       const status = recordFor(knownId).status;
-      if (status !== 'done' && status !== 'error') {
+      if (!isSessionEndStatus(status)) {
         setStatus(knownId, 'done');
         sendForSession(adoptedSource(knownId), 'session.ended', { status: 'done' });
         log.info(

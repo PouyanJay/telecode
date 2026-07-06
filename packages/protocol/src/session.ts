@@ -151,6 +151,12 @@ export const SESSION_STATUSES = [
   'error',
   // The device is off, so the session can't run; it resumes when the daemon reconnects.
   'offline_paused',
+  // The run stopped early because it exhausted its turn budget (ux Phase 6, B5 "Ended — turn limit"),
+  // NOT because the agent finished or failed — a follow-up message continues the same conversation.
+  'turn_limit',
+  // The daemon no longer holds this session's conversation (it restarted, or the row was retired by
+  // reconcile), so follow-ups can't resume it in place (ux Phase 6, B5 "Needs restart").
+  'needs_restart',
 ] as const;
 export const sessionStatusSchema = z.enum(SESSION_STATUSES);
 export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
@@ -230,12 +236,28 @@ export const agentToolUsePayloadSchema = z.object({
 });
 export type AgentToolUsePayload = z.infer<typeof agentToolUsePayloadSchema>;
 
+/**
+ * The terminal states a `session.ended` can carry (ux Phase 6 status split, B5): `done` = Completed,
+ * `error` = Failed, `turn_limit` = the run exhausted its turn budget (daemon-reported; followable),
+ * `needs_restart` = the daemon lost the conversation (relay-synthesized on reconcile-retire).
+ */
+export const SESSION_END_STATUSES = ['done', 'error', 'turn_limit', 'needs_restart'] as const;
+
 /** Payload for `session.ended` (daemon → web): terminal result of the run. */
 export const sessionEndedPayloadSchema = z.object({
-  status: z.enum(['done', 'error']),
+  status: z.enum(SESSION_END_STATUSES),
   error: z.string().optional(),
 });
 export type SessionEndedPayload = z.infer<typeof sessionEndedPayloadSchema>;
+
+/**
+ * Whether a status is one of the ended states — THE shared terminal check, so adding a status to
+ * {@link SESSION_END_STATUSES} propagates to every consumer (relay status resolution, the web's
+ * terminal guards) instead of leaving hand-maintained unions half-updated.
+ */
+export function isSessionEndStatus(value: unknown): value is SessionEndedPayload['status'] {
+  return typeof value === 'string' && (SESSION_END_STATUSES as readonly string[]).includes(value);
+}
 
 /**
  * Decrypted payload for `session.key` (daemon → web, E2E): the per-session symmetric content key, base64.

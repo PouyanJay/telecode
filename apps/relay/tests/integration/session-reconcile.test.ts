@@ -4,7 +4,7 @@ import { makeEnvelope } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
 import { Pool } from 'pg';
 import { pino } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { createDb, type DbHandle } from '../../src/db/client';
 import { runMigrations } from '../../src/db/migrate';
@@ -15,7 +15,7 @@ import { connectBrowser, connectDaemon, waitForEnvelope } from '../_helpers/ws';
 
 /**
  * Session reconciliation: on every (re)connect the daemon sends `session.reconcile` with the ids it still
- * holds. The relay retires (marks `done`) any OTHER non-terminal session for that device left stale in the
+ * holds. The relay retires (marks `needs_restart`) any OTHER non-terminal session for that device left stale in the
  * registry — the phantom "awaiting"/"running" rows a revoke/restart leaves behind — and tells watching
  * browsers, so a live dashboard clears without a refresh. Real relay + real Postgres.
  */
@@ -104,12 +104,14 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
         }),
       ),
     );
-    // The browser is told the stale session ended — the barrier proving reconcile ran.
-    await retired;
+    // The browser is told the stale session ended — the barrier proving reconcile ran. The synthetic
+    // frame carries the honest terminal state: the daemon LOST this conversation (status split, T2).
+    const retiredFrame = await retired;
+    expect(retiredFrame.status).toBe('needs_restart');
 
-    // The stale awaiting row is now terminal; the held and already-done rows are unchanged; the other
-    // device's session is untouched.
-    await expectSessionStatus(admin, staleAwaiting, 'done');
+    // The stale awaiting row is now needs_restart; the held and already-done rows are unchanged; the
+    // other device's session is untouched.
+    await expectSessionStatus(admin, staleAwaiting, 'needs_restart');
     await expectSessionStatus(admin, held, 'running');
     await expectSessionStatus(admin, alreadyDone, 'done');
     await expectSessionStatus(admin, otherDeviceAwaiting, 'awaiting_input');
@@ -149,8 +151,8 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
     );
     await Promise.all([endedAwaiting, endedRunning]);
 
-    await expectSessionStatus(admin, awaiting, 'done');
-    await expectSessionStatus(admin, running, 'done');
+    await expectSessionStatus(admin, awaiting, 'needs_restart');
+    await expectSessionStatus(admin, running, 'needs_restart');
 
     daemon.close();
     browser.close();

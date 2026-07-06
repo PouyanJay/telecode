@@ -89,7 +89,11 @@
   // Operator controls (Task 9): interrupt stops the in-flight turn; end terminates it. Both need a live
   // channel, and nothing is actionable on a terminal session.
   const connected = $derived($connectionState === 'connected');
-  const isTerminal = $derived(session.status === 'done' || session.status === 'error');
+  // turn_limit is deliberately NOT terminal here: the controls stay (End can settle it for good)
+  // and the composer continues the same conversation. needs_restart IS terminal — nothing to control.
+  const isTerminal = $derived(
+    session.status === 'done' || session.status === 'error' || session.status === 'needs_restart',
+  );
   const showControls = $derived(known && session.status !== 'idle');
   // The session's name (header + browser tab): decrypted metadata first (ux Phase 6 — survives
   // reloads), then the first prompt seen this visit, then a short id prefix as the last resort.
@@ -300,6 +304,14 @@
 
       {#if known}
         <div class="dock hairline-t">
+          {#if session.status === 'turn_limit'}
+            <!-- The honest affordance for a budget-exhausted run (B5): a pause, not a death. Standing
+                 (no dismiss) — it reads for as long as the state does. -->
+            <SessionNotice
+              tone="warning"
+              message="Turn limit reached — the run stopped early. Send a message to continue it."
+            />
+          {/if}
           <Composer
             isBusy={isBusy}
             submitLabel="Send"

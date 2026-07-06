@@ -146,7 +146,7 @@ test('an approval raised on a second device arrives and resolves through its own
   // The resolved conversation settles into the list as a finished row.
   const row = page.getByRole('main').getByRole('link', { name: new RegExp(APPROVAL_TITLE) });
   await expect(row).toBeVisible();
-  await expect(row).toContainText('DONE');
+  await expect(row).toContainText('COMPLETED');
 });
 
 test('one daemon dropping flips only ITS device offline — the other stays online', async ({

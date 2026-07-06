@@ -171,6 +171,8 @@ function groupKey(status: SessionStatus): SessionGroupKey {
       return 'active';
     case 'done':
     case 'error':
+    case 'turn_limit':
+    case 'needs_restart':
     case 'offline_paused':
     case 'idle':
       return 'recent';

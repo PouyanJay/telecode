@@ -1,4 +1,8 @@
-import { type SessionOrigin, type SessionStatusName } from '@telecode/protocol';
+import {
+  type SessionEndedPayload,
+  type SessionOrigin,
+  type SessionStatusName,
+} from '@telecode/protocol';
 import { and, count, desc, eq, inArray } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
@@ -70,8 +74,12 @@ export interface SessionRegistry {
     sealedMeta: string;
     sealedMetaNonce: string;
   }): Promise<void>;
-  /** Mark a session terminal (`done`/`error`) with an end timestamp. No-op if the row isn't the user's. */
-  markEnded(input: { userId: string; sessionId: string; status: 'done' | 'error' }): Promise<void>;
+  /** Mark a session terminal (any ended state, ux Phase 6 split) with an end timestamp. No-op if not the user's. */
+  markEnded(input: {
+    userId: string;
+    sessionId: string;
+    status: SessionEndedPayload['status'];
+  }): Promise<void>;
   /**
    * End (mark `done`) every non-terminal session for a device — called when the device is revoked. A revoked
    * device never reconnects, so the per-connection `session.reconcile` can never retire these; without this
