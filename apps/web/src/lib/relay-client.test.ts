@@ -196,6 +196,35 @@ describe('relay-client auto-reconnect (Phase 4 Task 1)', () => {
 
     conn.close();
   });
+
+  it('a socket dying BEFORE its first hello.ack never wedges the send chain (gate rollover)', async () => {
+    const { sockets, conn } = connectWithFakes();
+
+    // A frame queued while the very first handshake is still pending…
+    conn.subscribe('sess-early');
+    sockets[0]!.fireOpen();
+    await flush();
+    // …and the socket dies before any hello.ack — the frame's gate generation is now orphaned
+    // unless re-arming settles it. This exact race used to freeze the chain permanently: every
+    // later send silently never went out.
+    sockets[0]!.fireClose();
+    await vi.advanceTimersByTimeAsync(11_000);
+
+    // The redial authenticates cleanly; the early frame rolls over and flushes, as does a new one.
+    sockets[1]!.fireOpen();
+    await flush();
+    sockets[1]!.fireMessage(helloAck());
+    await flush();
+    await flush();
+    expect(sockets[1]!.sent.some((f) => f.includes('sess-early'))).toBe(true);
+
+    conn.subscribe('sess-later');
+    await flush();
+    await flush();
+    expect(sockets[1]!.sent.some((f) => f.includes('sess-later'))).toBe(true);
+
+    conn.close();
+  });
 });
 
 /**

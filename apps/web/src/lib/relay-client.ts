@@ -22,7 +22,7 @@ import { createBrowserSessionCipher } from './session-cipher';
  * `onEvent`, and relays the human's permission decisions down. The relay assigns the `session_id` on
  * launch, so callers read it off the incoming frames rather than choosing it.
  *
- * End-to-end encryption (Phase 3): when the watched device registered a public key, every session payload
+ * End-to-end encryption (Phase 3): when this connection's device registered a public key, every session payload
  * is sealed before it leaves the browser and opened after it arrives — the relay only ever forwards
  * ciphertext. The launch is box-sealed to the daemon; the daemon delivers a per-session content key
  * (`session.key`) that encrypts the rest. Crypto lives in {@link createBrowserSessionCipher}; this module
@@ -40,7 +40,7 @@ export interface RelayConnectionOptions {
    * Task 4) — otherwise the relay would reject the reconnect (4001) and the client would loop forever.
    */
   readonly getChannelToken: () => Promise<string>;
-  /** The watched device's X25519 public key (base64) for E2E; null/undefined keeps the channel cleartext. */
+  /** This connection's device X25519 public key (base64) for E2E; null/undefined keeps the channel cleartext. */
   readonly daemonPublicKey?: string | null;
   /** Test seam: the browser identity keypair source (defaults to the IndexedDB-persisted identity). */
   readonly keyPairFactory?: Parameters<typeof createBrowserSessionCipher>[1];
@@ -63,7 +63,7 @@ export interface RelayConnectionOptions {
 }
 
 export interface RelayConnection {
-  /** Launch a new agent session on the watched device. The relay mints the `session_id`. */
+  /** Launch a new agent session on this connection's device. The relay mints the `session_id`. */
   launch(payload: SessionLaunchPayload): void;
   /** Re-attach to an existing session on reopen; the daemon replies with `session.history` (backfill). */
   subscribe(sessionId: string): void;
@@ -127,14 +127,43 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   // this peer is silently ignored server-side. The gate opens on `hello.ack` and re-arms the moment
   // the socket dies, so frames enqueued during a redial simply wait for the next handshake. (With
   // one channel per device — ux Phase 5 — a page's subscribes routinely race the slower handshakes.)
+  // Re-arming must SETTLE the generation it replaces: a socket that dies before its `hello.ack`
+  // leaves waiters bound to that specific promise, and an orphaned (never-settled) one would wedge
+  // the send chain — silently, forever. Rejecting the outgoing generation lets waiters ROLL OVER to
+  // the next one (see handshakeSettled), so frames queued during a failed dial still go out, in
+  // order, once a later handshake succeeds. Rejecting is a no-op when the gate already opened.
   let openHandshakeGate: () => void = () => undefined;
-  let handshakeDone: Promise<void> = new Promise((resolve) => {
+  let rejectHandshakeGate: (reason: Error) => void = () => undefined;
+  let handshakeDone: Promise<void> = new Promise((resolve, reject) => {
     openHandshakeGate = resolve;
+    rejectHandshakeGate = reject;
   });
   function armHandshakeGate(): void {
-    handshakeDone = new Promise((resolve) => {
+    // Muffle first: the outgoing generation may have no waiters, and an unobserved rejection must
+    // not surface as an unhandled-rejection crash.
+    handshakeDone.catch(() => undefined);
+    rejectHandshakeGate(new Error('The socket closed before its handshake completed.'));
+    handshakeDone = new Promise((resolve, reject) => {
       openHandshakeGate = resolve;
+      rejectHandshakeGate = reject;
     });
+  }
+
+  /**
+   * Resolve once ANY handshake completes: a generation that dies mid-dial re-arms the gate, and
+   * waiters simply move onto the new generation — an intentionally-closed connection just never
+   * settles (its queue is moot). Throws only in the unreachable no-new-generation case.
+   */
+  async function handshakeSettled(): Promise<void> {
+    for (;;) {
+      const gate = handshakeDone;
+      try {
+        await gate;
+        return;
+      } catch (err) {
+        if (handshakeDone === gate) throw err instanceof Error ? err : new Error(String(err));
+      }
+    }
   }
 
   // Outbound frames are built asynchronously (sealing is async), so serialize them to preserve order.
@@ -142,7 +171,7 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   function enqueueSend(build: () => Promise<string>): void {
     sendChain = sendChain
       .then(async () => {
-        await handshakeDone;
+        await handshakeSettled();
         const frame = await build();
         socket?.send(frame);
       })

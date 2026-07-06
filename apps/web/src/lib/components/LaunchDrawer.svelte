@@ -94,6 +94,10 @@
   }
 </script>
 
+{#snippet chevron()}
+  <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5l3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+{/snippet}
+
 <Drawer bind:open title="Launch session">
   {#if deviceOptions.length === 0}
     <div class="no-device">
@@ -122,7 +126,7 @@
                 </option>
               {/each}
             </select>
-            <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5l3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            {@render chevron()}
           </div>
           {#if selectedDevice && !selectedDevice.online}
             <p class="note">
@@ -144,7 +148,7 @@
                 </option>
               {/each}
             </select>
-            <svg class="chevron" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 4.5L6 7.5l3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            {@render chevron()}
           </div>
         </div>
       {:else if githubConnected}

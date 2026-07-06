@@ -11,8 +11,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * The Devices page also loads the user's REVOKED devices for the Revoked section (the active list +
  * live sessions come from the `(app)` layout). Kept on the page, not the layout, so revoked rows never
- * reach the code that hardwires the watched device to `devices[0]`. Error ≠ empty: a failed read shows
- * an outage state, never "no revoked devices".
+ * reach the connection pool — the layout dials a channel per ACTIVE device only (ux Phase 5).
+ * Error ≠ empty: a failed read shows an outage state, never "no revoked devices".
  */
 export const load: PageServerLoad = async ({ cookies }) => {
   const token = getSessionToken(cookies);

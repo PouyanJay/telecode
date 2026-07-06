@@ -47,6 +47,54 @@ function firstPrompt(entries: SessionState['entries']): string | undefined {
   return entries.find((entry) => entry.kind === 'user')?.text;
 }
 
+/** A persisted registry row as a dashboard row (live overlay happens in {@link mergeLiveRow}). */
+function rowFromRegistry(
+  session: RegistrySessionRow,
+  deviceNameOf: (deviceId: string) => string | null,
+): SessionRow {
+  return {
+    id: session.id,
+    title: session.title,
+    status: session.status,
+    deviceId: session.deviceId,
+    deviceName: deviceNameOf(session.deviceId),
+    origin: session.origin,
+    isContinuation: session.parentSessionId !== null,
+    parentSessionId: session.parentSessionId,
+    createdAt: session.createdAt,
+  };
+}
+
+/** Overlay one live session state onto its registry row (or mint a row for an unpersisted one). */
+function mergeLiveRow(input: {
+  readonly id: string;
+  readonly state: SessionState;
+  readonly existing: SessionRow | undefined;
+  readonly deviceNameOf: (deviceId: string) => string | null;
+  readonly deviceIdOf: (sessionId: string) => string | null;
+  readonly now: Date | undefined;
+}): SessionRow {
+  const { id, state, existing } = input;
+  // A live state that is still `idle` carries no frames yet — keep what the registry says.
+  const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
+  const title = existing?.title ?? firstPrompt(state.entries) ?? null;
+  // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
+  const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
+  const deviceId = existing?.deviceId ?? input.deviceIdOf(id);
+  return {
+    id,
+    title,
+    status,
+    deviceId,
+    deviceName: existing?.deviceName ?? (deviceId ? input.deviceNameOf(deviceId) : null),
+    // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
+    origin: existing?.origin ?? 'launched',
+    isContinuation: parentSessionId !== null,
+    parentSessionId,
+    createdAt: existing?.createdAt ?? input.now ?? new Date(),
+  };
+}
+
 /**
  * THE single merge of the persisted registry with the live channels — every surface that shows session
  * rows or tallies (dashboard list, system bar, sidebar badge) builds from this one function, so their
@@ -65,38 +113,20 @@ export function buildSessionRows(input: {
 }): SessionRow[] {
   const byId = new Map<string, SessionRow>();
   for (const session of input.registry) {
-    byId.set(session.id, {
-      id: session.id,
-      title: session.title,
-      status: session.status,
-      deviceId: session.deviceId,
-      deviceName: input.deviceNameOf(session.deviceId),
-      origin: session.origin,
-      isContinuation: session.parentSessionId !== null,
-      parentSessionId: session.parentSessionId,
-      createdAt: session.createdAt,
-    });
+    byId.set(session.id, rowFromRegistry(session, input.deviceNameOf));
   }
   for (const [id, state] of input.live) {
-    const existing = byId.get(id);
-    // A live state that is still `idle` carries no frames yet — keep what the registry says.
-    const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
-    const title = existing?.title ?? firstPrompt(state.entries) ?? null;
-    // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
-    const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
-    const deviceId = existing?.deviceId ?? input.deviceIdOf(id);
-    byId.set(id, {
+    byId.set(
       id,
-      title,
-      status,
-      deviceId,
-      deviceName: existing?.deviceName ?? (deviceId ? input.deviceNameOf(deviceId) : null),
-      // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
-      origin: existing?.origin ?? 'launched',
-      isContinuation: parentSessionId !== null,
-      parentSessionId,
-      createdAt: existing?.createdAt ?? input.now ?? new Date(),
-    });
+      mergeLiveRow({
+        id,
+        state,
+        existing: byId.get(id),
+        deviceNameOf: input.deviceNameOf,
+        deviceIdOf: input.deviceIdOf,
+        now: input.now,
+      }),
+    );
   }
   return [...byId.values()];
 }

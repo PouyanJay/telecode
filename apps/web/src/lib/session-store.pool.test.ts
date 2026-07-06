@@ -10,6 +10,7 @@ import {
   decide,
   deviceChannels,
   disconnect,
+  ensureConnections,
   launch,
   requestAdoptConfig,
   seedSessionDevices,
@@ -309,13 +310,64 @@ describe('multi-device connection pool (ux Phase 5 T1)', () => {
     ]);
 
     // Each daemon's sealed adopt.state reply lands under ITS device — never overwriting the other's.
+    // (A removed device dropping its policy state is pinned in multi-device.variants.test.ts.)
     pool.byDevice.get('device-a')!.emitAdoptState(enabled);
     pool.byDevice.get('device-b')!.emitAdoptState(disabled);
     expect(get(adoptStates).get('device-a')).toEqual(enabled);
     expect(get(adoptStates).get('device-b')).toEqual(disabled);
+  });
 
-    // A device that leaves the fleet takes its policy state with it.
-    connectDevices([DEVICE_A], options, pool.create);
-    expect(get(adoptStates).has('device-b')).toBe(false);
+  it('shares one channel-token mint across a connect wave, and a stale failure never clobbers a fresh mint', async () => {
+    // ensureConnections is the production path that binds fetchChannelToken — drive it with an
+    // injected fetch + fake connections to pin the share window (5s, token TTL 60s).
+    vi.setSystemTime(0);
+    let mints = 0;
+    const fetchMock = vi.fn(
+      (): Promise<Response> =>
+        Promise.resolve(
+          new Response(JSON.stringify({ channelToken: `tok-${(mints += 1)}` }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pool = makeFakePool();
+    ensureConnections({ relayUrl: 'ws://x', userId, devices: [DEVICE_A, DEVICE_B] }, pool.create);
+
+    // Both channels dial in the same wave → ONE HTTP mint serves them.
+    const tokenA = await pool.byDevice.get('device-a')!.options.getChannelToken();
+    const tokenB = await pool.byDevice.get('device-b')!.options.getChannelToken();
+    expect(tokenA).toBe('tok-1');
+    expect(tokenB).toBe('tok-1');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Past the share window a reconnect mints fresh (expiry renewal keeps working).
+    vi.setSystemTime(6_000);
+    await expect(pool.byDevice.get('device-a')!.options.getChannelToken()).resolves.toBe('tok-2');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // A SLOW mint that fails after a newer one succeeded must not clear the newer entry.
+    vi.setSystemTime(12_000);
+    let failSlow: (reason: Error) => void = () => undefined;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((_, reject) => {
+          failSlow = reject;
+        }),
+    );
+    const slow = pool.byDevice.get('device-a')!.options.getChannelToken();
+    slow.catch(() => undefined); // observed below; muffle the direct handle
+    vi.setSystemTime(18_000); // the slow mint's window lapsed → the next call mints anew
+    await expect(pool.byDevice.get('device-b')!.options.getChannelToken()).resolves.toBe('tok-3');
+    failSlow(new Error('slow mint died late'));
+    await expect(slow).rejects.toThrow('slow mint died late');
+    // The fresh entry survived the stale rejection: a caller inside its window re-uses it — no
+    // fifth fetch (the four so far: the wave's, the 6s renewal, the slow one, and tok-3's).
+    await expect(pool.byDevice.get('device-a')!.options.getChannelToken()).resolves.toBe('tok-3');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    vi.unstubAllGlobals();
   });
 });

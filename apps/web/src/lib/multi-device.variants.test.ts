@@ -140,7 +140,7 @@ describe('multi-device variants', () => {
 
     // dev-2 drops while the others stay online.
     emit(pool, 'dev-2', 'device.presence', undefined, { online: false });
-    let map = get(sessions);
+    const map = get(sessions);
     expect(map.get('s2')?.status).toBe('offline_paused');
     expect(map.get('s1')?.status).toBe('running');
     expect(map.get('s3')?.status).toBe('running');
@@ -150,7 +150,6 @@ describe('multi-device variants', () => {
     expect(pool.byDevice.get('dev-2')?.subscribed).toEqual(['s2']);
     expect(pool.byDevice.get('dev-1')?.subscribed).toEqual([]);
     expect(pool.byDevice.get('dev-3')?.subscribed).toEqual([]);
-    map = get(sessions);
     expect(get(deviceChannels).get('dev-2')?.daemonOnline).toBe(true);
   });
 

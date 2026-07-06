@@ -113,11 +113,14 @@ socket.addEventListener('message', (event: MessageEvent) => {
   const sid = envelope.session_id;
   if (sid === undefined) return;
 
-  // The relay's ACK for the auto-announced adopted session (multi-device e2e): bring it live and
-  // block it on a Write approval, exactly like a launched session's gate.
+  // The relay's adopted-announce ACK, branched by which announce it confirms: the auto-announced
+  // multi-device session (bring it live + gate it on a Write approval, exactly like a launched
+  // session's gate) or the chain-dance parent (mirror a "terminal" transcript, end it, register
+  // the continuation).
   if (envelope.type === 'session.adopted') {
-    const autoAck = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
-    if (autoAck.success && autoAck.data.clientRef === ADOPT_ANNOUNCE_REF) {
+    const ack = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
+    if (!ack.success) return;
+    if (ack.data.clientRef === ADOPT_ANNOUNCE_REF) {
       const rec = recordFor(sid);
       rec.transcript.push(
         { kind: 'user', text: `Working on ${adoptAnnounceTitle ?? 'a task'}` },
@@ -136,13 +139,7 @@ socket.addEventListener('message', (event: MessageEvent) => {
       send('agent.permission_request', { requestId, toolName: 'Write', input: DEFAULT_INPUT }, sid);
       return;
     }
-  }
-
-  // The relay's adopted-announce ACK: it minted the parent's registry row. Mirror a short "terminal"
-  // transcript (daemon-stamped ts, like the real mirror), end it, and register the continuation.
-  if (envelope.type === 'session.adopted') {
-    const ack = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
-    if (!ack.success || ack.data.clientRef !== CHAIN_PARENT_REF) return;
+    if (ack.data.clientRef !== CHAIN_PARENT_REF) return;
     const rec = recordFor(sid);
     const base = Date.now() - 60 * 60_000; // the terminal stretch ran an hour ago
     rec.transcript.push(

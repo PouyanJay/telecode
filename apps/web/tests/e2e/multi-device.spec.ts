@@ -171,3 +171,27 @@ test('one daemon dropping flips only ITS device offline — the other stays onli
     'online',
   );
 });
+
+// LAST on purpose: it revokes e2e-mini, which every earlier test still needs in the fleet.
+test('a revoked device’s session says DEVICE REVOKED — never an infinite spinner', async ({
+  page,
+}) => {
+  await signIn(page);
+
+  // Put a real finished session on the mini, and remember its view URL.
+  await page.getByRole('button', { name: 'Launch session' }).first().click();
+  await page.getByLabel('Run on').selectOption(deviceMini.deviceId);
+  await page.getByLabel('First instruction').fill('Session on a doomed device');
+  await page.getByRole('button', { name: 'Launch on e2e-mini' }).click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+  const sessionUrl = page.url();
+
+  // Revoke the mini, then cold-load the session view: no channel exists for a revoked device, so
+  // nothing can backfill — the view must SAY that instead of spinning forever (ux Phase 5 T7).
+  await revokeDevice(deviceMini.sessionToken, deviceMini.deviceId);
+  await page.goto(sessionUrl);
+  await expect(page.getByText('DEVICE REVOKED')).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(/has been revoked/)).toBeVisible();
+});

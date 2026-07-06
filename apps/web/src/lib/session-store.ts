@@ -160,54 +160,74 @@ function connectionFor(sessionId: string): RelayConnection | null {
   return null;
 }
 
+/**
+ * One inbound frame from one device's channel, dispatched by concern. Routing trusts `deviceId` —
+ * the identity of the socket the frame physically arrived on — never the envelope's own
+ * `device_id` claim (they agree by relay construction; the socket is the deeper truth).
+ */
 function handleEvent(deviceId: string, envelope: Envelope): void {
-  // Device presence (Phase 4 Task 3) is channel-wide, not per-session: the daemon behind THIS
-  // device's channel (dis)connected. Offline → pause that device's live sessions; online →
-  // resubscribe them so the daemon backfills and they resume.
   if (envelope.type === 'device.presence') {
-    const presence = devicePresencePayloadSchema.safeParse(envelope.payload);
-    if (!presence.success) return;
-    updateChannel(deviceId, { daemonOnline: presence.data.online });
-    if (presence.data.online) reattachSessions(deviceId);
-    else sessionMap.update((map) => markChannelOffline(map, pauseScopeOf(deviceId)));
+    handleDevicePresence(deviceId, envelope);
     return;
   }
   // Any session frame names its device — record the route so actions go back out the same channel.
   if (envelope.session_id !== undefined) {
-    routeSession(envelope.session_id, envelope.device_id);
+    routeSession(envelope.session_id, deviceId);
   }
-  // A forked handover continuation was registered (Journey 4): it links the parent (adopted) session to the
-  // child. This is a cross-session update (the frame carries the CHILD id + the PARENT id in its payload),
-  // so it's handled here rather than in foldSessionFrame (which routes by a single session_id). The child's
-  // own status/transcript still stream in via its `session.started` etc.
   if (envelope.type === 'session.chained' && envelope.session_id !== undefined) {
-    const chained = sessionChainedPayloadSchema.safeParse(envelope.payload);
-    if (!chained.success) return;
-    const childId = envelope.session_id;
-    const { parentSessionId } = chained.data;
-    sessionMap.update((map) => {
-      const next = new Map(map);
-      // Record the parent link on the child (create its state if the chained frame beat session.started).
-      const child = next.get(childId) ?? initialSessionState;
-      next.set(childId, { ...child, parentSessionId });
-      // Link the parent's handover to the child so its card can offer a "view continuation" link.
-      const parent = next.get(parentSessionId);
-      if (parent) next.set(parentSessionId, linkHandoverChild(parent, childId));
-      return next;
-    });
+    linkChainedSessions(envelope.session_id, envelope);
     return;
   }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
-  // A started session resolves the launch carrying its correlation id (offline launches never start —
-  // they reject on the launch timeout instead, since the relay can't read the opaque clientRef).
-  if (envelope.type === 'session.started' && envelope.session_id !== undefined) {
-    const started = sessionStartedPayloadSchema.safeParse(envelope.payload);
-    const clientRef = started.success ? started.data.clientRef : undefined;
-    if (clientRef !== undefined) {
-      const index = pendingLaunches.findIndex((p) => p.clientRef === clientRef);
-      if (index >= 0) pendingLaunches.splice(index, 1)[0]!.resolve(envelope.session_id);
-    }
-  }
+  resolvePendingLaunch(envelope);
+}
+
+/**
+ * Device presence (Phase 4 Task 3) is channel-wide, not per-session: the daemon behind THIS
+ * device's channel (dis)connected. Offline → pause that device's live sessions; online →
+ * resubscribe them so the daemon backfills and they resume.
+ */
+function handleDevicePresence(deviceId: string, envelope: Envelope): void {
+  const presence = devicePresencePayloadSchema.safeParse(envelope.payload);
+  if (!presence.success) return;
+  updateChannel(deviceId, { daemonOnline: presence.data.online });
+  if (presence.data.online) reattachSessions(deviceId);
+  else sessionMap.update((map) => markChannelOffline(map, pauseScopeOf(deviceId)));
+}
+
+/**
+ * A forked handover continuation was registered (Journey 4): link the parent (adopted) session to
+ * the child. This is a cross-session update (the frame carries the CHILD id + the PARENT id in its
+ * payload), so it's handled here rather than in foldSessionFrame (which routes by a single
+ * session_id). The child's own status/transcript still stream in via its `session.started` etc.
+ */
+function linkChainedSessions(childId: string, envelope: Envelope): void {
+  const chained = sessionChainedPayloadSchema.safeParse(envelope.payload);
+  if (!chained.success) return;
+  const { parentSessionId } = chained.data;
+  sessionMap.update((map) => {
+    const next = new Map(map);
+    // Record the parent link on the child (create its state if the chained frame beat session.started).
+    const child = next.get(childId) ?? initialSessionState;
+    next.set(childId, { ...child, parentSessionId });
+    // Link the parent's handover to the child so its card can offer a "view continuation" link.
+    const parent = next.get(parentSessionId);
+    if (parent) next.set(parentSessionId, linkHandoverChild(parent, childId));
+    return next;
+  });
+}
+
+/**
+ * A started session resolves the launch carrying its correlation id (offline launches never start —
+ * they reject on the launch timeout instead, since the relay can't read the opaque clientRef).
+ */
+function resolvePendingLaunch(envelope: Envelope): void {
+  if (envelope.type !== 'session.started' || envelope.session_id === undefined) return;
+  const started = sessionStartedPayloadSchema.safeParse(envelope.payload);
+  const clientRef = started.success ? started.data.clientRef : undefined;
+  if (clientRef === undefined) return;
+  const index = pendingLaunches.findIndex((p) => p.clientRef === clientRef);
+  if (index >= 0) pendingLaunches.splice(index, 1)[0]!.resolve(envelope.session_id);
 }
 
 /**
@@ -229,7 +249,7 @@ function pauseScopeOf(deviceId: string): Set<string> {
 /**
  * Open/refresh the pool: one connection per paired device, idempotently — already-pooled devices
  * are reused, new ones dial, and a device no longer in the fleet (revoked) has its connection
- * closed and channel state dropped. `createConn` is the test seam; production uses the real
+ * closed and per-device state dropped. `createConn` is the test seam; production uses the real
  * {@link createRelayConnection}.
  */
 export function connectDevices(
@@ -237,42 +257,52 @@ export function connectDevices(
   options: ConnectOptions,
   createConn: typeof createRelayConnection = createRelayConnection,
 ): void {
-  const wanted = new Set(devices.map((device) => device.id));
-  // Close channels for devices that left the fleet (revoked/unpaired).
-  for (const [deviceId, connection] of connections) {
-    if (!wanted.has(deviceId)) {
-      connection.close();
-      connections.delete(deviceId);
-      deviceChannelMap.update((channels) => {
-        const next = new Map(channels);
-        next.delete(deviceId);
-        return next;
-      });
-      adoptStatesMap.update((states) => {
-        if (!states.has(deviceId)) return states;
-        const next = new Map(states);
-        next.delete(deviceId);
-        return next;
-      });
-    }
-  }
+  closeChannelsNotIn(new Set(devices.map((device) => device.id)));
   for (const device of devices) {
-    if (connections.has(device.id)) continue;
-    updateChannel(device.id, { connection: 'connecting', daemonOnline: null });
-    const connection = createConn({
-      relayUrl: options.relayUrl,
-      userId: options.userId,
-      deviceId: device.id,
-      getChannelToken: options.getChannelToken,
-      daemonPublicKey: device.publicKey,
-      onStatus: (status) => updateChannel(device.id, { connection: status }),
-      onEvent: (envelope) => handleEvent(device.id, envelope),
-      onReconnect: () => reattachSessions(device.id),
-      onAdoptState: (state) =>
-        adoptStatesMap.update((states) => new Map(states).set(device.id, state)),
-    });
-    connections.set(device.id, connection);
+    if (!connections.has(device.id)) dialDeviceChannel(device, options, createConn);
   }
+}
+
+/** Close + forget the channels of devices that left the fleet (revoked/unpaired). */
+function closeChannelsNotIn(wanted: ReadonlySet<string>): void {
+  for (const [deviceId, connection] of connections) {
+    if (wanted.has(deviceId)) continue;
+    connection.close();
+    connections.delete(deviceId);
+    deviceChannelMap.update((channels) => {
+      const next = new Map(channels);
+      next.delete(deviceId);
+      return next;
+    });
+    adoptStatesMap.update((states) => {
+      if (!states.has(deviceId)) return states;
+      const next = new Map(states);
+      next.delete(deviceId);
+      return next;
+    });
+  }
+}
+
+/** Dial one device's channel and wire its callbacks into the per-device stores. */
+function dialDeviceChannel(
+  device: PoolDevice,
+  options: ConnectOptions,
+  createConn: typeof createRelayConnection,
+): void {
+  updateChannel(device.id, { connection: 'connecting', daemonOnline: null });
+  const connection = createConn({
+    relayUrl: options.relayUrl,
+    userId: options.userId,
+    deviceId: device.id,
+    getChannelToken: options.getChannelToken,
+    daemonPublicKey: device.publicKey,
+    onStatus: (status) => updateChannel(device.id, { connection: status }),
+    onEvent: (envelope) => handleEvent(device.id, envelope),
+    onReconnect: () => reattachSessions(device.id),
+    onAdoptState: (state) =>
+      adoptStatesMap.update((states) => new Map(states).set(device.id, state)),
+  });
+  connections.set(device.id, connection);
 }
 
 /**
@@ -326,8 +356,10 @@ function fetchChannelToken(): Promise<string> {
   })();
   mintedToken = { token, at: now };
   // A failed mint must not poison the share window — the next caller tries again immediately.
+  // Identity-guarded: a slow mint rejecting AFTER a newer one replaced it must not clear the
+  // newer, still-valid entry (that would re-burn the budget this cache exists to protect).
   token.catch(() => {
-    mintedToken = null;
+    if (mintedToken?.token === token) mintedToken = null;
   });
   return token;
 }
@@ -348,9 +380,8 @@ function reattachSessions(deviceId: string): void {
 
 /**
  * Seed session→device routing from the persisted registry (the layout's SSR data), so a cold
- * page's subscribes route correctly before any live frame has named a device. Live frames stay
- * authoritative — a seed never overwrites an existing route... it IS the same truth (the registry
- * row's deviceId), just earlier.
+ * page's subscribes route correctly before any live frame has named a device. A seed and a live
+ * frame carry the same truth (the session's device); the seed just arrives earlier.
  */
 export function seedSessionDevices(
   rows: readonly { readonly id: string; readonly deviceId: string }[],
@@ -369,18 +400,36 @@ export function seedSessionDevices(
 /**
  * Open/refresh the pooled connections if needed, minting channel tokens on demand — on the first
  * connect and on every reconnect, so a token that lapsed during a sleep is renewed (Phase 4 Task 4).
- * Idempotent and browser-only — the layout calls it whenever the device list changes.
+ * Idempotent and browser-only — the layout calls it whenever the device list changes, INCLUDING
+ * down to an empty fleet (revoking the last device must tear its channel down). `createConn` is
+ * the test seam; production uses the real connection.
  */
-export function ensureConnections(options: {
-  relayUrl: string;
-  userId: string;
-  devices: readonly PoolDevice[];
-}): void {
-  connectDevices(options.devices, {
-    relayUrl: options.relayUrl,
-    userId: options.userId,
-    getChannelToken: fetchChannelToken,
-  });
+export function ensureConnections(
+  options: {
+    relayUrl: string;
+    userId: string;
+    devices: readonly PoolDevice[];
+  },
+  createConn: typeof createRelayConnection = createRelayConnection,
+): void {
+  connectDevices(
+    options.devices,
+    {
+      relayUrl: options.relayUrl,
+      userId: options.userId,
+      getChannelToken: fetchChannelToken,
+    },
+    createConn,
+  );
+}
+
+/** The launch's target channel: the named device's, or the sole pooled one (never a guess). */
+function launchTarget(
+  deviceId: string | undefined,
+): { deviceId: string; conn: RelayConnection } | null {
+  const targetId = deviceId ?? (connections.size === 1 ? [...connections.keys()][0] : undefined);
+  const conn = targetId !== undefined ? connections.get(targetId) : undefined;
+  return targetId !== undefined && conn ? { deviceId: targetId, conn } : null;
 }
 
 /**
@@ -388,20 +437,19 @@ export function ensureConnections(options: {
  * started. The target device is explicit — with a fleet there is no "the" device to default to.
  */
 export function launch(payload: SessionLaunchPayload, deviceId?: string): Promise<string> {
-  const targetId = deviceId ?? (connections.size === 1 ? [...connections.keys()][0] : undefined);
-  const conn = targetId !== undefined ? connections.get(targetId) : undefined;
-  if (!conn || targetId === undefined) {
+  const target = launchTarget(deviceId);
+  if (!target) {
     return Promise.reject(new Error('Not connected to the relay.'));
   }
   const clientRef = crypto.randomUUID();
   return new Promise<string>((resolve, reject) => {
     const pending: PendingLaunch = {
       clientRef,
-      deviceId: targetId,
+      deviceId: target.deviceId,
       resolve: (sessionId) => {
         clearTimeout(pending.timer);
         // Route before resolving: the caller navigates to the session view, which subscribes.
-        routeSession(sessionId, targetId);
+        routeSession(sessionId, target.deviceId);
         resolve(sessionId);
       },
       reject: (error) => {
@@ -415,7 +463,7 @@ export function launch(payload: SessionLaunchPayload, deviceId?: string): Promis
       }, LAUNCH_TIMEOUT_MS),
     };
     pendingLaunches.push(pending);
-    conn.launch({ ...payload, clientRef });
+    target.conn.launch({ ...payload, clientRef });
   });
 }
 

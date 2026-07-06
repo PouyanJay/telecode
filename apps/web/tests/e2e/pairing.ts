@@ -108,7 +108,8 @@ export async function revokeAllDevices(sessionToken: string): Promise<void> {
   const res = await fetch(`${RELAY_HTTP}/me/devices`, {
     headers: { authorization: `Bearer ${sessionToken}` },
   });
-  if (!res.ok) return;
+  // Fail loudly: a spec relying on a clean fleet must not silently start from a dirty one.
+  if (!res.ok) throw new Error(`revokeAllDevices: listing devices failed (${res.status})`);
   const body = (await res.json()) as { devices?: { id: string }[] };
   for (const device of body.devices ?? []) {
     await revokeDevice(sessionToken, device.id);

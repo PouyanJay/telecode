@@ -84,6 +84,17 @@ describe('deviceStatus', () => {
     expect(status.lastSeen).toBe('2 hr ago');
   });
 
+  it('an authenticated channel still awaiting its first presence frame (no snapshot) stays connecting', () => {
+    // The relay sends a presence snapshot right after hello.ack, so this window is milliseconds —
+    // but it must read as "unknown, still confirming", never as a claim either way.
+    const status = deviceStatus(
+      { lastSeenAt: new Date(NOW), connection: 'connected', daemonOnline: null, restOnline: null },
+      NOW,
+    );
+    expect(status.online).toBe(false);
+    expect(status.label).toBe('CONNECTING…');
+  });
+
   it('reports offline on a connection error, whatever any earlier signal said', () => {
     const status = deviceStatus(
       {

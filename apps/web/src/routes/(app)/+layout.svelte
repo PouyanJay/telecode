@@ -63,12 +63,14 @@
     if (browser) writeSidebarWidth(localStorage, sidebarWidth);
   });
 
-  // Open (and keep) one channel per paired device (ux Phase 5); idempotent, so re-running on a later
-  // pairing — or after a revoke, which closes that device's channel — is safe. Routing is seeded from
-  // the persisted registry so a cold page's subscribes reach each session's OWN device before any live
-  // frame names it. Client-only ($effect never runs on the server).
+  // Keep the pool synced to the paired fleet (ux Phase 5): one channel per device, idempotent —
+  // a later pairing dials in, a revoke closes that device's channel, and revoking the LAST device
+  // must run too (an empty list tears every channel down; a length guard here once leaked the
+  // final connection forever). Routing is seeded from the persisted registry so a cold page's
+  // subscribes reach each session's OWN device before any live frame names it. Client-only
+  // ($effect never runs on the server).
   $effect(() => {
-    if (browser && data.devices.length > 0) {
+    if (browser) {
       seedSessionDevices(data.sessions);
       ensureConnections({
         relayUrl: RELAY_URL,
