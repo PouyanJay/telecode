@@ -1,6 +1,6 @@
 <script lang="ts">
+  import { clockTime } from '$lib/clock-time';
   import { segmentLabel, type ThreadSegment } from '$lib/threads';
-  import { clockTime } from '$lib/time';
 
   /**
    * The session view's lineage strip (ux Phase 3, B2): one cell per segment of the conversation —

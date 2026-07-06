@@ -566,6 +566,27 @@ describe('per-entry times (Phase 3 T1): daemon ts preferred, fold clock fallback
     expect(gate?.at).toBe(DAEMON_TS);
   });
 
+  it('prefers the daemon ts for question and handover asks too (every ask kind, same rule)', () => {
+    let state = applyEnvelope(startingState(), frame('session.started', {}), NOW);
+    state = applyEnvelope(
+      state,
+      frame('agent.question', { requestId: 'q1', questions: [DB_QUESTION], ts: DAEMON_TS }),
+      NOW,
+    );
+    state = applyEnvelope(
+      state,
+      frame('agent.handover', {
+        requestId: 'h1',
+        question: 'Take over?',
+        summary: '',
+        ts: DAEMON_TS + 1,
+      }),
+      NOW,
+    );
+    expect(state.entries.find((e) => e.kind === 'question')?.at).toBe(DAEMON_TS);
+    expect(state.entries.find((e) => e.kind === 'handover')?.at).toBe(DAEMON_TS + 1);
+  });
+
   it('maps backfilled history ts onto entries and leaves unstamped ones un-stamped', () => {
     const state = applyEnvelope(
       startingState(),

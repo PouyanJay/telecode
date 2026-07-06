@@ -1,5 +1,4 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createFakeAgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
+import { hookRpc } from './hook-rpc';
 import { markViewerPresent, startFakeRelay, type FakeRelay } from './fake-relay';
 
 /**
@@ -36,26 +36,6 @@ const CLAUDE_SESSION = 'claude-sess-1';
 const TELECODE_SESSION = '11111111-1111-1111-1111-111111111111';
 
 /** One bridge round-trip over the hook socket: write the event, half-close, read the decision JSON. */
-function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath);
-    let out = '';
-    client.on('connect', () => client.end(JSON.stringify(event)));
-    client.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf8');
-    });
-    client.on('end', () => {
-      // A force-closed connection (daemon stop while the gate blocks) leaves `out` empty — reject rather
-      // than let JSON.parse throw uncaught inside this event callback.
-      try {
-        resolve(JSON.parse(out));
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error('hook response parse failed'));
-      }
-    });
-    client.on('error', reject);
-  });
-}
 
 /** Assert a deny-feedback reason carries every expected fragment (keeps the loop out of the test body). */
 function assertReasonContainsAll(reason: string | undefined, expected: readonly string[]): void {

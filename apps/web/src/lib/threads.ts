@@ -58,6 +58,28 @@ function chainFor(leaf: SessionRow, byId: ReadonlyMap<string, SessionRow>): Sess
   return chain.reverse();
 }
 
+/** The ids that have at least one KNOWN child row — i.e. every non-leaf of some chain. */
+function parentsWithChildren(rows: readonly SessionRow[], known: Set<string>): Set<string> {
+  const hasChild = new Set<string>();
+  for (const row of rows) {
+    if (row.parentSessionId !== null && known.has(row.parentSessionId)) {
+      hasChild.add(row.parentSessionId);
+    }
+  }
+  return hasChild;
+}
+
+/** One collapsed thread for a leaf's chain: the LEAF's row identity, the ROOT's conversation identity. */
+function threadFor(leaf: SessionRow, chain: readonly SessionRow[]): ThreadRow {
+  const root = chain[0] as SessionRow;
+  return {
+    ...leaf,
+    origin: root.origin,
+    title: chain.map((row) => row.title).find((title) => title !== null) ?? null,
+    segments: chain.map((row) => segmentFor(row, leaf.id)),
+  };
+}
+
 /**
  * Collapse merged session rows into thread rows. Total: every input session appears exactly once —
  * as a thread row or inside one's segments. A session that would vanish (a parent-link cycle has no
@@ -65,12 +87,7 @@ function chainFor(leaf: SessionRow, byId: ReadonlyMap<string, SessionRow>): Sess
  */
 export function buildThreadRows(rows: readonly SessionRow[]): ThreadRow[] {
   const byId = new Map(rows.map((row) => [row.id, row]));
-  const hasChild = new Set<string>();
-  for (const row of rows) {
-    if (row.parentSessionId !== null && byId.has(row.parentSessionId)) {
-      hasChild.add(row.parentSessionId);
-    }
-  }
+  const hasChild = parentsWithChildren(rows, new Set(byId.keys()));
 
   const threads: ThreadRow[] = [];
   const absorbed = new Set<string>();
@@ -81,20 +98,12 @@ export function buildThreadRows(rows: readonly SessionRow[]): ThreadRow[] {
       threads.push({ ...leaf, segments: [] });
       continue;
     }
-    const root = chain[0] as SessionRow;
     for (const member of chain) absorbed.add(member.id);
-    threads.push({
-      ...leaf,
-      origin: root.origin,
-      title: chain.map((row) => row.title).find((title) => title !== null) ?? null,
-      segments: chain.map((row) => segmentFor(row, leaf.id)),
-    });
+    threads.push(threadFor(leaf, chain));
   }
   // A cycle has no leaf, so its members were skipped AND never absorbed — surface them as plain rows.
   for (const row of rows) {
-    if (hasChild.has(row.id) && !absorbed.has(row.id)) {
-      threads.push({ ...row, segments: [] });
-    }
+    if (hasChild.has(row.id) && !absorbed.has(row.id)) threads.push({ ...row, segments: [] });
   }
   return threads;
 }
@@ -102,64 +111,4 @@ export function buildThreadRows(rows: readonly SessionRow[]): ThreadRow[] {
 /** Where a segment ran, in the product vocabulary (the crumb's words). */
 export function segmentLabel(origin: SessionOrigin): 'terminal' | 'telecode' {
   return origin === 'external' ? 'terminal' : 'telecode';
-}
-
-/** The chain facts `lineageOf` needs — structural, so registry rows and merged rows both fit. */
-export interface LineageMember {
-  readonly id: string;
-  readonly parentSessionId: string | null;
-  readonly origin: SessionOrigin;
-  readonly createdAt: Date;
-}
-
-/**
- * The whole conversation a session belongs to, root→end, for the session view's lineage strip (B2) —
- * `isCurrent` marks the OPEN session, wherever it sits in the chain (a reopened parent still shows the
- * strip). Walks up through `parentSessionId`, then down through each segment's NEWEST child (a segment
- * taken over twice continues through the take that stuck). Unknown parents, unknown ids, cycles, and
- * unchained sessions all yield `[]` — the strip renders only an honest, linear chain.
- */
-export function lineageOf(sessionId: string, members: readonly LineageMember[]): ThreadSegment[] {
-  const byId = new Map(members.map((m) => [m.id, m]));
-  const open = byId.get(sessionId);
-  if (!open) return [];
-
-  const visited = new Set<string>([open.id]);
-  const upward: LineageMember[] = [];
-  let parentId = open.parentSessionId;
-  while (parentId !== null) {
-    const parent = byId.get(parentId);
-    if (!parent) break;
-    if (visited.has(parent.id)) return []; // a link cycle can't render an honest linear strip
-    upward.push(parent);
-    visited.add(parent.id);
-    parentId = parent.parentSessionId;
-  }
-
-  const newestChildOf = new Map<string, LineageMember>();
-  for (const m of members) {
-    if (m.parentSessionId === null) continue;
-    const best = newestChildOf.get(m.parentSessionId);
-    if (!best || m.createdAt.getTime() > best.createdAt.getTime()) {
-      newestChildOf.set(m.parentSessionId, m);
-    }
-  }
-  const downward: LineageMember[] = [];
-  let tip: LineageMember = open;
-  for (;;) {
-    const child = newestChildOf.get(tip.id);
-    if (!child || visited.has(child.id)) break;
-    downward.push(child);
-    visited.add(child.id);
-    tip = child;
-  }
-
-  const chain = [...upward.reverse(), open, ...downward];
-  if (chain.length < 2) return [];
-  return chain.map((m) => ({
-    sessionId: m.id,
-    origin: m.origin,
-    startedAt: m.createdAt,
-    isCurrent: m.id === open.id,
-  }));
 }

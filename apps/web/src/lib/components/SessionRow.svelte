@@ -2,8 +2,9 @@
   import { Pill, StatusDot } from '@telecode/ui';
 
   import { SESSION_DISPLAY } from '$lib/session-display';
+  import { clockTime } from '$lib/clock-time';
   import { segmentLabel, type ThreadRow } from '$lib/threads';
-  import { clockTime, relativeTime } from '$lib/time';
+  import { relativeTime } from '$lib/time';
 
   /**
    * One thread in the dashboard list (enterprise-ui §7): a full-row `<a href>` to the session, with the

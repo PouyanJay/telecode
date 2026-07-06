@@ -11,6 +11,7 @@ import {
   type AgentQuestionItem,
   type Envelope,
   type QuestionAnswerItem,
+  type SessionHistoryEntry,
   type SessionStatusName,
 } from '@telecode/protocol';
 
@@ -231,6 +232,66 @@ function revertInFlightActions(entries: readonly TranscriptEntry[]): readonly Tr
 }
 
 /**
+ * One backfilled wire entry → its transcript entry. A resolved gate (`allow`/`deny`) replays as decided
+ * (no action buttons); a still-open one stays `pending` and actionable — the same decided-vs-pending
+ * split for questions (answers present) and handovers (answerText present). `at` is the daemon's stamp
+ * or nothing: the fold clock would claim every historic entry was created "now", so it is never used.
+ */
+function mapHistoryEntry(entry: SessionHistoryEntry, id: string): TranscriptEntry {
+  const at = entry.ts !== undefined ? { at: entry.ts } : {};
+  switch (entry.kind) {
+    case 'user':
+      return { kind: 'user', id, text: entry.text, ...at };
+    case 'message':
+      return { kind: 'message', id, text: entry.text, ...at };
+    case 'tool':
+      return { kind: 'tool', id, toolName: entry.toolName, input: entry.input, ...at };
+    case 'permission':
+      return {
+        kind: 'permission',
+        id,
+        requestId: entry.requestId,
+        toolName: entry.toolName,
+        input: entry.input,
+        decision:
+          entry.decision === 'allow'
+            ? 'approved'
+            : entry.decision === 'deny'
+              ? 'rejected'
+              : 'pending',
+        ...at,
+      };
+    case 'question':
+      return {
+        kind: 'question',
+        id,
+        requestId: entry.requestId,
+        questions: entry.questions,
+        answer: entry.answers !== undefined ? 'answered' : 'pending',
+        ...(entry.answers !== undefined ? { answers: entry.answers } : {}),
+        ...at,
+      };
+    case 'handover':
+      return {
+        kind: 'handover',
+        id,
+        requestId: entry.requestId,
+        question: entry.question,
+        summary: entry.summary,
+        state: entry.answerText !== undefined ? 'submitted' : 'pending',
+        ...(entry.answerText !== undefined ? { answerText: entry.answerText } : {}),
+        ...at,
+      };
+    default: {
+      // Exhaustiveness: a new history-entry kind must be handled here (parse already rejects
+      // unknown kinds at runtime, so this is unreachable).
+      const _exhaustive: never = entry;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
  * Fold one inbound relay frame into the session state. Unknown/invalid frames are ignored. `now` stamps
  * newly-arrived asks (their client receive-time) — injected so the reducer stays pure and testable.
  */
@@ -409,66 +470,9 @@ export function applyEnvelope(
           status: terminal ? base.status : parsed.data.status,
         };
       }
-      const entries: TranscriptEntry[] = parsed.data.entries.map((entry, i) => {
-        const id = `e${i}`;
-        // A backfilled entry's time is the daemon's stamp or nothing — the fold clock would claim
-        // every historic entry was created "now", so it is never used here.
-        const at = entry.ts !== undefined ? { at: entry.ts } : {};
-        switch (entry.kind) {
-          case 'user':
-            return { kind: 'user', id, text: entry.text, ...at };
-          case 'message':
-            return { kind: 'message', id, text: entry.text, ...at };
-          case 'tool':
-            return { kind: 'tool', id, toolName: entry.toolName, input: entry.input, ...at };
-          case 'permission':
-            return {
-              kind: 'permission',
-              id,
-              requestId: entry.requestId,
-              toolName: entry.toolName,
-              input: entry.input,
-              decision:
-                entry.decision === 'allow'
-                  ? 'approved'
-                  : entry.decision === 'deny'
-                    ? 'rejected'
-                    : 'pending',
-              ...at,
-            };
-          case 'question':
-            // A backfilled question replays as decided (answered, no picker) when it carries answers, or
-            // still-open (pending, actionable) otherwise — the same decided-vs-pending split as a permission.
-            return {
-              kind: 'question',
-              id,
-              requestId: entry.requestId,
-              questions: entry.questions,
-              answer: entry.answers !== undefined ? 'answered' : 'pending',
-              ...(entry.answers !== undefined ? { answers: entry.answers } : {}),
-              ...at,
-            };
-          case 'handover':
-            // A backfilled handover replays as submitted (taken over) when it carries the user's answerText,
-            // or still-open (pending, actionable) otherwise — the same decided-vs-pending split.
-            return {
-              kind: 'handover',
-              id,
-              requestId: entry.requestId,
-              question: entry.question,
-              summary: entry.summary,
-              state: entry.answerText !== undefined ? 'submitted' : 'pending',
-              ...(entry.answerText !== undefined ? { answerText: entry.answerText } : {}),
-              ...at,
-            };
-          default: {
-            // Exhaustiveness: a new history-entry kind must be handled here (parse already rejects
-            // unknown kinds at runtime, so this is unreachable).
-            const _exhaustive: never = entry;
-            return _exhaustive;
-          }
-        }
-      });
+      const entries: TranscriptEntry[] = parsed.data.entries.map((entry, i) =>
+        mapHistoryEntry(entry, `e${i}`),
+      );
       return {
         sessionId: envelope.session_id ?? base.sessionId,
         status: parsed.data.status,

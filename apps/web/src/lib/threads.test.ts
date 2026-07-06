@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SessionRow } from './session-groups';
-import { buildThreadRows, lineageOf, segmentLabel, type ThreadRow } from './threads';
+import { lineageOf } from './lineage';
+import { buildThreadRows, segmentLabel, type ThreadRow } from './threads';
 
 /**
  * Threads (ux Phase 3, B1): sessions linked by `parentSessionId` collapse into ONE dashboard row — the

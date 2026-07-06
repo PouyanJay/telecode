@@ -2,6 +2,8 @@ import {
   makeEnvelope,
   parseEnvelope,
   permissionDecisionPayloadSchema,
+  sessionAdoptedPayloadSchema,
+  sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
   sessionLaunchPayloadSchema,
   type Envelope,
@@ -101,8 +103,8 @@ socket.addEventListener('message', (event: MessageEvent) => {
   // The relay's adopted-announce ACK: it minted the parent's registry row. Mirror a short "terminal"
   // transcript (daemon-stamped ts, like the real mirror), end it, and register the continuation.
   if (envelope.type === 'session.adopted') {
-    const ref = (envelope.payload as { clientRef?: string }).clientRef;
-    if (ref !== CHAIN_PARENT_REF) return;
+    const ack = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
+    if (!ack.success || ack.data.clientRef !== CHAIN_PARENT_REF) return;
     const rec = recordFor(sid);
     const base = Date.now() - 60 * 60_000; // the terminal stretch ran an hour ago
     rec.transcript.push(
@@ -121,16 +123,20 @@ socket.addEventListener('message', (event: MessageEvent) => {
 
   // The relay's chained ACK: the continuation's row exists, linked to the parent. Bring it live.
   if (envelope.type === 'session.chained') {
-    const ref = (envelope.payload as { clientRef?: string }).clientRef;
-    if (ref !== CHAIN_CHILD_REF) return;
+    const ack = sessionChainedPayloadSchema.safeParse(envelope.payload);
+    if (!ack.success || ack.data.clientRef !== CHAIN_CHILD_REF) return;
     const rec = recordFor(sid);
+    // One stamp per entry, minted once — the live frame and the backfill must carry the SAME instant
+    // (the real daemon's record-time invariant).
+    const userTs = Date.now() - 5 * 60_000;
+    const messageTs = Date.now() - 4 * 60_000;
     rec.transcript.push(
-      { kind: 'user', text: 'Ship the fix from here', ts: Date.now() - 5 * 60_000 },
-      { kind: 'message', text: 'Continuing in telecode', ts: Date.now() - 4 * 60_000 },
+      { kind: 'user', text: 'Ship the fix from here', ts: userTs },
+      { kind: 'message', text: 'Continuing in telecode', ts: messageTs },
     );
     rec.status = 'running';
     send('session.started', {}, sid);
-    send('agent.message', { text: 'Continuing in telecode', ts: Date.now() - 4 * 60_000 }, sid);
+    send('agent.message', { text: 'Continuing in telecode', ts: messageTs }, sid);
     return;
   }
 

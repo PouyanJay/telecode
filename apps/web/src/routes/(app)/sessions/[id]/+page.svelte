@@ -10,8 +10,9 @@
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, type SessionState } from '$lib/session';
-  import { lineageOf, segmentLabel } from '$lib/threads';
-  import { clockTime } from '$lib/time';
+  import { clockTime } from '$lib/clock-time';
+  import { lineageOf } from '$lib/lineage';
+  import { segmentLabel } from '$lib/threads';
   import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
@@ -134,6 +135,23 @@
   function onHandover(requestId: string, answerText: string): void {
     answerHandover(sessionId, { requestId, answerText });
   }
+
+  // Actions on INHERITED entries route to the segment that owns them, not the open session.
+  function actionsFor(targetSessionId: string) {
+    return {
+      onapprove: (requestId: string) => decide(targetSessionId, { requestId, behavior: 'allow' }),
+      onreject: (requestId: string, message?: string) =>
+        decide(targetSessionId, {
+          requestId,
+          behavior: 'deny',
+          ...(message !== undefined ? { message } : {}),
+        }),
+      onanswer: (requestId: string, answers: QuestionAnswerItem[]) =>
+        answer(targetSessionId, { requestId, answers }),
+      onhandover: (requestId: string, answerText: string) =>
+        answerHandover(targetSessionId, { requestId, answerText }),
+    };
+  }
 </script>
 
 <svelte:head>
@@ -211,18 +229,7 @@
                 <InheritedContext
                   entries={inheritedEntries}
                   segmentName={segmentLabel(prevSegment.origin)}
-                  onapprove={(requestId) =>
-                    decide(prevSegment.sessionId, { requestId, behavior: 'allow' })}
-                  onreject={(requestId, message) =>
-                    decide(prevSegment.sessionId, {
-                      requestId,
-                      behavior: 'deny',
-                      ...(message !== undefined ? { message } : {}),
-                    })}
-                  onanswer={(requestId, answers) =>
-                    answer(prevSegment.sessionId, { requestId, answers })}
-                  onhandover={(requestId, answerText) =>
-                    answerHandover(prevSegment.sessionId, { requestId, answerText })}
+                  {...actionsFor(prevSegment.sessionId)}
                 />
               {/if}
               <SegmentDivider

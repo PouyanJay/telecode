@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { clockTime, relativeTime } from './time';
+import { clockTime } from './clock-time';
+import { relativeTime } from './time';
 
 const NOW = new Date('2026-06-29T12:00:00Z').getTime();
 
