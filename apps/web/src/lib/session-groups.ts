@@ -22,6 +22,11 @@ export interface SessionRow {
    * from a plain launch in the list, not only inside the session view.
    */
   readonly isContinuation: boolean;
+  /**
+   * The session this one continues, when known — the chain link `buildThreadRows` collapses into one
+   * thread row (ux Phase 3). From the registry, or a live `session.chained` frame for a fresh fork.
+   */
+  readonly parentSessionId: string | null;
   readonly createdAt: Date;
 }
 
@@ -63,6 +68,7 @@ export function buildSessionRows(input: {
       deviceName: input.deviceNameOf(session.deviceId),
       origin: session.origin,
       isContinuation: session.parentSessionId !== null,
+      parentSessionId: session.parentSessionId,
       createdAt: session.createdAt,
     });
   }
@@ -71,6 +77,8 @@ export function buildSessionRows(input: {
     // A live state that is still `idle` carries no frames yet — keep what the registry says.
     const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
     const title = existing?.title ?? firstPrompt(state.entries) ?? null;
+    // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
+    const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
     byId.set(id, {
       id,
       title,
@@ -78,8 +86,8 @@ export function buildSessionRows(input: {
       deviceName: existing?.deviceName ?? input.watchedDeviceName,
       // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
       origin: existing?.origin ?? 'launched',
-      // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
-      isContinuation: (existing?.isContinuation ?? false) || state.parentSessionId !== null,
+      isContinuation: parentSessionId !== null,
+      parentSessionId,
       createdAt: existing?.createdAt ?? input.now ?? new Date(),
     });
   }
