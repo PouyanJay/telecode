@@ -1,19 +1,22 @@
-import { makeEnvelope, type Envelope } from '@telecode/protocol';
+import { makeEnvelope, type AdoptStatePayload, type Envelope } from '@telecode/protocol';
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RelayConnection, type RelayConnectionOptions } from './relay-client';
 import {
+  adoptStates,
   connectDevices,
   connectionState,
   decide,
   deviceChannels,
   disconnect,
   launch,
+  requestAdoptConfig,
   seedSessionDevices,
   sendUserMessage,
   sessionDevices,
   sessions,
+  setAdoptConfig,
   subscribe,
 } from './session-store';
 
@@ -34,8 +37,10 @@ interface FakeConn {
   readonly decisions: { sessionId: string; payload: unknown }[];
   readonly messages: { sessionId: string; text: string }[];
   readonly launched: unknown[];
+  readonly adoptConfigs: unknown[];
   closed: boolean;
   emit(envelope: Envelope): void;
+  emitAdoptState(state: AdoptStatePayload): void;
   setStatus(status: 'connecting' | 'connected' | 'error'): void;
   reconnect(): void;
 }
@@ -50,8 +55,10 @@ function makeFakePool() {
       decisions: [],
       messages: [],
       launched: [],
+      adoptConfigs: [],
       closed: false,
       emit: (envelope) => options.onEvent(envelope),
+      emitAdoptState: (state) => options.onAdoptState?.(state),
       setStatus: (status) => options.onStatus(status),
       reconnect: () => options.onReconnect?.(),
     };
@@ -65,7 +72,7 @@ function makeFakePool() {
       answer: () => undefined,
       answerHandover: () => undefined,
       control: () => undefined,
-      sendAdoptConfig: () => undefined,
+      sendAdoptConfig: (set) => conn.adoptConfigs.push(set),
       close: () => {
         conn.closed = true;
       },
@@ -275,5 +282,40 @@ describe('multi-device connection pool (ux Phase 5 T1)', () => {
     expect(pool.byDevice.get('device-a')?.messages).toEqual([]);
     const state = get(sessions).get('sess-b');
     expect(state?.entries.some((e) => e.kind === 'user' && e.text === 'keep going')).toBe(true);
+  });
+
+  it('keeps each device’s adoption policy apart and routes config reads/writes to its channel', () => {
+    const enabled: AdoptStatePayload = {
+      enabled: true,
+      denylist: [],
+      hooksInstalled: true,
+      events: ['a'],
+    };
+    const disabled: AdoptStatePayload = {
+      enabled: false,
+      denylist: ['/p'],
+      hooksInstalled: false,
+      events: [],
+    };
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+
+    // A read goes to the ASKED device only; a write likewise.
+    requestAdoptConfig('device-a');
+    setAdoptConfig('device-b', { enabled: false, denylist: ['/p'] });
+    expect(pool.byDevice.get('device-a')?.adoptConfigs).toEqual([undefined]);
+    expect(pool.byDevice.get('device-b')?.adoptConfigs).toEqual([
+      { enabled: false, denylist: ['/p'] },
+    ]);
+
+    // Each daemon's sealed adopt.state reply lands under ITS device — never overwriting the other's.
+    pool.byDevice.get('device-a')!.emitAdoptState(enabled);
+    pool.byDevice.get('device-b')!.emitAdoptState(disabled);
+    expect(get(adoptStates).get('device-a')).toEqual(enabled);
+    expect(get(adoptStates).get('device-b')).toEqual(disabled);
+
+    // A device that leaves the fleet takes its policy state with it.
+    connectDevices([DEVICE_A], options, pool.create);
+    expect(get(adoptStates).has('device-b')).toBe(false);
   });
 });

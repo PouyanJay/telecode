@@ -73,9 +73,10 @@ const deviceChannelMap = writable<ReadonlyMap<string, DeviceChannelState>>(new M
 // Which device each session runs on — the send-routing truth. Fed by registry seeds (cold loads)
 // and by every inbound frame's `device_id` (authoritative for live sessions).
 const sessionDeviceMap = writable<ReadonlyMap<string, string>>(new Map());
-// The daemon's current adoption policy (Journey 3), updated from sealed `adopt.state` frames. Null until
-// the Settings page requests it. Bridge: last-received across the pool (per-device in T6).
-const adoptStateStore = writable<AdoptStatePayload | null>(null);
+// Each device daemon's adoption policy (Journey 3, per-device since ux Phase 5), keyed by device
+// id and updated from that channel's sealed `adopt.state` frames. A device is absent until the
+// Settings page requests its policy (or its daemon replies).
+const adoptStatesMap = writable<ReadonlyMap<string, AdoptStatePayload>>(new Map());
 
 const connections = new Map<string, RelayConnection>();
 // Launches awaiting their relay-minted id, matched by the `clientRef` the daemon echoes on
@@ -110,9 +111,9 @@ export const connectionState: Readable<ConnectionState> = derived(deviceChannelM
   return sawConnecting ? 'connecting' : sawError ? 'error' : 'idle';
 });
 
-/** The daemon's current adoption policy for the Settings UI; null until first received (Journey 3). */
-export const adoptState: Readable<AdoptStatePayload | null> = {
-  subscribe: adoptStateStore.subscribe,
+/** Each device daemon's adoption policy for the Settings UI, keyed by device id (Journey 3 / ux Phase 5). */
+export const adoptStates: Readable<ReadonlyMap<string, AdoptStatePayload>> = {
+  subscribe: adoptStatesMap.subscribe,
 };
 
 function updateChannel(deviceId: string, patch: Partial<DeviceChannelState>): void {
@@ -247,6 +248,12 @@ export function connectDevices(
         next.delete(deviceId);
         return next;
       });
+      adoptStatesMap.update((states) => {
+        if (!states.has(deviceId)) return states;
+        const next = new Map(states);
+        next.delete(deviceId);
+        return next;
+      });
     }
   }
   for (const device of devices) {
@@ -261,7 +268,8 @@ export function connectDevices(
       onStatus: (status) => updateChannel(device.id, { connection: status }),
       onEvent: (envelope) => handleEvent(device.id, envelope),
       onReconnect: () => reattachSessions(device.id),
-      onAdoptState: (state) => adoptStateStore.set(state),
+      onAdoptState: (state) =>
+        adoptStatesMap.update((states) => new Map(states).set(device.id, state)),
     });
     connections.set(device.id, connection);
   }
@@ -488,19 +496,14 @@ export function sendControl(sessionId: string, action: SessionControlAction): vo
   connectionFor(sessionId)?.control(sessionId, action);
 }
 
-/**
- * Ask a daemon for its current adoption policy (Journey 3); the reply lands on {@link adoptState}.
- * Bridge: targets the first pooled device until Settings goes per-device (T6).
- */
-export function requestAdoptConfig(): void {
-  const first = connections.values().next().value;
-  first?.sendAdoptConfig();
+/** Ask ONE device's daemon for its adoption policy (Journey 3); the reply lands on {@link adoptStates}. */
+export function requestAdoptConfig(deviceId: string): void {
+  connections.get(deviceId)?.sendAdoptConfig();
 }
 
-/** Update the daemon's adoption policy (sealed); the daemon persists it and echoes {@link adoptState}. */
-export function setAdoptConfig(settings: AdoptSettings): void {
-  const first = connections.values().next().value;
-  first?.sendAdoptConfig(settings);
+/** Update ONE device's adoption policy (sealed); its daemon persists it and echoes {@link adoptStates}. */
+export function setAdoptConfig(deviceId: string, settings: AdoptSettings): void {
+  connections.get(deviceId)?.sendAdoptConfig(settings);
 }
 
 /** Close every pooled connection and reject in-flight launches (only on full teardown, e.g. sign-out). */
@@ -515,5 +518,5 @@ export function disconnect(): void {
   // Full teardown (sign-out): drop watched-session state. A later reconnect re-fetches the list from the
   // registry and backfills transcripts, so nothing stale should linger across a disconnect.
   sessionMap.set(new Map());
-  adoptStateStore.set(null);
+  adoptStatesMap.set(new Map());
 }
