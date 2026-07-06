@@ -1,5 +1,5 @@
 import { type SessionOrigin, type SessionStatusName } from '@telecode/protocol';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, count, desc, eq, inArray } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
 import { sessions } from '../db/schema';
@@ -62,6 +62,11 @@ export interface SessionRegistry {
    * session ids so the caller can tell watching browsers (a live dashboard must clear without a refresh).
    */
   endSessionsForDevice(input: { userId: string; deviceId: string }): Promise<string[]>;
+  /**
+   * Sessions-ever per device for the user (RLS-scoped) — the "history size" a revoked device still
+   * holds, shown in the web's Revoked section so revoking never looks like the history vanished.
+   */
+  countByDevice(userId: string): Promise<ReadonlyMap<string, number>>;
 }
 
 export function createSessionRegistry(db: DbHandle): SessionRegistry {
@@ -171,6 +176,17 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
           )
           .returning({ id: sessions.id });
         return ended.map((row) => row.id);
+      });
+    },
+
+    async countByDevice(userId): Promise<ReadonlyMap<string, number>> {
+      return withUserContext(db, userId, async (scoped) => {
+        const rows = await scoped
+          .select({ deviceId: sessions.deviceId, total: count() })
+          .from(sessions)
+          .where(eq(sessions.userId, userId))
+          .groupBy(sessions.deviceId);
+        return new Map(rows.map((row) => [row.deviceId, row.total]));
       });
     },
   };

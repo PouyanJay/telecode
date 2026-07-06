@@ -54,8 +54,18 @@ export {
 } from './webcrypto';
 export type { CryptoKeyHandle, CryptoKeyPairHandle } from './webcrypto';
 
-export { deviceCodeRequestSchema, deviceCodeResponseSchema, pollResultSchema } from './device-auth';
-export type { DeviceCodeRequest, DeviceCodeResponse, PollResult } from './device-auth';
+export {
+  deviceApproveResponseSchema,
+  deviceCodeRequestSchema,
+  deviceCodeResponseSchema,
+  pollResultSchema,
+} from './device-auth';
+export type {
+  DeviceApproveResponse,
+  DeviceCodeRequest,
+  DeviceCodeResponse,
+  PollResult,
+} from './device-auth';
 
 export {
   base64KeySchema,

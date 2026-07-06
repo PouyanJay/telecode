@@ -1,12 +1,24 @@
 import { fail } from '@sveltejs/kit';
 
-import { revokeDevice } from '$lib/server/relay-api';
+import { listRevokedDevices, revokeDevice } from '$lib/server/relay-api';
 import { getSessionToken } from '$lib/server/session-cookie';
 
-import type { Actions } from './$types';
+import type { Actions, PageServerLoad } from './$types';
 
 /** A device id is a uuid; validated at this trust boundary (the relay re-validates authoritatively). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The Devices page also loads the user's REVOKED devices for the Revoked section (the active list +
+ * live sessions come from the `(app)` layout). Kept on the page, not the layout, so revoked rows never
+ * reach the code that hardwires the watched device to `devices[0]`. Error ≠ empty: a failed read shows
+ * an outage state, never "no revoked devices".
+ */
+export const load: PageServerLoad = async ({ cookies }) => {
+  const token = getSessionToken(cookies);
+  const result = token ? await listRevokedDevices(token) : { ok: true, items: [] };
+  return { revokedDevices: result.items, revokedError: !result.ok };
+};
 
 /**
  * Revoke a paired device. The relay scopes the revoke to the authenticated owner (the user id comes from

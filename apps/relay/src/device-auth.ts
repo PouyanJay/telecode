@@ -2,10 +2,12 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   deviceCodeRequestSchema,
+  type DeviceApproveResponse,
   type DeviceCodeResponse,
   type PollResult,
 } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
+import type { Logger } from 'pino';
 import { z } from 'zod';
 
 import { constantTimeEquals } from './auth/secret-compare';
@@ -35,16 +37,43 @@ export interface DeviceAuthOptions {
    */
   maxApproveFailures?: number;
   approveFailureWindowMs?: number;
+  /** Structured logger for restore-lifecycle triangulation; token material is never logged. */
+  logger?: Logger;
 }
 
 /** The outcome of an approve attempt: bound, invalid code, or the approver is brute-force locked out. */
 export type ApproveOutcome = 'approved' | 'invalid' | 'rate_limited';
 
+/** An approve attempt's outcome plus what it bound: a restored identity or a fresh device. */
+export interface ApproveResult {
+  readonly outcome: ApproveOutcome;
+  /** True when the approval re-authorized an existing revoked device instead of inserting a new one. */
+  readonly restored: boolean;
+  /** The restored device's name for UI copy; null on anything but a restore. */
+  readonly deviceName: string | null;
+}
+
 export interface DeviceAuthService {
-  requestCode(input: { name?: string; publicKey?: string; os?: string }): DeviceCodeResponse;
+  /**
+   * Mint a pending code. When the caller presents `priorDeviceToken` (restore evidence from a revoked
+   * device), it is verified against the registry NOW — a matching revoked row binds the pending code
+   * to that device identity so approval can restore it instead of inserting a new row.
+   */
+  requestCode(input: {
+    name?: string;
+    publicKey?: string;
+    os?: string;
+    priorDeviceToken?: string;
+  }): Promise<DeviceCodeResponse>;
   poll(deviceCode: string): PollResult;
-  /** Persist + bind the device to `userId` (server-derived). See {@link ApproveOutcome}. */
-  approve(userCode: string, userId: string): Promise<ApproveOutcome>;
+  /** Persist + bind the device to `userId` (server-derived). See {@link ApproveResult}. */
+  approve(userCode: string, userId: string): Promise<ApproveResult>;
+  /**
+   * Devices with a live, unapproved grant carrying VERIFIED restore evidence — the web's
+   * "awaiting re-authorization" signal. A pure query: expired grants are skipped (their lazy
+   * eviction stays with the poll/approve paths).
+   */
+  pendingRestoreDeviceIds(): readonly string[];
 }
 
 interface PendingRecord {
@@ -57,6 +86,42 @@ interface PendingRecord {
   userId?: string;
   deviceId?: string;
   deviceToken?: string;
+  /**
+   * The single in-flight/settled bind for this record. Every approve call — including a concurrent
+   * duplicate that lands mid-bind — awaits this same promise, so all of them report the one true
+   * outcome (no second bind, no guessed `restored` flag).
+   */
+  binding?: Promise<ApproveResult>;
+  /** Verified restore evidence: the revoked device this code can re-authorize, its owner, its name. */
+  restoreDeviceId?: string;
+  restoreUserId?: string;
+  restoreDeviceName?: string;
+}
+
+function refusedResult(outcome: ApproveOutcome): ApproveResult {
+  return { outcome, restored: false, deviceName: null };
+}
+
+function approvedResult(restored: boolean, record: PendingRecord): ApproveResult {
+  return { outcome: 'approved', restored, deviceName: restored ? restoredName(record) : null };
+}
+
+/** The name the restored device ended up with: the re-pair request's, else the row's stored one. */
+function restoredName(record: PendingRecord): string | null {
+  return record.name ?? record.restoreDeviceName ?? null;
+}
+
+/** The descriptor fields the pairing request actually supplied (absent ones must not overwrite). */
+function suppliedDescriptors(record: PendingRecord): {
+  name?: string;
+  publicKey?: string;
+  os?: string;
+} {
+  return {
+    ...(record.name !== undefined ? { name: record.name } : {}),
+    ...(record.publicKey !== undefined ? { publicKey: record.publicKey } : {}),
+    ...(record.os !== undefined ? { os: record.os } : {}),
+  };
 }
 
 function generateUserCode(): string {
@@ -122,8 +187,86 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
     approveFailures.set(userId, recent);
   }
 
+  /**
+   * Verify restore evidence against the registry. Only a token whose hash matches a REVOKED row binds
+   * the pending code to that identity; unknown/active/garbage tokens degrade to a plain pair.
+   */
+  async function resolveRestoreEvidence(
+    priorDeviceToken: string,
+  ): Promise<Pick<PendingRecord, 'restoreDeviceId' | 'restoreUserId' | 'restoreDeviceName'>> {
+    const revoked = await options.registry.findRevokedByTokenHash(
+      hashDeviceToken(priorDeviceToken),
+    );
+    if (!revoked) {
+      options.logger?.info(
+        { restore_evidence: 'unverified' },
+        'pairing request carried unverifiable restore evidence — plain pair',
+      );
+      return {};
+    }
+    options.logger?.info(
+      { device_id: revoked.id, restore_evidence: 'verified' },
+      'pairing code bound to verified restore evidence',
+    );
+    return {
+      restoreDeviceId: revoked.id,
+      restoreUserId: revoked.userId,
+      restoreDeviceName: revoked.name,
+    };
+  }
+
+  /**
+   * Bind an approved code to a device row. Restore path: the code carries verified evidence for a
+   * revoked device AND the approver is its owner → re-authorize the SAME row (identity + session
+   * history preserved). Every other case — no evidence, or a different account approving (the machine
+   * is being handed to someone else) — inserts a fresh device.
+   */
+  async function bindDevice(
+    record: PendingRecord,
+    userId: string,
+    deviceTokenHash: string,
+  ): Promise<{ deviceId: string; restored: boolean }> {
+    if (record.restoreDeviceId !== undefined && record.restoreUserId === userId) {
+      const restored = await options.registry.restoreDevice({
+        userId,
+        deviceId: record.restoreDeviceId,
+        deviceTokenHash,
+        ...suppliedDescriptors(record),
+      });
+      if (restored) {
+        options.logger?.info(
+          { device_id: record.restoreDeviceId, user_id: userId },
+          'device restored: same identity re-authorized',
+        );
+        return { deviceId: record.restoreDeviceId, restored: true };
+      }
+      // The row vanished or was already restored under a different grant — fall through to a fresh insert.
+      options.logger?.warn(
+        { device_id: record.restoreDeviceId, user_id: userId },
+        'verified restore evidence but the row was no longer restorable — issuing a fresh device',
+      );
+    }
+    const deviceId = await options.registry.createDevice({
+      userId,
+      deviceTokenHash,
+      ...suppliedDescriptors(record),
+      name: record.name ?? 'device',
+    });
+    return { deviceId, restored: false };
+  }
+
+  /** Mint the token, bind the row, and stamp the record — the one bind every approve call awaits. */
+  async function bindApproval(record: PendingRecord, userId: string): Promise<ApproveResult> {
+    const rawToken = `dt_${randomBytes(24).toString('base64url')}`;
+    const { deviceId, restored } = await bindDevice(record, userId, hashDeviceToken(rawToken));
+    record.userId = userId;
+    record.deviceId = deviceId;
+    record.deviceToken = rawToken;
+    return approvedResult(restored, record);
+  }
+
   return {
-    requestCode({ name, publicKey, os }): DeviceCodeResponse {
+    async requestCode({ name, publicKey, os, priorDeviceToken }): Promise<DeviceCodeResponse> {
       const deviceCode = randomUUID();
       const userCode = generateUserCode();
       const record: PendingRecord = {
@@ -134,6 +277,9 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       if (name !== undefined) record.name = name;
       if (publicKey !== undefined) record.publicKey = publicKey;
       if (os !== undefined) record.os = os;
+      if (priorDeviceToken !== undefined) {
+        Object.assign(record, await resolveRestoreEvidence(priorDeviceToken));
+      }
       byDeviceCode.set(deviceCode, record);
       userCodeToDeviceCode.set(userCode, deviceCode);
       return {
@@ -171,33 +317,42 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       return { status: 'authorization_pending' };
     },
 
-    async approve(userCode, userId): Promise<ApproveOutcome> {
-      if (lockedOut(userId)) return 'rate_limited';
+    async approve(userCode, userId): Promise<ApproveResult> {
+      if (lockedOut(userId)) return refusedResult('rate_limited');
       const deviceCode = userCodeToDeviceCode.get(userCode);
       if (deviceCode === undefined) {
         recordFailure(userId);
-        return 'invalid';
+        return refusedResult('invalid');
       }
       const record = byDeviceCode.get(deviceCode);
       if (!record || expired(deviceCode, record)) {
         recordFailure(userId);
-        return 'invalid';
+        return refusedResult('invalid');
       }
-      if (record.approved) return 'approved'; // idempotent
+      // Idempotent re-approve — including a concurrent duplicate (web double-submit) landing while
+      // the first bind is still in flight: everyone awaits the SAME bind and reports its outcome.
+      if (record.binding) return record.binding;
 
-      const rawToken = `dt_${randomBytes(24).toString('base64url')}`;
-      const deviceId = await options.registry.createDevice({
-        userId,
-        name: record.name ?? 'device',
-        deviceTokenHash: hashDeviceToken(rawToken),
-        ...(record.publicKey !== undefined ? { publicKey: record.publicKey } : {}),
-        ...(record.os !== undefined ? { os: record.os } : {}),
-      });
+      // Claim the record synchronously BEFORE anything awaits, so a duplicate takes the path above
+      // rather than racing into a second device row.
       record.approved = true;
-      record.userId = userId;
-      record.deviceId = deviceId;
-      record.deviceToken = rawToken;
-      return 'approved';
+      record.binding = bindApproval(record, userId);
+      try {
+        return await record.binding;
+      } catch (error) {
+        // Release the claim so a retry can bind (duplicates awaiting this same promise also reject).
+        record.approved = false;
+        delete record.binding;
+        throw error;
+      }
+    },
+
+    pendingRestoreDeviceIds(): readonly string[] {
+      return [...byDeviceCode.values()]
+        .filter((record) => record.expiresAt >= now() && !record.approved)
+        .flatMap((record) =>
+          record.restoreDeviceId !== undefined ? [record.restoreDeviceId] : [],
+        );
     },
   };
 }
@@ -226,6 +381,9 @@ export function registerDeviceAuthRoutes(
         ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
         ...(parsed.data.public_key !== undefined ? { publicKey: parsed.data.public_key } : {}),
         ...(parsed.data.os !== undefined ? { os: parsed.data.os } : {}),
+        ...(parsed.data.prior_device_token !== undefined
+          ? { priorDeviceToken: parsed.data.prior_device_token }
+          : {}),
       });
     },
   );
@@ -251,13 +409,19 @@ export function registerDeviceAuthRoutes(
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_request' });
     }
-    const outcome = await service.approve(parsed.data.user_code, parsed.data.user_id);
-    if (outcome === 'rate_limited') {
+    const result = await service.approve(parsed.data.user_code, parsed.data.user_id);
+    if (result.outcome === 'rate_limited') {
       return reply.code(429).send({ error: 'too_many_attempts' });
     }
-    if (outcome === 'invalid') {
+    if (result.outcome === 'invalid') {
       return reply.code(404).send({ error: 'invalid_user_code' });
     }
-    return { ok: true };
+    // Typed against the shared contract so the route and the protocol schema cannot drift apart.
+    const body: DeviceApproveResponse = {
+      ok: true,
+      restored: result.restored,
+      device_name: result.deviceName,
+    };
+    return body;
   });
 }

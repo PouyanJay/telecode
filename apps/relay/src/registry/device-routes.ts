@@ -25,11 +25,13 @@ export interface SessionsEndedEvent {
 /** The revoke's optional side effects — absent on the auth-less/echo relay path. */
 export interface DeviceRouteOptions {
   /** When provided, revoking a device also ends its non-terminal sessions (they can never reconcile once
-   *  the device is gone). */
+   *  the device is gone). It also supplies the per-device history counts for the revoked listing. */
   readonly sessionRegistry?: SessionRegistry;
   /** Called with the ids the revoke cascade ended, so the relay can tell watching browsers — a live
    *  dashboard must clear the revoked device's sessions without a refresh. */
   readonly onSessionsEnded?: (event: SessionsEndedEvent) => void;
+  /** Devices with a live verified restore request — the "awaiting re-authorization" flag per row. */
+  readonly pendingRestoreDeviceIds?: () => readonly string[];
 }
 
 export function registerDeviceRoutes(
@@ -72,6 +74,26 @@ export function registerDeviceRoutes(
         os: device.os,
         last_seen_at: device.lastSeenAt?.toISOString() ?? null,
         public_key: device.publicKey,
+      })),
+    });
+  });
+
+  app.get('/me/devices/revoked', async (request, reply) => {
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
+    const [revoked, sessionCounts] = await Promise.all([
+      registry.findRevokedByUser(userId),
+      options.sessionRegistry?.countByDevice(userId) ?? new Map<string, number>(),
+    ]);
+    const pendingRestore = new Set(options.pendingRestoreDeviceIds?.() ?? []);
+    return reply.send({
+      devices: revoked.map((device) => ({
+        id: device.id,
+        name: device.name,
+        os: device.os,
+        revoked_at: device.revokedAt.toISOString(),
+        session_count: sessionCounts.get(device.id) ?? 0,
+        pending_reauth: pendingRestore.has(device.id),
       })),
     });
   });

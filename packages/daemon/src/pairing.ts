@@ -14,10 +14,21 @@ export interface PairDeviceOptions {
   readonly os?: string;
   /** This device's X25519 public key (base64), registered at pairing for E2E in Phase 3. */
   readonly publicKey?: string;
+  /**
+   * Restore evidence when re-pairing after a revoke: the prior (dead) device token. The relay
+   * hash-matches it against the revoked device row so approval re-authorizes the SAME identity —
+   * device id and session history preserved — instead of minting a new device.
+   */
+  readonly priorDeviceToken?: string;
   readonly intervalMs?: number;
   readonly maxAttempts?: number;
   /** Invoked with the user code to display/enter. Awaited before polling begins. */
-  readonly onPrompt?: (info: { userCode: string; verificationUri: string }) => void | Promise<void>;
+  readonly onPrompt?: (info: {
+    userCode: string;
+    verificationUri: string;
+    /** Relay-side TTL of the code, so the prompt can persist/show a real expiry. */
+    expiresInSeconds: number;
+  }) => void | Promise<void>;
   readonly logger?: Logger;
 }
 
@@ -39,6 +50,9 @@ export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCred
       ...(options.name !== undefined ? { name: options.name } : {}),
       ...(options.os !== undefined ? { os: options.os } : {}),
       ...(options.publicKey !== undefined ? { public_key: options.publicKey } : {}),
+      ...(options.priorDeviceToken !== undefined
+        ? { prior_device_token: options.priorDeviceToken }
+        : {}),
     }),
   });
   if (!codeRes.ok) {
@@ -46,7 +60,11 @@ export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCred
   }
   const code = deviceCodeResponseSchema.parse(await codeRes.json());
 
-  const prompt = { userCode: code.user_code, verificationUri: code.verification_uri };
+  const prompt = {
+    userCode: code.user_code,
+    verificationUri: code.verification_uri,
+    expiresInSeconds: code.expires_in,
+  };
   if (options.onPrompt) {
     await options.onPrompt(prompt);
   } else {

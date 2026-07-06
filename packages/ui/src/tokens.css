@@ -172,3 +172,11 @@
     border-top-width: 0.5px;
   }
 }
+
+/* The dimmed scrim shared by every modal overlay (Drawer, ConfirmDialog). */
+.ui-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  background: rgba(0, 0, 0, 0.55);
+}

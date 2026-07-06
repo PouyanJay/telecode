@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { pathExists } from '../sessions/path-exists';
+import type { CommandResult } from './command-runner';
 import { commandDetail } from './command-detail';
 import { errorDetail } from './error-detail';
 import { resolveLogPaths } from './log-paths';
@@ -48,10 +49,7 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
       // cases (it exits non-zero on a first install when nothing is loaded); the bootstrap below surfaces
       // any real failure.
       await deps.runner.run({ command: 'launchctl', args: ['bootout', domain, plistPath] });
-      const result = await deps.runner.run({
-        command: 'launchctl',
-        args: ['bootstrap', domain, plistPath],
-      });
+      const result = await runBootstrap();
       if (result.ok) {
         return {
           ok: true,
@@ -72,6 +70,16 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
     }
   }
 
+  /** Load the plist into the login domain — RunAtLoad starts the job. Shared by install + start. */
+  function runBootstrap(): Promise<CommandResult> {
+    return deps.runner.run({ command: 'launchctl', args: ['bootstrap', domain, plistPath] });
+  }
+
+  /** Probe the job in the login domain; non-zero exit ⇒ not loaded. Backs status + isLoaded. */
+  function probeUnit(): Promise<CommandResult> {
+    return deps.runner.run({ command: 'launchctl', args: ['print', serviceTarget] });
+  }
+
   async function uninstall(): Promise<ServiceActionResult> {
     try {
       // Best-effort bootout: harmless if it was never loaded.
@@ -86,29 +94,53 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
     }
   }
 
+  /** Is the job currently loaded in the login domain? (`launchctl print` exits non-zero if not.) */
+  async function isLoaded(): Promise<boolean> {
+    return (await probeUnit()).ok;
+  }
+
+  /** Load an unloaded unit; RunAtLoad starts it. */
+  async function bootstrapAndStart(): Promise<ServiceActionResult> {
+    const result = await runBootstrap();
+    return result.ok
+      ? { ok: true, message: 'started — the telecode daemon is running' }
+      : { ok: false, message: `launchctl bootstrap failed: ${commandDetail(result)}` };
+  }
+
+  /** Restart an already-loaded unit now, killing any existing instance first. */
+  async function kickstartRunning(): Promise<ServiceActionResult> {
+    const result = await deps.runner.run({
+      command: 'launchctl',
+      args: ['kickstart', '-k', serviceTarget],
+    });
+    return result.ok
+      ? { ok: true, message: 'started — the telecode daemon is running' }
+      : { ok: false, message: `launchctl kickstart failed: ${commandDetail(result)}` };
+  }
+
   async function start(): Promise<ServiceActionResult> {
     try {
       if (!(await pathExists(plistPath))) {
         return { ok: false, message: 'not installed — run `telecode service install` first' };
       }
-      // kickstart -k (re)starts the job now, killing any existing instance first.
-      const result = await deps.runner.run({
-        command: 'launchctl',
-        args: ['kickstart', '-k', serviceTarget],
-      });
-      return result.ok
-        ? { ok: true, message: 'started — the telecode daemon is running' }
-        : { ok: false, message: `launchctl kickstart failed: ${commandDetail(result)}` };
+      // An UNLOADED unit (after `service stop`) cannot be kickstarted — it must be bootstrapped. A
+      // loaded unit keeps today's kickstart -k semantics.
+      return (await isLoaded()) ? kickstartRunning() : bootstrapAndStart();
     } catch (err) {
-      return {
-        ok: false,
-        message: `start failed: ${errorDetail(err)}`,
-      };
+      return { ok: false, message: `start failed: ${errorDetail(err)}` };
     }
   }
 
   async function stop(): Promise<ServiceActionResult> {
     try {
+      // Idempotent: stopping an already-unloaded unit is success, not a launchctl error — `bootout`
+      // hard-fails "No such process" on an unloaded unit, which used to break `stop && start`.
+      if (!(await isLoaded())) {
+        return {
+          ok: true,
+          message: 'already stopped — starts again at next login or `telecode service start`',
+        };
+      }
       // bootout the service target: unloads the job so KeepAlive cannot restart it. The plist stays on
       // disk, so it comes back at next login or via `telecode service start`.
       const result = await deps.runner.run({
@@ -130,10 +162,7 @@ export function createLaunchdManager(deps: ServiceManagerDeps): ServiceManager {
     // enabled-at-login.
     let running = false;
     if (installed) {
-      const printed = await deps.runner.run({
-        command: 'launchctl',
-        args: ['print', serviceTarget],
-      });
+      const printed = await probeUnit();
       running = printed.ok && /^\s+state\s*=\s*running$/m.test(printed.stdout);
     }
     return {

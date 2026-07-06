@@ -786,12 +786,17 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   app.get('/healthz', async () => ({ status: 'ok' }));
 
   // Device Authorization Grant endpoints — persisted, server-derived approval. Registered only when a
-  // device registry + the shared service secret are configured (the echo path needs neither).
-  if (deviceRegistry && options.auth) {
-    const deviceAuth = createDeviceAuthService({
-      verificationUri: options.verificationUri ?? 'http://127.0.0.1:5173/activate',
-      registry: deviceRegistry,
-    });
+  // device registry + the shared service secret are configured (the echo path needs neither). Kept in
+  // scope so the device routes can surface its pending-restore state ("awaiting re-authorization").
+  const deviceAuth =
+    deviceRegistry && options.auth
+      ? createDeviceAuthService({
+          verificationUri: options.verificationUri ?? 'http://127.0.0.1:5173/activate',
+          registry: deviceRegistry,
+          logger: log,
+        })
+      : null;
+  if (deviceAuth && options.auth) {
     registerDeviceAuthRoutes(app, deviceAuth, options.auth.serviceSecret);
   }
 
@@ -807,6 +812,9 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     if (deviceRegistry) {
       registerDeviceRoutes(app, options.auth.service, deviceRegistry, {
         ...(sessionRegistry ? { sessionRegistry } : {}),
+        ...(deviceAuth
+          ? { pendingRestoreDeviceIds: () => deviceAuth.pendingRestoreDeviceIds() }
+          : {}),
         onSessionsEnded: ({ userId, deviceId, sessionIds }) => {
           const channel = channelKey(userId, deviceId);
           for (const sessionId of sessionIds) {

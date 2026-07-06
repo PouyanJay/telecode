@@ -29,7 +29,13 @@ export async function loadCredentials(
   } catch {
     return null;
   }
-  const parsed = credentialsSchema.safeParse(JSON.parse(raw) as unknown);
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return null; // a corrupt file is the same as no file — the caller pairs fresh
+  }
+  const parsed = credentialsSchema.safeParse(json);
   return parsed.success ? parsed.data : null;
 }
 
