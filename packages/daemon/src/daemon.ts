@@ -2098,6 +2098,38 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * the hook returns `{}` immediately (the idle external process is never held). Acts only on a tracked
    * session; skips the re-entrancy case (`stop_hook_active`) and never offers twice (already awaiting input).
    */
+  /**
+   * Local activity supersedes a pending free-form handover: the user answered the question AT THE
+   * DEVICE, so the takeover offer no longer applies. Drop the stale offer (map + transcript entry),
+   * bring the session back to `running`, and reconcile watching browsers with a fresh history frame —
+   * without this, the board shows READY TO TAKE OVER forever (and the registry row sticks at
+   * awaiting_input) for a conversation that already moved on. The mirrored transcript itself carries
+   * the question and the local answer, so nothing narrative is lost. A late `handover.answer` for the
+   * dropped requestId lands on the existing settled-offer reconcile path.
+   */
+  function supersedePendingHandoverByLocalActivity(telecodeSessionId: string): void {
+    const stale = [...pendingHandovers.entries()].find(
+      ([, offer]) => offer.telecodeSessionId === telecodeSessionId,
+    );
+    if (stale === undefined) return;
+    const [requestId] = stale;
+    pendingHandovers.delete(requestId);
+    const rec = recordFor(telecodeSessionId);
+    rec.transcript = rec.transcript.filter(
+      (entry) => !(entry.kind === 'handover' && entry.requestId === requestId),
+    );
+    setStatus(telecodeSessionId, 'running');
+    sendForSession(
+      adoptedSource(telecodeSessionId),
+      'session.history',
+      historyPayloadFor(telecodeSessionId),
+    );
+    log.info(
+      { deviceId: options.deviceId, sessionId: telecodeSessionId, requestId },
+      'daemon: pending handover superseded by local activity',
+    );
+  }
+
   async function handleStopHook(event: HookEvent): Promise<unknown> {
     const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
     if (knownId === undefined) return {};
@@ -2119,6 +2151,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     // Refine the derived title once a chat-only session (no PreToolUse) mirrors its first prompt (T5).
     refineAdoptedTitleFromPrompt(knownId);
+    // A Stop AFTER an offering one means a NEW local turn ran — the user answered at the device, so
+    // any still-pending offer is stale. Cleared BEFORE the offer block below, which may then offer
+    // afresh if THIS turn also ended on a free-form question.
+    supersedePendingHandoverByLocalActivity(knownId);
     // Keep the persisted transcript current (ux Phase 6 T4): an adopted session isn't terminal on Stop,
     // so without this its on-disk copy would stay frozen at adoption time and a restart would backfill a
     // stale transcript. Best-effort, coalesced by the store.
@@ -2273,6 +2309,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     refineAdoptedTitleFromPrompt(telecodeSessionId);
 
     if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
+      // A new tool call proves the conversation continued locally — clear a stale takeover offer
+      // BEFORE this tool's own gate, so the two never show stacked.
+      supersedePendingHandoverByLocalActivity(telecodeSessionId);
       return handlePreToolUseHook(event, event.tool_name, telecodeSessionId);
     }
     // Non-PreToolUse events (Notification/SessionStart/etc., Journey 3) only drove adoption + the mirror.
