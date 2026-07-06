@@ -22,6 +22,7 @@
     decide,
     sendControl,
     sendUserMessage,
+    sessionDevices,
     sessions as liveSessions,
     subscribe,
   } from '$lib/session-store';
@@ -30,10 +31,16 @@
   let { data }: { data: PageData } = $props();
   // Reactive so navigating /sessions/A → /sessions/B (same route, no remount) re-targets + re-subscribes.
   const sessionId = $derived(data.sessionId);
-  // The session's OWN device (from its registry row) — not the first paired one, which mislabeled every
-  // session on a second machine. Null when its device was revoked: no name is better than a wrong name.
+  // The session's OWN device — its registry row, or the live routing map for a session launched
+  // this visit (before its row lands). Null when its device was revoked or nothing routed it yet:
+  // no name is better than a wrong name.
   const device = $derived(
-    resolveSessionDevice({ sessionId, sessions: data.sessions, devices: data.devices }),
+    resolveSessionDevice({
+      sessionId,
+      sessions: data.sessions,
+      devices: data.devices,
+      liveDeviceId: $sessionDevices.get(sessionId) ?? null,
+    }),
   );
 
   const known = $derived($liveSessions.has(sessionId));

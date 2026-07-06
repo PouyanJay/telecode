@@ -85,6 +85,30 @@ test('both devices show honest per-device presence (REST snapshot + live channel
   );
 });
 
+test('the launch drawer picks a device: a launch lands on the CHOSEN machine, not devices[0]', async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.getByRole('button', { name: 'Launch session' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Launch session' })).toBeVisible();
+
+  // Pick the SECOND device (not devices[0]) and launch on it.
+  await page.getByLabel('Run on').selectOption(deviceMini.deviceId);
+  await page.getByLabel('First instruction').fill('Run on the mini please');
+  await page.getByRole('button', { name: 'Launch on e2e-mini' }).click();
+
+  // The mini's fake daemon received the launch and streams: its first message, then its gate.
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
+  await expect(page.getByText('Planning the change')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
+  // The session view attributes the session to the device it actually runs on.
+  await expect(page.getByLabel('Session details')).toContainText('e2e-mini');
+
+  // Finish it so no pending gate leaks into the next test's inbox assertions.
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+});
+
 test('an approval raised on a second device arrives and resolves through its own channel', async ({
   page,
 }) => {
