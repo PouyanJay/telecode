@@ -34,6 +34,14 @@ const relayUrl = process.env.RELAY_WS_URL ?? 'ws://127.0.0.1:8080/ws';
 const userId = required('FAKE_USER_ID');
 const deviceId = required('FAKE_DEVICE_ID');
 const deviceToken = required('FAKE_DEVICE_TOKEN');
+/**
+ * Multi-device e2e (ux Phase 5): when set, this daemon announces one adopted session titled with
+ * the value right after registering, and immediately gates it on a Write approval — a pending
+ * decision originating on THIS device, so the spec can prove a second device's approvals arrive
+ * and resolve through its own channel.
+ */
+const adoptAnnounceTitle = process.env.FAKE_ADOPT_ANNOUNCE;
+const ADOPT_ANNOUNCE_REF = 'auto-adopt';
 
 const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
 
@@ -46,7 +54,9 @@ const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
 const CHAIN_PROMPT = 'chain a takeover';
 const CHAIN_PARENT_REF = 'chain-parent';
 const CHAIN_CHILD_REF = 'chain-child';
-const CHAIN_PARENT_TITLE = 'Fix the pairing bug';
+// Overridable so the spec can use a per-run unique title — earlier runs' chains persist in the
+// registry, and a fixed title would make "exactly one thread row" impossible on a reused local DB.
+const CHAIN_PARENT_TITLE = process.env.FAKE_CHAIN_TITLE ?? 'Fix the pairing bug';
 
 const socket = new WebSocket(relayUrl);
 let requestSeq = 0;
@@ -93,12 +103,40 @@ socket.addEventListener('message', (event: MessageEvent) => {
   }
 
   if (envelope.type === 'hello.ack') {
+    if (adoptAnnounceTitle !== undefined) {
+      send('session.adopted', { clientRef: ADOPT_ANNOUNCE_REF, title: adoptAnnounceTitle });
+    }
     console.log('fake-daemon: ready');
     return;
   }
 
   const sid = envelope.session_id;
   if (sid === undefined) return;
+
+  // The relay's ACK for the auto-announced adopted session (multi-device e2e): bring it live and
+  // block it on a Write approval, exactly like a launched session's gate.
+  if (envelope.type === 'session.adopted') {
+    const autoAck = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
+    if (autoAck.success && autoAck.data.clientRef === ADOPT_ANNOUNCE_REF) {
+      const rec = recordFor(sid);
+      rec.transcript.push(
+        { kind: 'user', text: `Working on ${adoptAnnounceTitle ?? 'a task'}` },
+        { kind: 'message', text: 'About to write the change' },
+      );
+      const requestId = `req-${++requestSeq}`;
+      rec.transcript.push({
+        kind: 'permission',
+        requestId,
+        toolName: 'Write',
+        input: DEFAULT_INPUT,
+        decision: 'pending',
+      });
+      rec.status = 'awaiting_input';
+      send('agent.message', { text: 'About to write the change' }, sid);
+      send('agent.permission_request', { requestId, toolName: 'Write', input: DEFAULT_INPUT }, sid);
+      return;
+    }
+  }
 
   // The relay's adopted-announce ACK: it minted the parent's registry row. Mirror a short "terminal"
   // transcript (daemon-stamped ts, like the real mirror), end it, and register the continuation.

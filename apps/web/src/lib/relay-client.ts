@@ -122,11 +122,27 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     );
   }
 
+  // Handshake gate: outbound session frames must never race the `hello` — a frame sent while the
+  // socket is still CONNECTING throws (and is lost), and one sent before the relay authenticated
+  // this peer is silently ignored server-side. The gate opens on `hello.ack` and re-arms the moment
+  // the socket dies, so frames enqueued during a redial simply wait for the next handshake. (With
+  // one channel per device — ux Phase 5 — a page's subscribes routinely race the slower handshakes.)
+  let openHandshakeGate: () => void = () => undefined;
+  let handshakeDone: Promise<void> = new Promise((resolve) => {
+    openHandshakeGate = resolve;
+  });
+  function armHandshakeGate(): void {
+    handshakeDone = new Promise((resolve) => {
+      openHandshakeGate = resolve;
+    });
+  }
+
   // Outbound frames are built asynchronously (sealing is async), so serialize them to preserve order.
   let sendChain: Promise<void> = Promise.resolve();
   function enqueueSend(build: () => Promise<string>): void {
     sendChain = sendChain
       .then(async () => {
+        await handshakeDone;
         const frame = await build();
         socket?.send(frame);
       })
@@ -197,6 +213,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
 
     ws.addEventListener('error', () => options.onStatus('error'));
     ws.addEventListener('close', () => {
+      // The socket died: close the gate so frames enqueued from here on wait for the NEXT
+      // handshake instead of being written into a dead (or not-yet-authenticated) socket.
+      armHandshakeGate();
       // An intentional close() is terminal; an unexpected drop schedules a transparent redial.
       if (intentionallyClosed) return;
       scheduleReconnect();
@@ -227,6 +246,8 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       reconnectAttempts = 0;
       const reconnected = hasConnected;
       hasConnected = true;
+      // The relay has authenticated this peer — release any session frames queued behind the gate.
+      openHandshakeGate();
       options.onStatus('connected');
       // On a *reconnect* (not the first handshake) the caller reattaches its sessions (resubscribe →
       // backfill), since the daemon treats this as a reopen.

@@ -1,95 +1,23 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import path from 'node:path';
+import type { ChildProcess } from 'node:child_process';
 
 import { expect, test } from '@playwright/test';
 
-import { loadRepoEnv, REPO_ROOT } from './env';
+import { loadRepoEnv } from './env';
+import { spawnFakeDaemon } from './fake-daemon-process';
+import { pairDevice } from './pairing';
 
 /**
  * The Phase 1 core loop through the real stack (plan §5 exit criteria): from the web app, launch a
  * session on a paired device, watch the agent stream, and approve/reject its actions. A deterministic
  * fake daemon (see fake-daemon.ts) stands in for the laptop — everything else is real: real relay, real
- * Postgres, real browser. The device is paired here via the relay's actual device-grant endpoints so the
+ * Postgres, real browser. The device is paired via the relay's actual device-grant endpoints so the
  * browser connects on the daemon's `(user_id, device_id)` channel, exactly as in production.
  */
-const RELAY_HTTP = process.env.RELAY_HTTP_URL ?? 'http://127.0.0.1:8080';
-const RELAY_WS = process.env.PUBLIC_TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
-const DEV_IDENTITY = {
-  provider: 'dev',
-  providerUserId: 'dev-user',
-  displayName: 'Developer',
-  email: 'dev@telecode.local',
-};
-
 let daemon: ChildProcess | undefined;
 
-/** Pair a device for the dev user via the real device-grant flow; return its id + raw token. */
-async function pairDevice(serviceSecret: string): Promise<{
-  userId: string;
-  deviceId: string;
-  deviceToken: string;
-}> {
-  const svc = { 'content-type': 'application/json', 'x-telecode-service-secret': serviceSecret };
-
-  const sessionRes = await fetch(`${RELAY_HTTP}/auth/session`, {
-    method: 'POST',
-    headers: svc,
-    body: JSON.stringify(DEV_IDENTITY),
-  });
-  const { user_id: userId } = (await sessionRes.json()) as { user_id: string };
-
-  const codeRes = await fetch(`${RELAY_HTTP}/device/code`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'e2e-fake' }),
-  });
-  const { device_code, user_code } = (await codeRes.json()) as {
-    device_code: string;
-    user_code: string;
-  };
-
-  await fetch(`${RELAY_HTTP}/device/approve`, {
-    method: 'POST',
-    headers: svc,
-    body: JSON.stringify({ user_code, user_id: userId }),
-  });
-
-  const tokenRes = await fetch(`${RELAY_HTTP}/device/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ device_code }),
-  });
-  const poll = (await tokenRes.json()) as {
-    status: string;
-    device_token?: string;
-    device_id?: string;
-  };
-  if (poll.status !== 'approved' || !poll.device_token || !poll.device_id) {
-    throw new Error(`device pairing failed: ${JSON.stringify(poll)}`);
-  }
-  return { userId, deviceId: poll.device_id, deviceToken: poll.device_token };
-}
-
-/** Wait until the spawned fake daemon prints its readiness marker (it has registered with the relay). */
-function waitForReady(child: ChildProcess, timeoutMs = 15_000): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('fake daemon did not become ready')),
-      timeoutMs,
-    );
-    child.stdout?.on('data', (buf: Buffer) => {
-      if (String(buf).includes('fake-daemon: ready')) {
-        clearTimeout(timer);
-        resolve();
-      }
-    });
-    child.stderr?.on('data', (buf: Buffer) => console.error('[fake-daemon]', String(buf).trim()));
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`fake daemon exited early (${code})`));
-    });
-  });
-}
+// Unique per run: chain threads persist in the registry across local runs, and the thread-collapse
+// assertion below ("exactly one row") must only ever see THIS run's chain.
+const CHAIN_TITLE = `Fix the pairing bug ${Date.now()}`;
 
 test.beforeAll(async () => {
   loadRepoEnv();
@@ -98,24 +26,8 @@ test.beforeAll(async () => {
     throw new Error('RELAY_SERVICE_SECRET is required for the session e2e (load .env or set it)');
   }
 
-  const { userId, deviceId, deviceToken } = await pairDevice(serviceSecret);
-
-  daemon = spawn(
-    process.execPath,
-    ['--import', 'tsx', path.join(REPO_ROOT, 'apps/web/tests/e2e/fake-daemon.ts')],
-    {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        RELAY_WS_URL: RELAY_WS,
-        FAKE_USER_ID: userId,
-        FAKE_DEVICE_ID: deviceId,
-        FAKE_DEVICE_TOKEN: deviceToken,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-  await waitForReady(daemon);
+  const { userId, deviceId, deviceToken } = await pairDevice(serviceSecret, 'e2e-fake');
+  daemon = await spawnFakeDaemon({ userId, deviceId, deviceToken, chainTitle: CHAIN_TITLE });
 });
 
 test.afterAll(() => {
@@ -278,7 +190,8 @@ test('a taken-over conversation reads as ONE thread: crumb, lineage strip, takeo
   await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
 
   // Cold-load the dashboard until the registry serves the chain (the dance settles asynchronously).
-  const threadRow = () => page.getByRole('main').getByRole('link', { name: /Fix the pairing bug/ });
+  const threadRow = () =>
+    page.getByRole('main').getByRole('link', { name: new RegExp(CHAIN_TITLE) });
   await expect(async () => {
     await page.goto('/');
     await expect(threadRow()).toHaveCount(1, { timeout: 2_000 });

@@ -49,12 +49,15 @@
     launchError = null;
     try {
       const repo = launchRepo(repos, selectedRepoId);
-      const id = await launch({
-        prompt: text,
-        permissionMode: mode,
-        ...(title.trim() ? { title: title.trim() } : {}),
-        ...(repo ? { repo } : {}),
-      });
+      const id = await launch(
+        {
+          prompt: text,
+          permissionMode: mode,
+          ...(title.trim() ? { title: title.trim() } : {}),
+          ...(repo ? { repo } : {}),
+        },
+        device.id,
+      );
       open = false;
       prompt = '';
       title = '';

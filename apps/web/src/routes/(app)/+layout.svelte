@@ -17,7 +17,8 @@
   import { buildThreadRows } from '$lib/threads';
   import {
     connectionState,
-    ensureConnection,
+    ensureConnections,
+    seedSessionDevices,
     sessions as liveSessions,
     watchedDaemonOnline,
   } from '$lib/session-store';
@@ -62,15 +63,17 @@
     if (browser) writeSidebarWidth(localStorage, sidebarWidth);
   });
 
-  // Open (and keep) the shared connection whenever a device is available; idempotent, so re-running on a
-  // later pairing is safe. Client-only ($effect never runs on the server).
+  // Open (and keep) one channel per paired device (ux Phase 5); idempotent, so re-running on a later
+  // pairing — or after a revoke, which closes that device's channel — is safe. Routing is seeded from
+  // the persisted registry so a cold page's subscribes reach each session's OWN device before any live
+  // frame names it. Client-only ($effect never runs on the server).
   $effect(() => {
-    if (device && browser) {
-      void ensureConnection({
+    if (browser && data.devices.length > 0) {
+      seedSessionDevices(data.sessions);
+      ensureConnections({
         relayUrl: RELAY_URL,
         userId: data.user?.id ?? '',
-        deviceId: device.id,
-        daemonPublicKey: device.publicKey,
+        devices: data.devices.map((d) => ({ id: d.id, publicKey: d.publicKey })),
       });
     }
   });
