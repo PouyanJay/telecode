@@ -48,7 +48,7 @@ describe('device pairing brute-force lockout', () => {
       now: () => 1,
     });
 
-    const { user_code } = service.requestCode({});
+    const { user_code } = await service.requestCode({});
     expect(await service.approve(user_code, 'user-1')).toBe('approved');
     expect(await service.approve(user_code, 'user-1')).toBe('approved'); // idempotent re-approve
   });

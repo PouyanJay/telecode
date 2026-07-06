@@ -791,6 +791,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     const deviceAuth = createDeviceAuthService({
       verificationUri: options.verificationUri ?? 'http://127.0.0.1:5173/activate',
       registry: deviceRegistry,
+      logger: log,
     });
     registerDeviceAuthRoutes(app, deviceAuth, options.auth.serviceSecret);
   }

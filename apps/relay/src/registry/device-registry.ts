@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
 import { devices } from '../db/schema';
@@ -39,6 +39,13 @@ export interface DeviceRegistry {
   /** Resolve a non-revoked device by its token hash (daemon authentication), or null. */
   findActiveByTokenHash(tokenHash: string): Promise<DeviceRecord | null>;
   /**
+   * Resolve a REVOKED device by its token hash, or null. Restore evidence: a re-pairing daemon proves
+   * continuity with its prior (revoked) token so approval can re-authorize the same row. Like
+   * `findActiveByTokenHash` this runs on the trusted owner connection — it executes at `/device/code`
+   * time where no user context exists yet (the caller is the thing being re-authenticated).
+   */
+  findRevokedByTokenHash(tokenHash: string): Promise<DeviceRecord | null>;
+  /**
    * Stamp a device's `last_seen_at` (daemon connected/disconnected). Runs on the trusted owner
    * connection keyed by primary key — like `findActiveByTokenHash`, it executes at `hello` time where
    * no user context exists yet, and it can only touch the one presence column.
@@ -51,6 +58,20 @@ export interface DeviceRegistry {
    * only revoke their own. Returns true if a still-active device was revoked, false if none matched.
    */
   revoke(userId: string, deviceId: string): Promise<boolean>;
+  /**
+   * Re-authorize a revoked device for the authenticated user: clear `revoked_at` and rotate the token
+   * hash on the SAME row, so the device keeps its id (and every session that references it). Descriptor
+   * fields are refreshed only when the re-pairing daemon supplied them. RLS-scoped like `revoke`.
+   * Returns true if a revoked device was restored, false if none matched.
+   */
+  restoreDevice(input: {
+    userId: string;
+    deviceId: string;
+    deviceTokenHash: string;
+    name?: string;
+    publicKey?: string;
+    os?: string;
+  }): Promise<boolean>;
 }
 
 /** `clock` is injectable so presence-stamp ordering is testable without wall-clock sleeps. */
@@ -58,6 +79,20 @@ export function createDeviceRegistry(
   db: DbHandle,
   clock: () => Date = () => new Date(),
 ): DeviceRegistry {
+  // Shared by the two token-hash lookups (daemon auth wants a live row, restore evidence wants a
+  // revoked one). Runs on the trusted owner connection — no user context exists at hello/pairing time.
+  async function findByTokenHash(
+    tokenHash: string,
+    revokedPredicate: typeof isNull | typeof isNotNull,
+  ): Promise<DeviceRecord | null> {
+    const [row] = await db.db
+      .select({ id: devices.id, userId: devices.userId, revokedAt: devices.revokedAt })
+      .from(devices)
+      .where(and(eq(devices.deviceTokenHash, tokenHash), revokedPredicate(devices.revokedAt)))
+      .limit(1);
+    return row ?? null;
+  }
+
   return {
     async createDevice({ userId, name, deviceTokenHash, publicKey, os }): Promise<string> {
       return withUserContext(db, userId, async (scoped) => {
@@ -72,14 +107,9 @@ export function createDeviceRegistry(
       });
     },
 
-    async findActiveByTokenHash(tokenHash): Promise<DeviceRecord | null> {
-      const [row] = await db.db
-        .select({ id: devices.id, userId: devices.userId, revokedAt: devices.revokedAt })
-        .from(devices)
-        .where(and(eq(devices.deviceTokenHash, tokenHash), isNull(devices.revokedAt)))
-        .limit(1);
-      return row ?? null;
-    },
+    findActiveByTokenHash: (tokenHash) => findByTokenHash(tokenHash, isNull),
+
+    findRevokedByTokenHash: (tokenHash) => findByTokenHash(tokenHash, isNotNull),
 
     async touchLastSeen(deviceId): Promise<void> {
       // Monotonic: both call sites (hello, disconnect) are fire-and-forget, so two in-flight stamps
@@ -119,6 +149,25 @@ export function createDeviceRegistry(
           )
           .returning({ id: devices.id });
         return revoked.length > 0;
+      });
+    },
+
+    async restoreDevice({ userId, deviceId, deviceTokenHash, name, publicKey, os }) {
+      return withUserContext(db, userId, async (scoped) => {
+        const restored = await scoped
+          .update(devices)
+          .set({
+            revokedAt: null,
+            deviceTokenHash,
+            ...(name !== undefined ? { name } : {}),
+            ...(publicKey !== undefined ? { publicKey } : {}),
+            ...(os !== undefined ? { os } : {}),
+          })
+          .where(
+            and(eq(devices.id, deviceId), eq(devices.userId, userId), isNotNull(devices.revokedAt)),
+          )
+          .returning({ id: devices.id });
+        return restored.length > 0;
       });
     },
   };

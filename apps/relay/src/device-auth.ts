@@ -6,6 +6,7 @@ import {
   type PollResult,
 } from '@telecode/protocol';
 import type { FastifyInstance } from 'fastify';
+import type { Logger } from 'pino';
 import { z } from 'zod';
 
 import { constantTimeEquals } from './auth/secret-compare';
@@ -35,13 +36,25 @@ export interface DeviceAuthOptions {
    */
   maxApproveFailures?: number;
   approveFailureWindowMs?: number;
+  /** Structured logger for restore-lifecycle triangulation; token material is never logged. */
+  logger?: Logger;
 }
 
 /** The outcome of an approve attempt: bound, invalid code, or the approver is brute-force locked out. */
 export type ApproveOutcome = 'approved' | 'invalid' | 'rate_limited';
 
 export interface DeviceAuthService {
-  requestCode(input: { name?: string; publicKey?: string; os?: string }): DeviceCodeResponse;
+  /**
+   * Mint a pending code. When the caller presents `priorDeviceToken` (restore evidence from a revoked
+   * device), it is verified against the registry NOW — a matching revoked row binds the pending code
+   * to that device identity so approval can restore it instead of inserting a new row.
+   */
+  requestCode(input: {
+    name?: string;
+    publicKey?: string;
+    os?: string;
+    priorDeviceToken?: string;
+  }): Promise<DeviceCodeResponse>;
   poll(deviceCode: string): PollResult;
   /** Persist + bind the device to `userId` (server-derived). See {@link ApproveOutcome}. */
   approve(userCode: string, userId: string): Promise<ApproveOutcome>;
@@ -57,6 +70,9 @@ interface PendingRecord {
   userId?: string;
   deviceId?: string;
   deviceToken?: string;
+  /** Verified restore evidence: the revoked device this code can re-authorize, and its owner. */
+  restoreDeviceId?: string;
+  restoreUserId?: string;
 }
 
 function generateUserCode(): string {
@@ -122,8 +138,74 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
     approveFailures.set(userId, recent);
   }
 
+  /**
+   * Verify restore evidence against the registry. Only a token whose hash matches a REVOKED row binds
+   * the pending code to that identity; unknown/active/garbage tokens degrade to a plain pair.
+   */
+  async function resolveRestoreEvidence(
+    priorDeviceToken: string,
+  ): Promise<Pick<PendingRecord, 'restoreDeviceId' | 'restoreUserId'>> {
+    const revoked = await options.registry.findRevokedByTokenHash(
+      hashDeviceToken(priorDeviceToken),
+    );
+    if (!revoked) {
+      options.logger?.info(
+        { restore_evidence: 'unverified' },
+        'pairing request carried unverifiable restore evidence — plain pair',
+      );
+      return {};
+    }
+    options.logger?.info(
+      { device_id: revoked.id, restore_evidence: 'verified' },
+      'pairing code bound to verified restore evidence',
+    );
+    return { restoreDeviceId: revoked.id, restoreUserId: revoked.userId };
+  }
+
+  /**
+   * Bind an approved code to a device row. Restore path: the code carries verified evidence for a
+   * revoked device AND the approver is its owner → re-authorize the SAME row (identity + session
+   * history preserved). Every other case — no evidence, or a different account approving (the machine
+   * is being handed to someone else) — inserts a fresh device.
+   */
+  async function bindDevice(
+    record: PendingRecord,
+    userId: string,
+    deviceTokenHash: string,
+  ): Promise<string> {
+    if (record.restoreDeviceId !== undefined && record.restoreUserId === userId) {
+      const restored = await options.registry.restoreDevice({
+        userId,
+        deviceId: record.restoreDeviceId,
+        deviceTokenHash,
+        ...(record.name !== undefined ? { name: record.name } : {}),
+        ...(record.publicKey !== undefined ? { publicKey: record.publicKey } : {}),
+        ...(record.os !== undefined ? { os: record.os } : {}),
+      });
+      if (restored) {
+        options.logger?.info(
+          { device_id: record.restoreDeviceId, user_id: userId },
+          'device restored: same identity re-authorized',
+        );
+        return record.restoreDeviceId;
+      }
+      // The row vanished or was already restored under a different grant — fall through to a fresh insert.
+      options.logger?.warn(
+        { device_id: record.restoreDeviceId, user_id: userId },
+        'verified restore evidence but the row was no longer restorable — issuing a fresh device',
+      );
+    }
+    return options.registry.createDevice({
+      userId,
+      name: record.name ?? 'device',
+      deviceTokenHash,
+      ...(record.publicKey !== undefined ? { publicKey: record.publicKey } : {}),
+      ...(record.os !== undefined ? { os: record.os } : {}),
+    });
+  }
+
   return {
-    requestCode({ name, publicKey, os }): DeviceCodeResponse {
+    async requestCode({ name, publicKey, os, priorDeviceToken }): Promise<DeviceCodeResponse> {
       const deviceCode = randomUUID();
       const userCode = generateUserCode();
       const record: PendingRecord = {
@@ -134,6 +216,9 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       if (name !== undefined) record.name = name;
       if (publicKey !== undefined) record.publicKey = publicKey;
       if (os !== undefined) record.os = os;
+      if (priorDeviceToken !== undefined) {
+        Object.assign(record, await resolveRestoreEvidence(priorDeviceToken));
+      }
       byDeviceCode.set(deviceCode, record);
       userCodeToDeviceCode.set(userCode, deviceCode);
       return {
@@ -185,19 +270,20 @@ export function createDeviceAuthService(options: DeviceAuthOptions): DeviceAuthS
       }
       if (record.approved) return 'approved'; // idempotent
 
-      const rawToken = `dt_${randomBytes(24).toString('base64url')}`;
-      const deviceId = await options.registry.createDevice({
-        userId,
-        name: record.name ?? 'device',
-        deviceTokenHash: hashDeviceToken(rawToken),
-        ...(record.publicKey !== undefined ? { publicKey: record.publicKey } : {}),
-        ...(record.os !== undefined ? { os: record.os } : {}),
-      });
+      // Claim the record synchronously BEFORE the awaited bind: a concurrent duplicate approve (web
+      // double-submit) must take the idempotent path above, not race into a second device row.
       record.approved = true;
-      record.userId = userId;
-      record.deviceId = deviceId;
-      record.deviceToken = rawToken;
-      return 'approved';
+      try {
+        const rawToken = `dt_${randomBytes(24).toString('base64url')}`;
+        const deviceId = await bindDevice(record, userId, hashDeviceToken(rawToken));
+        record.userId = userId;
+        record.deviceId = deviceId;
+        record.deviceToken = rawToken;
+        return 'approved';
+      } catch (error) {
+        record.approved = false; // release the claim so a retry can bind
+        throw error;
+      }
     },
   };
 }
@@ -226,6 +312,9 @@ export function registerDeviceAuthRoutes(
         ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
         ...(parsed.data.public_key !== undefined ? { publicKey: parsed.data.public_key } : {}),
         ...(parsed.data.os !== undefined ? { os: parsed.data.os } : {}),
+        ...(parsed.data.prior_device_token !== undefined
+          ? { priorDeviceToken: parsed.data.prior_device_token }
+          : {}),
       });
     },
   );

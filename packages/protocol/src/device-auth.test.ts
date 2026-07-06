@@ -19,4 +19,14 @@ describe('deviceCodeRequestSchema', () => {
   it('rejects an over-long os string (bounds what gets stored + shown)', () => {
     expect(deviceCodeRequestSchema.safeParse({ os: 'x'.repeat(65) }).success).toBe(false);
   });
+
+  it('accepts optional prior_device_token restore evidence (additive — old daemons omit it)', () => {
+    const parsed = deviceCodeRequestSchema.parse({ name: 'rig', prior_device_token: 'dt_prior' });
+    expect(parsed.prior_device_token).toBe('dt_prior');
+    expect(deviceCodeRequestSchema.parse({ name: 'rig' }).prior_device_token).toBeUndefined();
+  });
+
+  it('rejects an empty prior_device_token (evidence must be a real token, not a blank claim)', () => {
+    expect(deviceCodeRequestSchema.safeParse({ prior_device_token: '' }).success).toBe(false);
+  });
 });
