@@ -20,7 +20,7 @@ export const deviceCodeRequestSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   public_key: z.string().min(1).optional(),
   os: z.string().min(1).max(64).optional(),
-  prior_device_token: z.string().min(1).optional(),
+  prior_device_token: z.string().min(1).max(128).optional(),
 });
 export type DeviceCodeRequest = z.infer<typeof deviceCodeRequestSchema>;
 
