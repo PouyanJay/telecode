@@ -109,3 +109,36 @@ describe('createSessionStore', () => {
     );
   });
 });
+
+describe('per-entry timestamps across a restart (Phase 3)', () => {
+  it('round-trips entry ts stamps, and still loads pre-Phase-3 files whose entries have none', async () => {
+    const dir = await tempDir();
+    const store = createSessionStore({ dir });
+    const stamped: PersistedSession = {
+      status: 'done',
+      permissionMode: 'default',
+      transcript: [
+        { kind: 'user', text: 'do it', ts: 1_783_290_000_000 },
+        { kind: 'message', text: 'done', ts: 1_783_290_001_000 },
+      ],
+    };
+    store.save(SID, stamped);
+    // A file written by a pre-Phase-3 daemon: entries carry no ts — it must load, not be discarded.
+    const OLD_SID = '22222222-2222-2222-2222-222222222222';
+    await vi.waitFor(async () => {
+      expect((await store.loadAll()).get(SID)).toEqual(stamped);
+    });
+    await writeFile(
+      join(dir, `${OLD_SID}.json`),
+      JSON.stringify({
+        status: 'done',
+        permissionMode: 'default',
+        transcript: [{ kind: 'user', text: 'from an old daemon' }],
+      }),
+    );
+    const loaded = await store.loadAll();
+    expect(loaded.get(SID)?.transcript[0]?.ts).toBe(1_783_290_000_000);
+    expect(loaded.get(OLD_SID)?.transcript[0]?.ts).toBeUndefined();
+    expect(loaded.get(OLD_SID)?.transcript[0]).toMatchObject({ text: 'from an old daemon' });
+  });
+});

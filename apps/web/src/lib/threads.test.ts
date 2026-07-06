@@ -185,3 +185,28 @@ describe('lineageOf (session-view lineage strip, B2)', () => {
     expect(lineageOf('a', cycle)).toEqual([]);
   });
 });
+
+describe('threads over the live overlay (a fresh fork before the registry catches up)', () => {
+  it('collapses a registry parent with a child known only from a live session.chained frame', () => {
+    const registryParent = row({
+      id: 'parent',
+      origin: 'external',
+      title: 'Fix the pairing bug',
+      status: 'done',
+      createdAt: T0,
+    });
+    // What buildSessionRows produces for a live-only child whose session.chained just arrived.
+    const liveChild = row({
+      id: 'child',
+      parentSessionId: 'parent',
+      isContinuation: true,
+      status: 'running',
+      createdAt: T1,
+    });
+    const threads = buildThreadRows([registryParent, liveChild]);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]?.id).toBe('child');
+    expect(threads[0]?.title).toBe('Fix the pairing bug');
+    expect(threads[0]?.segments.map((s) => s.sessionId)).toEqual(['parent', 'child']);
+  });
+});
