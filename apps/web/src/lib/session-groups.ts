@@ -97,10 +97,11 @@ export function buildSessionRows(input: {
 /** The dashboard's three buckets (the mockup's "Needs your decision" / "Active" / "Recent"). */
 export type SessionGroupKey = 'awaiting' | 'active' | 'recent';
 
-export interface SessionGroups {
-  readonly awaiting: readonly SessionRow[];
-  readonly active: readonly SessionRow[];
-  readonly recent: readonly SessionRow[];
+/** Generic over the row so a collapsed thread row (ux Phase 3) keeps its type through grouping. */
+export interface SessionGroups<Row extends SessionRow = SessionRow> {
+  readonly awaiting: readonly Row[];
+  readonly active: readonly Row[];
+  readonly recent: readonly Row[];
 }
 
 /**
@@ -127,11 +128,10 @@ function groupKey(status: SessionStatus): SessionGroupKey {
 }
 
 /** Partition rows into the dashboard's three groups, newest-first within each. */
-export function groupSessions(rows: readonly SessionRow[]): SessionGroups {
-  const groups: Record<SessionGroupKey, SessionRow[]> = { awaiting: [], active: [], recent: [] };
+export function groupSessions<Row extends SessionRow>(rows: readonly Row[]): SessionGroups<Row> {
+  const groups: Record<SessionGroupKey, Row[]> = { awaiting: [], active: [], recent: [] };
   for (const row of rows) groups[groupKey(row.status)].push(row);
-  const newestFirst = (a: SessionRow, b: SessionRow): number =>
-    b.createdAt.getTime() - a.createdAt.getTime();
+  const newestFirst = (a: Row, b: Row): number => b.createdAt.getTime() - a.createdAt.getTime();
   return {
     awaiting: groups.awaiting.sort(newestFirst),
     active: groups.active.sort(newestFirst),
