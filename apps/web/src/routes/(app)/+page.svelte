@@ -28,6 +28,7 @@
     decide,
     deviceChannels,
     sessionDevices,
+    sessionMetas,
     sessions as liveSessions,
     subscribe,
   } from '$lib/session-store';
@@ -116,6 +117,7 @@
       buildSessionRows({
         registry: data.sessions,
         live: $liveSessions,
+        metas: $sessionMetas,
         deviceNameOf: (deviceId) => data.devices.find((d) => d.id === deviceId)?.name ?? null,
         deviceIdOf: (sessionId) => $sessionDevices.get(sessionId) ?? null,
       }),

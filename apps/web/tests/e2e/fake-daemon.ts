@@ -182,6 +182,11 @@ socket.addEventListener('message', (event: MessageEvent) => {
     rec.status = 'running';
     const clientRef = launch.success ? launch.data.clientRef : undefined;
     send('session.started', clientRef !== undefined ? { clientRef } : {}, sid);
+    // Session identity (ux Phase 6): the real daemon derives a title from the first prompt and emits
+    // sealed metadata; this cleartext fake mirrors the shape so specs can assert titles after reloads.
+    if (launch.success) {
+      send('session.meta', { title: launch.data.prompt, titleSource: 'derived' }, sid);
+    }
 
     if (launch.success && launch.data.prompt === CHAIN_PROMPT) {
       // The trigger session's only job is to kick off the dance — end it and announce the parent.

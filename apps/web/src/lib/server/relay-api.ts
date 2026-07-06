@@ -71,6 +71,12 @@ export interface RelaySession {
   origin: SessionOrigin;
   /** The adopted session this one continues (free-form handover, Journey 4), or null when unchained. */
   parentSessionId: string | null;
+  /**
+   * The persisted sealed `session.meta` blob + nonce (ux Phase 6) — opaque here (the server never holds
+   * session keys); the browser decodes it into the meta map. Null from a pre-Phase-6 relay.
+   */
+  sealedMeta: string | null;
+  sealedMetaNonce: string | null;
   createdAt: Date;
   updatedAt: Date;
   endedAt: Date | null;
@@ -261,6 +267,9 @@ const sessionListBodySchema = z.object({
       status: z.enum(SESSION_STATUSES),
       origin: z.enum(SESSION_ORIGINS).optional(),
       parent_session_id: z.string().nullable().optional(),
+      // Sealed metadata blob (ux Phase 6) — optional so a pre-Phase-6 relay degrades cleanly.
+      sealed_meta: z.string().nullable().optional(),
+      sealed_meta_nonce: z.string().nullable().optional(),
       created_at: z.string(),
       updated_at: z.string(),
       ended_at: z.string().nullable(),
@@ -281,6 +290,8 @@ export async function listSessions(sessionToken: string): Promise<RelayListResul
       // Default to `launched` so a relay that predates the origin field degrades cleanly.
       origin: session.origin ?? 'launched',
       parentSessionId: session.parent_session_id ?? null,
+      sealedMeta: session.sealed_meta ?? null,
+      sealedMetaNonce: session.sealed_meta_nonce ?? null,
       createdAt: new Date(session.created_at),
       updatedAt: new Date(session.updated_at),
       endedAt: session.ended_at ? new Date(session.ended_at) : null,

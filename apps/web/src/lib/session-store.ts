@@ -22,6 +22,8 @@ import {
   markDeciding,
   markHandoverSubmitting,
 } from './session';
+import { applyMetaFrame, seedRegistryMetas, type SessionMetaMap } from './session-meta';
+import type { RegistrySessionRow } from './session-groups';
 import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
 /**
@@ -77,6 +79,9 @@ const sessionDeviceMap = writable<ReadonlyMap<string, string>>(new Map());
 // id and updated from that channel's sealed `adopt.state` frames. A device is absent until the
 // Settings page requests its policy (or its daemon replies).
 const adoptStatesMap = writable<ReadonlyMap<string, AdoptStatePayload>>(new Map());
+// Decrypted session metadata (ux Phase 6), keyed by session id: live `session.meta` frames merged
+// over the registry's persisted blobs (seeded on load). Titles here beat every other title source.
+const sessionMetaMap = writable<SessionMetaMap>(new Map());
 
 const connections = new Map<string, RelayConnection>();
 // Launches awaiting their relay-minted id, matched by the `clientRef` the daemon echoes on
@@ -94,6 +99,8 @@ export const deviceChannels: Readable<ReadonlyMap<string, DeviceChannelState>> =
 export const sessionDevices: Readable<ReadonlyMap<string, string>> = {
   subscribe: sessionDeviceMap.subscribe,
 };
+/** Decrypted session metadata (ux Phase 6) for titles and session-view context. */
+export const sessionMetas: Readable<SessionMetaMap> = { subscribe: sessionMetaMap.subscribe };
 
 /**
  * The aggregate browser↔relay link state for the system bar. Every pooled socket dials the same
@@ -176,6 +183,11 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
   }
   if (envelope.type === 'session.chained' && envelope.session_id !== undefined) {
     linkChainedSessions(envelope.session_id, envelope);
+    return;
+  }
+  if (envelope.type === 'session.meta') {
+    // Identity metadata, not transcript: it feeds the meta map (titles), never the session state.
+    sessionMetaMap.update((map) => applyMetaFrame(map, envelope));
     return;
   }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
@@ -398,6 +410,15 @@ export function seedSessionDevices(
 }
 
 /**
+ * Seed decrypted metadata from the registry's persisted blobs (ux Phase 6) — called with the layout's
+ * SSR rows so cold loads have titles before any live frame. Live meta always wins (see
+ * {@link seedRegistryMetas}); ciphertext blobs stay opaque until this browser holds the session key.
+ */
+export function seedSessionMetas(rows: readonly RegistrySessionRow[]): void {
+  sessionMetaMap.update((map) => seedRegistryMetas(map, rows));
+}
+
+/**
  * Open/refresh the pooled connections if needed, minting channel tokens on demand — on the first
  * connect and on every reconnect, so a token that lapsed during a sleep is renewed (Phase 4 Task 4).
  * Idempotent and browser-only — the layout calls it whenever the device list changes, INCLUDING
@@ -567,4 +588,5 @@ export function disconnect(): void {
   // registry and backfills transcripts, so nothing stale should linger across a disconnect.
   sessionMap.set(new Map());
   adoptStatesMap.set(new Map());
+  sessionMetaMap.set(new Map());
 }

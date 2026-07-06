@@ -28,6 +28,8 @@ export function registerSessionListRoute(
         status: session.status,
         origin: session.origin,
         parent_session_id: session.parentSessionId,
+        sealed_meta: session.sealedMeta,
+        sealed_meta_nonce: session.sealedMetaNonce,
         created_at: session.createdAt.toISOString(),
         updated_at: session.updatedAt.toISOString(),
         ended_at: session.endedAt?.toISOString() ?? null,

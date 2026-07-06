@@ -95,8 +95,11 @@ test('the launched session appears in the dashboard list with live status', asyn
 test('reopen = reconnect: the transcript restores after a reload (daemon backfill)', async ({
   page,
 }) => {
+  // Unique per run: the title assertion below must match exactly ONE dashboard row, and identical
+  // prompts accumulate across local runs (same pattern as CHAIN_TITLE).
+  const REOPEN_PROMPT = `Reopen the README change ${Date.now()}`;
   await signIn(page);
-  await launchFromDashboard(page, 'Add a hello line to the README');
+  await launchFromDashboard(page, REOPEN_PROMPT);
   await page.getByRole('button', { name: 'Approve' }).click();
   await expect(page.getByText('Finished')).toBeVisible();
 
@@ -109,6 +112,13 @@ test('reopen = reconnect: the transcript restores after a reload (daemon backfil
   // The previously-approved gate replays as decided, not as a fresh actionable prompt.
   await expect(page.getByText('APPROVED')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0);
+
+  // Session identity survives the reload (ux Phase 6): the session view's header names the session
+  // from its metadata, and the dashboard row does the same from the persisted `session.meta` blob —
+  // a launched row used to degrade to its raw session UUID on both surfaces.
+  await expect(page.getByRole('heading', { name: REOPEN_PROMPT })).toBeVisible();
+  await page.goto('/');
+  await expect(page.getByRole('link', { name: REOPEN_PROMPT })).toBeVisible();
 });
 
 test('sends a follow-up that resumes the session for a second turn', async ({ page }) => {

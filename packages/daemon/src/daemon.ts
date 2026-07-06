@@ -33,11 +33,13 @@ import {
   type SessionHistoryEntry,
   type SessionHistoryPayload,
   type SessionLaunchPayload,
+  type SessionMetaPayload,
   type SessionStatusName,
 } from '@telecode/protocol';
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
+import { resolveLaunchTitle } from './derive-title';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { adoptedGateDecision } from './adopt/adopted-gate-decision';
 import { type HookEvent } from './adopt/hook-event';
@@ -286,6 +288,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     transcript: SessionHistoryEntry[];
     /** The mode the operator launched with; drives the per-tool gate (and is reused for follow-up turns). */
     permissionMode: PermissionModeName;
+    /**
+     * The session's accumulated identity metadata (ux Phase 6): title/cwd/model/permission-mode as last
+     * emitted in a `session.meta` frame. Kept merged so a subscriber reopening the session — or a partial
+     * update (e.g. the model learned mid-run) — always yields the complete picture.
+     */
+    meta?: SessionMetaPayload;
   }
   const sessionRecords = new Map<string, SessionRecord>();
 
@@ -394,6 +402,22 @@ export function createDaemon(options: DaemonOptions): Daemon {
         }),
       );
     });
+  }
+
+  /**
+   * Merge a metadata patch into the session's record and emit the merged `session.meta` (ux Phase 6),
+   * sealed under the session content key by {@link sendForSession} for an E2E session. The relay stores
+   * the opaque blob for cold loads; key-holding browsers decrypt it for titles. Titles are prompt-derived
+   * content — sealed on the wire and never logged. NOTE: the wire frame always carries the FULL merged
+   * snapshot, not the patch — receivers are latest-wins, so a narrow update (e.g. a model learned
+   * mid-run) deliberately re-broadcasts title/cwd/permissionMode with it.
+   */
+  function emitSessionMeta(source: Envelope, patch: SessionMetaPayload): void {
+    const sessionId = source.session_id;
+    if (sessionId === undefined) return;
+    const rec = recordFor(sessionId);
+    rec.meta = { ...rec.meta, ...patch };
+    sendForSession(source, 'session.meta', { ...rec.meta, ts: now() });
   }
 
   /** Deliver a session's content key, box-wrapped to a browser's ephemeral pubkey (`session.key`). */
@@ -900,6 +924,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
       'session.started',
       launch.data.clientRef !== undefined ? { clientRef: launch.data.clientRef } : {},
     );
+    // Sealed session identity (ux Phase 6): a user-named launch keeps its title; otherwise derive one
+    // from the first prompt. Sent after `started` so the launching browser pairs its clientRef first.
+    if (envelope.session_id !== undefined) {
+      emitSessionMeta(envelope, {
+        ...resolveLaunchTitle(launch.data.title, launch.data.prompt),
+        ...(cwd !== undefined ? { cwd } : {}),
+        permissionMode: recordFor(envelope.session_id).permissionMode,
+      });
+    }
     await runTurn(envelope, launch.data.prompt, { ...(cwd !== undefined ? { cwd } : {}) });
   }
 
@@ -1019,6 +1052,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
           { deviceId: options.deviceId, sessionId, known: rec !== undefined },
           'daemon: session subscribe — backfilling history',
         );
+        // Reopen identity (ux Phase 6): re-send the session's metadata so a fresh browser can label the
+        // session even when the relay's cache was lost. Enqueued after the key delivery above, so an E2E
+        // subscriber can always decrypt it.
+        if (rec?.meta !== undefined) {
+          sendForSession(envelope, 'session.meta', { ...rec.meta, ts: now() });
+        }
         sendForSession(envelope, 'session.history', historyPayloadFor(sessionId));
         return;
       }

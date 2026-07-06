@@ -67,6 +67,11 @@ export const MESSAGE_TYPES = [
   'session.history',
   // E2E key delivery (daemon -> web): the per-session content key, box-sealed to the browser's pubkey
   'session.key',
+  // sealed session metadata (daemon -> relay -> web, ux Phase 6): title/cwd/model/permission-mode,
+  // encrypted under the per-session content key. The relay stores the opaque blob for cold loads and
+  // forwards/replays it; only browsers holding the session key can read it (invariant #5 — the registry
+  // never sees plaintext metadata for a sealed session).
+  'session.meta',
   // device presence (relay -> web): the daemon behind the channel (dis)connected, so the browser can
   // flip its live sessions to `offline_paused` and resume them on reconnect. Cleartext routing metadata
   // the relay generates itself — it carries no session payload.

@@ -181,6 +181,7 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
     expect(result.statusAtRequest).toBe('awaiting_input');
     expect(result.types).toEqual([
       'session.started',
+      'session.meta',
       'agent.message',
       'agent.permission_request',
       'agent.tool_use',
@@ -201,6 +202,7 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
     expect(result.statusAtRequest).toBe('awaiting_input');
     expect(result.types).toEqual([
       'session.started',
+      'session.meta',
       'agent.message',
       'agent.permission_request',
       'agent.tool_use',
@@ -221,6 +223,7 @@ describe('permission gate: request → human decision → canUseTool allow/deny/
     expect(result.statusAtRequest).toBe('awaiting_input');
     expect(result.types).toEqual([
       'session.started',
+      'session.meta',
       'agent.message',
       'agent.permission_request',
       'agent.message',

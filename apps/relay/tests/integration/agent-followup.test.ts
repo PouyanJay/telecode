@@ -129,6 +129,7 @@ describe('follow-ups: launch → turn → user.message → resumed turn', () => 
     // Two turns streamed; the follow-up resumed the first turn's conversation id.
     expect(received.map((e) => e.type)).toEqual([
       'session.started',
+      'session.meta',
       'agent.message',
       'session.ended',
       'agent.message',

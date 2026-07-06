@@ -247,6 +247,33 @@ export const sessionKeyPayloadSchema = z.object({ key: base64KeySchema });
 export type SessionKeyPayload = z.infer<typeof sessionKeyPayloadSchema>;
 
 /**
+ * Where a session's display title came from, carried inside the sealed metadata so peers can apply
+ * precedence without the relay reading anything: a `user` title (typed at launch, or a rename) is
+ * never overwritten by a `derived` one (from the first prompt / the working directory).
+ */
+export const TITLE_SOURCES = ['derived', 'user'] as const;
+export const titleSourceSchema = z.enum(TITLE_SOURCES);
+export type TitleSourceName = z.infer<typeof titleSourceSchema>;
+
+/**
+ * Payload for `session.meta` (daemon → relay → web, ux Phase 6): the session's identity metadata,
+ * sealed under the per-session content key. The daemon emits it on launch/adoption and whenever a
+ * field changes (e.g. the model is learned, the title is refined); the relay stores the opaque blob
+ * (`sealed_meta` + nonce) so a cold page load can decrypt titles client-side, and replays the latest
+ * frame on subscribe. Every field optional: a frame updates what it carries. Bounds mirror the
+ * adopted-announce hints so a buggy peer can't bloat the encrypted frame or the registry row.
+ */
+export const sessionMetaPayloadSchema = z.object({
+  title: z.string().min(1).max(512).optional(),
+  titleSource: titleSourceSchema.optional(),
+  cwd: z.string().min(1).max(1024).optional(),
+  model: z.string().min(1).max(128).optional(),
+  permissionMode: permissionModeSchema.optional(),
+  ts: entryTimestampSchema.optional(),
+});
+export type SessionMetaPayload = z.infer<typeof sessionMetaPayloadSchema>;
+
+/**
  * Payload for `agent.permission_request` (daemon → web): a consequential tool call the agent wants to
  * run, paused at the {@link https://docs.claude.com SDK `canUseTool` gate} until a human decides. The
  * `requestId` correlates this request with the human's {@link permissionDecisionPayloadSchema} reply.

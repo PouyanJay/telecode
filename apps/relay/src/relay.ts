@@ -8,6 +8,7 @@ import {
   makeEnvelope,
   parseEnvelope,
   sessionAdoptedPayloadSchema,
+  sessionMetaPayloadSchema,
   sessionChainedPayloadSchema,
   sessionEndedPayloadSchema,
   sessionReconcilePayloadSchema,
@@ -154,6 +155,9 @@ const CACHEABLE_TYPES = new Set<string>([
   'agent.handover',
   'session.ended',
   'session.key',
+  // Sealed session metadata (ux Phase 6): latest-wins identity for the session — cached (like the key,
+  // outside the stream ring) so a reopening browser can label the session immediately.
+  'session.meta',
 ]);
 
 /**
@@ -169,6 +173,34 @@ const UNDELIVERABLE_REPLY_TYPES: ReadonlySet<string> = new Set([
   'session.control',
   'session.subscribe',
 ]);
+
+/**
+ * Bounds for the stored `session.meta` blob (ux Phase 6). The plaintext schema caps title/cwd/model
+ * (512+1024+128 chars), so even with AES-GCM + base64 overhead a legitimate blob is well under 8 KiB;
+ * the nonce is a 12-byte GCM IV (16 base64 chars). Enforced relay-side — and by matching DB CHECK
+ * constraints (migration 0008) — so a hostile daemon can't bloat rows the relay can't read.
+ */
+const MAX_SEALED_META_CHARS = 8192;
+const MAX_SEALED_META_NONCE_CHARS = 64;
+
+/**
+ * The storable form of a `session.meta` payload, WITHOUT reading sealed content. Ciphertext mode
+ * (non-empty nonce): the payload must be a bounded string — size is the only checkable property.
+ * Cleartext mode (legacy pre-E2E daemons): the payload must actually parse as session metadata — the
+ * same trust-boundary validation `session.adopted`/`session.chained` get. `null` = drop the frame.
+ */
+function storableSealedMeta(envelope: Envelope): string | null {
+  if (envelope.nonce.length > MAX_SEALED_META_NONCE_CHARS) return null;
+  if (envelope.nonce !== '') {
+    return typeof envelope.payload === 'string' && envelope.payload.length <= MAX_SEALED_META_CHARS
+      ? envelope.payload
+      : null;
+  }
+  const parsed = sessionMetaPayloadSchema.safeParse(envelope.payload);
+  if (!parsed.success) return null;
+  const json = JSON.stringify(parsed.data);
+  return json.length <= MAX_SEALED_META_CHARS ? json : null;
+}
 
 function channelKey(userId: string, deviceId: string): string {
   return `${userId}:${deviceId}`;
@@ -204,7 +236,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // stream frames, all stored as the opaque forwarded strings (the relay never decrypts them).
   const cacheMaxFrames = options.cache?.maxFramesPerSession ?? 64;
   const cacheMaxSessions = options.cache?.maxSessions ?? 256;
-  const ciphertextCache = new Map<string, { key?: string; stream: string[] }>();
+  const ciphertextCache = new Map<string, { key?: string; meta?: string; stream: string[] }>();
 
   /** Record a forwarded daemon→browser frame for later replay (ciphertext string, never read). */
   function cacheFrame(sessionId: string, type: string, frame: string): void {
@@ -220,6 +252,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
     if (type === 'session.key') {
       entry.key = frame; // keep only the latest key frame
+    } else if (type === 'session.meta') {
+      entry.meta = frame; // latest-wins identity metadata (ux Phase 6) — never fills the stream ring
     } else {
       entry.stream.push(frame);
       if (entry.stream.length > cacheMaxFrames) entry.stream.shift();
@@ -232,6 +266,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     if (!entry) return;
     try {
       if (entry.key !== undefined) browser.send(entry.key);
+      if (entry.meta !== undefined) browser.send(entry.meta);
       for (const frame of entry.stream) browser.send(frame);
     } catch (err) {
       log.warn({ err, sessionId }, 'relay: failed to replay cached frames');
@@ -690,6 +725,34 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
     // A `session.chained` already carrying an id is handled above; drop stragglers rather than broadcasting.
     if (envelope.type === 'session.chained') {
+      return;
+    }
+    // Sealed session metadata (ux Phase 6): persist the OPAQUE blob latest-wins so a cold page load can
+    // hand it back via GET /me/sessions, then cache + broadcast. The relay never reads sealed content
+    // (invariant #5), but it DOES enforce bounds — and, for a legacy cleartext-mode daemon, the same
+    // schema validation session.adopted/chained get — so a buggy or hostile daemon can't bloat the row.
+    // An invalid or oversized frame is dropped entirely (not stored, not forwarded).
+    if (envelope.type === 'session.meta') {
+      if (envelope.session_id === undefined) return;
+      const sealedMeta = storableSealedMeta(envelope);
+      if (sealedMeta === null) {
+        log.warn(
+          { channel, sessionId: envelope.session_id },
+          'relay: dropped session.meta with invalid payload',
+        );
+        return;
+      }
+      if (sessionRegistry) {
+        await sessionRegistry.setSealedMeta({
+          userId: envelope.user_id,
+          sessionId: envelope.session_id,
+          sealedMeta,
+          sealedMetaNonce: envelope.nonce,
+        });
+        log.info({ channel, sessionId: envelope.session_id }, 'relay: session meta stored');
+      }
+      cacheFrame(envelope.session_id, envelope.type, text);
+      broadcastToBrowsers(channel, text);
       return;
     }
     // `session.ended` is terminal: get DONE to the watching browser IMMEDIATELY, then persist. The browser

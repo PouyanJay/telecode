@@ -1,4 +1,4 @@
-import type { SessionOrigin, SessionStatusName } from '@telecode/protocol';
+import type { SessionMetaPayload, SessionOrigin, SessionStatusName } from '@telecode/protocol';
 
 import type { SessionState, SessionStatus } from './session';
 
@@ -41,6 +41,13 @@ export interface RegistrySessionRow {
   readonly origin: SessionOrigin;
   readonly parentSessionId: string | null;
   readonly createdAt: Date;
+  /**
+   * The persisted sealed `session.meta` blob + nonce (ux Phase 6) — decoded client-side into the meta
+   * map (`seedRegistryMetas`); ciphertext blobs stay opaque until this browser holds the session key.
+   * Null against a pre-Phase-6 relay (deploy skew) or for rows that never got metadata.
+   */
+  readonly sealedMeta: string | null;
+  readonly sealedMetaNonce: string | null;
 }
 
 function firstPrompt(entries: SessionState['entries']): string | undefined {
@@ -51,10 +58,12 @@ function firstPrompt(entries: SessionState['entries']): string | undefined {
 function rowFromRegistry(
   session: RegistrySessionRow,
   deviceNameOf: (deviceId: string) => string | null,
+  meta: SessionMetaPayload | undefined,
 ): SessionRow {
   return {
     id: session.id,
-    title: session.title,
+    // Decrypted metadata beats the registry's legacy cleartext title (sealed is the fresher source).
+    title: meta?.title ?? session.title,
     status: session.status,
     deviceId: session.deviceId,
     deviceName: deviceNameOf(session.deviceId),
@@ -70,6 +79,7 @@ function mergeLiveRow(input: {
   readonly id: string;
   readonly state: SessionState;
   readonly existing: SessionRow | undefined;
+  readonly meta: SessionMetaPayload | undefined;
   readonly deviceNameOf: (deviceId: string) => string | null;
   readonly deviceIdOf: (sessionId: string) => string | null;
   readonly now: Date | undefined;
@@ -77,7 +87,8 @@ function mergeLiveRow(input: {
   const { id, state, existing } = input;
   // A live state that is still `idle` carries no frames yet — keep what the registry says.
   const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
-  const title = existing?.title ?? firstPrompt(state.entries) ?? null;
+  // Title precedence: decrypted metadata → registry/legacy title → the first prompt seen this visit.
+  const title = input.meta?.title ?? existing?.title ?? firstPrompt(state.entries) ?? null;
   // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
   const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
   const deviceId = existing?.deviceId ?? input.deviceIdOf(id);
@@ -105,6 +116,8 @@ function mergeLiveRow(input: {
 export function buildSessionRows(input: {
   readonly registry: readonly RegistrySessionRow[];
   readonly live: ReadonlyMap<string, SessionState>;
+  /** Decrypted session metadata (ux Phase 6) — its title beats the registry's and the first prompt. */
+  readonly metas?: ReadonlyMap<string, SessionMetaPayload>;
   readonly deviceNameOf: (deviceId: string) => string | null;
   /** The live routing map: which device a not-yet-persisted session's frames arrived on. */
   readonly deviceIdOf: (sessionId: string) => string | null;
@@ -113,7 +126,10 @@ export function buildSessionRows(input: {
 }): SessionRow[] {
   const byId = new Map<string, SessionRow>();
   for (const session of input.registry) {
-    byId.set(session.id, rowFromRegistry(session, input.deviceNameOf));
+    byId.set(
+      session.id,
+      rowFromRegistry(session, input.deviceNameOf, input.metas?.get(session.id)),
+    );
   }
   for (const [id, state] of input.live) {
     byId.set(
@@ -122,6 +138,7 @@ export function buildSessionRows(input: {
         id,
         state,
         existing: byId.get(id),
+        meta: input.metas?.get(id),
         deviceNameOf: input.deviceNameOf,
         deviceIdOf: input.deviceIdOf,
         now: input.now,

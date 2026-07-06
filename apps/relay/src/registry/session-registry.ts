@@ -21,6 +21,13 @@ export interface SessionSummary {
    * session. Set on a forked continuation so the dashboard can link parent ↔ child.
    */
   readonly parentSessionId: string | null;
+  /**
+   * The latest sealed `session.meta` blob (ux Phase 6) — ciphertext the relay stores but can never read
+   * (invariant #5). Browsers holding the session key decrypt it client-side for titles on cold loads.
+   * `sealedMetaNonce` is `''` for a cleartext-mode (pre-E2E) daemon's plain-JSON blob.
+   */
+  readonly sealedMeta: string | null;
+  readonly sealedMetaNonce: string | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly endedAt: Date | null;
@@ -53,6 +60,16 @@ export interface SessionRegistry {
   markRunning(input: { userId: string; sessionId: string }): Promise<void>;
   /** Flip a session to `awaiting_input` while a tool request blocks on a human decision. No-op if not the user's. */
   markAwaitingInput(input: { userId: string; sessionId: string }): Promise<void>;
+  /**
+   * Store the latest sealed `session.meta` blob for a session (ux Phase 6) — latest-wins, opaque to the
+   * relay. Bumps `updatedAt` (a metadata change is session activity). No-op if the row isn't the user's.
+   */
+  setSealedMeta(input: {
+    userId: string;
+    sessionId: string;
+    sealedMeta: string;
+    sealedMetaNonce: string;
+  }): Promise<void>;
   /** Mark a session terminal (`done`/`error`) with an end timestamp. No-op if the row isn't the user's. */
   markEnded(input: { userId: string; sessionId: string; status: 'done' | 'error' }): Promise<void>;
   /**
@@ -126,6 +143,8 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             status: sessions.status,
             origin: sessions.origin,
             parentSessionId: sessions.parentSessionId,
+            sealedMeta: sessions.sealedMeta,
+            sealedMetaNonce: sessions.sealedMetaNonce,
             createdAt: sessions.createdAt,
             updatedAt: sessions.updatedAt,
             endedAt: sessions.endedAt,
@@ -144,6 +163,15 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
 
     async markAwaitingInput({ userId, sessionId }): Promise<void> {
       await setStatus(userId, sessionId, 'awaiting_input');
+    },
+
+    async setSealedMeta({ userId, sessionId, sealedMeta, sealedMetaNonce }): Promise<void> {
+      await withUserContext(db, userId, async (scoped) => {
+        await scoped
+          .update(sessions)
+          .set({ sealedMeta, sealedMetaNonce, updatedAt: new Date() })
+          .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
+      });
     },
 
     async markEnded({ userId, sessionId, status }): Promise<void> {

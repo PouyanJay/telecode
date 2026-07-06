@@ -86,6 +86,8 @@ describe('buildSessionRows', () => {
       origin: 'launched' as const,
       parentSessionId: null,
       createdAt: new Date('2026-07-05T10:00:00Z'),
+      sealedMeta: null,
+      sealedMetaNonce: null,
     },
   ];
   const deviceNameOf = (deviceId: string): string | null =>
@@ -226,6 +228,8 @@ describe('buildSessionRows variants', () => {
           origin: 'external',
           parentSessionId: null,
           createdAt: new Date('2026-07-01T00:00:00Z'),
+          sealedMeta: null,
+          sealedMetaNonce: null,
         },
       ],
       live: new Map(),

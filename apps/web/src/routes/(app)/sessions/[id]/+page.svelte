@@ -26,6 +26,7 @@
     sendControl,
     sendUserMessage,
     sessionDevices,
+    sessionMetas,
     sessions as liveSessions,
     subscribe,
   } from '$lib/session-store';
@@ -90,10 +91,12 @@
   const connected = $derived($connectionState === 'connected');
   const isTerminal = $derived(session.status === 'done' || session.status === 'error');
   const showControls = $derived(known && session.status !== 'idle');
-  // The session's first prompt names it (in the header + browser tab); fall back to a short id prefix.
+  // The session's name (header + browser tab): decrypted metadata first (ux Phase 6 — survives
+  // reloads), then the first prompt seen this visit, then a short id prefix as the last resort.
   const SESSION_ID_DISPLAY_LENGTH = 12;
   const sessionTitle = $derived(
-    session.entries.find((e) => e.kind === 'user')?.text ??
+    $sessionMetas.get(sessionId)?.title ??
+      session.entries.find((e) => e.kind === 'user')?.text ??
       sessionId.slice(0, SESSION_ID_DISPLAY_LENGTH),
   );
 
