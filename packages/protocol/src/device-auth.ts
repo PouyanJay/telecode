@@ -17,7 +17,7 @@ import { z } from 'zod';
  * old relays strip it.
  */
 export const deviceCodeRequestSchema = z.object({
-  name: z.string().min(1).optional(),
+  name: z.string().min(1).max(200).optional(),
   public_key: z.string().min(1).optional(),
   os: z.string().min(1).max(64).optional(),
   prior_device_token: z.string().min(1).optional(),
@@ -32,6 +32,19 @@ export const deviceCodeResponseSchema = z.object({
   interval: z.number().int().positive(),
 });
 export type DeviceCodeResponse = z.infer<typeof deviceCodeResponseSchema>;
+
+/**
+ * Body `POST /device/approve` returns to the web tier. `restored` is true when the approval
+ * re-authorized an existing revoked device (same identity, history preserved) rather than pairing a
+ * new one; `device_name` names the restored device so the UI can say so (null on a fresh pair — the
+ * row didn't exist before this approval).
+ */
+export const deviceApproveResponseSchema = z.object({
+  ok: z.literal(true),
+  restored: z.boolean(),
+  device_name: z.string().nullable(),
+});
+export type DeviceApproveResponse = z.infer<typeof deviceApproveResponseSchema>;
 
 export const pollResultSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('authorization_pending') }),

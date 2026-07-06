@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createDeviceAuthService } from '../src/device-auth';
-import type { DeviceRegistry } from '../src/registry/device-registry';
+import { fakeDeviceRegistry } from './_helpers/fake-device-registry';
 
 /**
  * Pairing-code brute-force lockout (Phase 5 Task 3). A `user_code` is short enough to type, so the only
@@ -10,9 +10,7 @@ import type { DeviceRegistry } from '../src/registry/device-registry';
  * attempts the approving user is locked out for a window. The service takes an injected clock, so the
  * window logic is proven deterministically without timers.
  */
-const registry = {
-  createDevice: async () => 'device-id',
-} as unknown as DeviceRegistry;
+const registry = fakeDeviceRegistry({ createDevice: async () => 'device-id' });
 
 describe('device pairing brute-force lockout', () => {
   it('locks out a user after too many invalid approve attempts, per-user and windowed', async () => {
@@ -25,18 +23,18 @@ describe('device pairing brute-force lockout', () => {
       now: () => clock,
     });
 
-    expect(await service.approve('BADX-BADX', 'user-1')).toBe('invalid');
-    expect(await service.approve('BADX-BADX', 'user-1')).toBe('invalid');
-    expect(await service.approve('BADX-BADX', 'user-1')).toBe('invalid');
+    expect((await service.approve('BADX-BADX', 'user-1')).outcome).toBe('invalid');
+    expect((await service.approve('BADX-BADX', 'user-1')).outcome).toBe('invalid');
+    expect((await service.approve('BADX-BADX', 'user-1')).outcome).toBe('invalid');
     // The budget is spent — further attempts are refused without even checking the code.
-    expect(await service.approve('BADX-BADX', 'user-1')).toBe('rate_limited');
+    expect((await service.approve('BADX-BADX', 'user-1')).outcome).toBe('rate_limited');
 
     // A different user has an independent budget.
-    expect(await service.approve('BADX-BADX', 'user-2')).toBe('invalid');
+    expect((await service.approve('BADX-BADX', 'user-2')).outcome).toBe('invalid');
 
     // Once the window elapses, the locked-out user may try again.
     clock += 60_001;
-    expect(await service.approve('BADX-BADX', 'user-1')).toBe('invalid');
+    expect((await service.approve('BADX-BADX', 'user-1')).outcome).toBe('invalid');
   });
 
   it('approves a valid code and stays idempotent (a real pairing is never locked out)', async () => {
@@ -49,7 +47,7 @@ describe('device pairing brute-force lockout', () => {
     });
 
     const { user_code } = await service.requestCode({});
-    expect(await service.approve(user_code, 'user-1')).toBe('approved');
-    expect(await service.approve(user_code, 'user-1')).toBe('approved'); // idempotent re-approve
+    expect((await service.approve(user_code, 'user-1')).outcome).toBe('approved');
+    expect((await service.approve(user_code, 'user-1')).outcome).toBe('approved'); // idempotent re-approve
   });
 });

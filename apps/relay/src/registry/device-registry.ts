@@ -13,6 +13,7 @@ import { withUserContext } from '../db/user-context';
 export interface DeviceRecord {
   readonly id: string;
   readonly userId: string;
+  readonly name: string;
   readonly revokedAt: Date | null;
 }
 
@@ -25,6 +26,14 @@ export interface ActiveDevice {
   readonly lastSeenAt: Date | null;
   /** The device's X25519 public key (base64) for E2E key exchange; null for devices paired pre-E2E. */
   readonly publicKey: string | null;
+}
+
+/** A revoked device as the web's Revoked section shows it — still visible, identity intact. */
+export interface RevokedDevice {
+  readonly id: string;
+  readonly name: string;
+  readonly os: string | null;
+  readonly revokedAt: Date;
 }
 
 export interface DeviceRegistry {
@@ -53,6 +62,8 @@ export interface DeviceRegistry {
   touchLastSeen(deviceId: string): Promise<void>;
   /** List a user's non-revoked devices (newest first) under their RLS scope, for the web to target. */
   findActiveByUser(userId: string): Promise<ActiveDevice[]>;
+  /** List a user's revoked devices (most recently revoked first) under their RLS scope. */
+  findRevokedByUser(userId: string): Promise<RevokedDevice[]>;
   /**
    * Revoke a device for the authenticated user (sets `revoked_at`), under their RLS scope so a user can
    * only revoke their own. Returns true if a still-active device was revoked, false if none matched.
@@ -86,7 +97,12 @@ export function createDeviceRegistry(
     revokedPredicate: typeof isNull | typeof isNotNull,
   ): Promise<DeviceRecord | null> {
     const [row] = await db.db
-      .select({ id: devices.id, userId: devices.userId, revokedAt: devices.revokedAt })
+      .select({
+        id: devices.id,
+        userId: devices.userId,
+        name: devices.name,
+        revokedAt: devices.revokedAt,
+      })
       .from(devices)
       .where(and(eq(devices.deviceTokenHash, tokenHash), revokedPredicate(devices.revokedAt)))
       .limit(1);
@@ -137,6 +153,23 @@ export function createDeviceRegistry(
           .where(and(eq(devices.userId, userId), isNull(devices.revokedAt)))
           .orderBy(desc(devices.createdAt)),
       );
+    },
+
+    async findRevokedByUser(userId): Promise<RevokedDevice[]> {
+      return withUserContext(db, userId, async (scoped) => {
+        const rows = await scoped
+          .select({
+            id: devices.id,
+            name: devices.name,
+            os: devices.os,
+            revokedAt: devices.revokedAt,
+          })
+          .from(devices)
+          .where(and(eq(devices.userId, userId), isNotNull(devices.revokedAt)))
+          .orderBy(desc(devices.revokedAt));
+        // The isNotNull predicate guarantees revokedAt; narrow it for the domain type.
+        return rows.flatMap((row) => (row.revokedAt ? [{ ...row, revokedAt: row.revokedAt }] : []));
+      });
     },
 
     async revoke(userId, deviceId): Promise<boolean> {
