@@ -28,6 +28,16 @@ const log = pino({
       '*.payload',
       'text',
       'prompt',
+      // Session-meta fields (ux Phase 6, AD-6): a title is prompt-derived content and cwd names the
+      // user's project paths — redacted as a safety net even though no call site logs them today.
+      'title',
+      '*.title',
+      'meta',
+      '*.meta',
+      'cwd',
+      '*.cwd',
+      'sealed_meta',
+      '*.sealed_meta',
       'channel_token',
       'device_token',
       '*.device_token',

@@ -1,4 +1,8 @@
-import { type SessionOrigin, type SessionStatusName } from '@telecode/protocol';
+import {
+  type SessionEndedPayload,
+  type SessionOrigin,
+  type SessionStatusName,
+} from '@telecode/protocol';
 import { and, count, desc, eq, inArray } from 'drizzle-orm';
 
 import { type DbHandle } from '../db/client';
@@ -21,6 +25,20 @@ export interface SessionSummary {
    * session. Set on a forked continuation so the dashboard can link parent ↔ child.
    */
   readonly parentSessionId: string | null;
+  /**
+   * The latest sealed `session.meta` blob (ux Phase 6) — ciphertext the relay stores but can never read
+   * (invariant #5). Browsers holding the session key decrypt it client-side for titles on cold loads.
+   * `sealedMetaNonce` is `''` for a cleartext-mode (pre-E2E) daemon's plain-JSON blob.
+   */
+  readonly sealedMeta: string | null;
+  readonly sealedMetaNonce: string | null;
+  /**
+   * The user's sealed rename override (ux Phase 6 T6), separate from `sealedMeta` so a later derived title
+   * never clobbers it — the browser merges override-wins. Both `null` until a rename (and after a reset).
+   * Ciphertext the relay stores but can never read (invariant #5).
+   */
+  readonly sealedTitle: string | null;
+  readonly sealedTitleNonce: string | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly endedAt: Date | null;
@@ -53,8 +71,34 @@ export interface SessionRegistry {
   markRunning(input: { userId: string; sessionId: string }): Promise<void>;
   /** Flip a session to `awaiting_input` while a tool request blocks on a human decision. No-op if not the user's. */
   markAwaitingInput(input: { userId: string; sessionId: string }): Promise<void>;
-  /** Mark a session terminal (`done`/`error`) with an end timestamp. No-op if the row isn't the user's. */
-  markEnded(input: { userId: string; sessionId: string; status: 'done' | 'error' }): Promise<void>;
+  /**
+   * Store the latest sealed `session.meta` blob for a session (ux Phase 6) — latest-wins, opaque to the
+   * relay. Bumps `updatedAt` (a metadata change is session activity). No-op if the row isn't the user's.
+   */
+  setSealedMeta(input: {
+    userId: string;
+    sessionId: string;
+    sealedMeta: string;
+    sealedMetaNonce: string;
+  }): Promise<void>;
+  /**
+   * Set (or clear) a session's sealed rename override (ux Phase 6 T6). A rename passes the sealed blob +
+   * nonce; a reset-to-derived passes both `null`. Bumps `updatedAt` (a rename is session activity).
+   * Returns the session's `deviceId` so the caller can broadcast the change on that device's channel, or
+   * `null` when no row is the user's (a 404 for the route). RLS-scoped.
+   */
+  setSealedTitle(input: {
+    userId: string;
+    sessionId: string;
+    sealedTitle: string | null;
+    sealedTitleNonce: string | null;
+  }): Promise<{ deviceId: string } | null>;
+  /** Mark a session terminal (any ended state, ux Phase 6 split) with an end timestamp. No-op if not the user's. */
+  markEnded(input: {
+    userId: string;
+    sessionId: string;
+    status: SessionEndedPayload['status'];
+  }): Promise<void>;
   /**
    * End (mark `done`) every non-terminal session for a device — called when the device is revoked. A revoked
    * device never reconnects, so the per-connection `session.reconcile` can never retire these; without this
@@ -126,6 +170,10 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
             status: sessions.status,
             origin: sessions.origin,
             parentSessionId: sessions.parentSessionId,
+            sealedMeta: sessions.sealedMeta,
+            sealedMetaNonce: sessions.sealedMetaNonce,
+            sealedTitle: sessions.sealedTitle,
+            sealedTitleNonce: sessions.sealedTitleNonce,
             createdAt: sessions.createdAt,
             updatedAt: sessions.updatedAt,
             endedAt: sessions.endedAt,
@@ -144,6 +192,31 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
 
     async markAwaitingInput({ userId, sessionId }): Promise<void> {
       await setStatus(userId, sessionId, 'awaiting_input');
+    },
+
+    async setSealedMeta({ userId, sessionId, sealedMeta, sealedMetaNonce }): Promise<void> {
+      await withUserContext(db, userId, async (scoped) => {
+        await scoped
+          .update(sessions)
+          .set({ sealedMeta, sealedMetaNonce, updatedAt: new Date() })
+          .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)));
+      });
+    },
+
+    async setSealedTitle({
+      userId,
+      sessionId,
+      sealedTitle,
+      sealedTitleNonce,
+    }): Promise<{ deviceId: string } | null> {
+      return withUserContext(db, userId, async (scoped) => {
+        const [updated] = await scoped
+          .update(sessions)
+          .set({ sealedTitle, sealedTitleNonce, updatedAt: new Date() })
+          .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId)))
+          .returning({ deviceId: sessions.deviceId });
+        return updated ?? null;
+      });
     },
 
     async markEnded({ userId, sessionId, status }): Promise<void> {

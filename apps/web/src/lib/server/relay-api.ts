@@ -3,6 +3,7 @@ import {
   SESSION_ORIGINS,
   SESSION_STATUSES,
   type SessionOrigin,
+  type SessionRenameBody,
   type SessionStatusName,
 } from '@telecode/protocol';
 import { z } from 'zod';
@@ -71,6 +72,19 @@ export interface RelaySession {
   origin: SessionOrigin;
   /** The adopted session this one continues (free-form handover, Journey 4), or null when unchained. */
   parentSessionId: string | null;
+  /**
+   * The persisted sealed `session.meta` blob + nonce (ux Phase 6) — opaque here (the server never holds
+   * session keys); the browser decodes it into the meta map. Null from a pre-Phase-6 relay.
+   */
+  sealedMeta: string | null;
+  sealedMetaNonce: string | null;
+  /**
+   * The user's sealed rename override (ux Phase 6 T6), separate from `sealedMeta` so a later derived title
+   * never clobbers it; the browser decodes it into the title-override map (override wins on display). Both
+   * null until a rename (and after a reset). Null from a pre-T6 relay (deploy skew).
+   */
+  sealedTitle: string | null;
+  sealedTitleNonce: string | null;
   createdAt: Date;
   updatedAt: Date;
   endedAt: Date | null;
@@ -229,14 +243,20 @@ export async function listRevokedDevices(
   });
 }
 
-/** The outcome of a revoke attempt — `notFound` distinguishes "already gone" from a transient failure. */
-export interface RevokeResult {
+/**
+ * The outcome of a relay mutation (revoke / rename / …) — `notFound` distinguishes "already gone or not
+ * yours" (a 404) from a transient failure (unreachable relay / 5xx), so the page action can message each.
+ */
+export interface RelayMutationResult {
   readonly ok: boolean;
   readonly notFound: boolean;
 }
 
 /** Revoke one of the user's devices (session-token authed; the relay scopes it to the owner). */
-export async function revokeDevice(sessionToken: string, deviceId: string): Promise<RevokeResult> {
+export async function revokeDevice(
+  sessionToken: string,
+  deviceId: string,
+): Promise<RelayMutationResult> {
   try {
     const res = await fetch(`${RELAY_HTTP_URL}/me/devices/${encodeURIComponent(deviceId)}`, {
       method: 'DELETE',
@@ -245,6 +265,42 @@ export async function revokeDevice(sessionToken: string, deviceId: string): Prom
     return { ok: res.ok, notFound: res.status === 404 };
   } catch {
     // Relay unreachable — surface a retryable failure rather than throwing a 500 at the page action.
+    return { ok: false, notFound: false };
+  }
+}
+
+/** Set or reset a session's sealed rename override via the relay (session-token authed, RLS-scoped). */
+export async function renameSession(
+  sessionToken: string,
+  sessionId: string,
+  body: SessionRenameBody,
+): Promise<RelayMutationResult> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { ok: res.ok, notFound: res.status === 404 };
+  } catch {
+    return { ok: false, notFound: false };
+  }
+}
+
+/** Rename one of the user's devices by its cleartext name (session-token authed; RLS-scoped). */
+export async function renameDevice(
+  sessionToken: string,
+  deviceId: string,
+  name: string,
+): Promise<RelayMutationResult> {
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/me/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    return { ok: res.ok, notFound: res.status === 404 };
+  } catch {
     return { ok: false, notFound: false };
   }
 }
@@ -261,6 +317,12 @@ const sessionListBodySchema = z.object({
       status: z.enum(SESSION_STATUSES),
       origin: z.enum(SESSION_ORIGINS).optional(),
       parent_session_id: z.string().nullable().optional(),
+      // Sealed metadata blob (ux Phase 6) — optional so a pre-Phase-6 relay degrades cleanly.
+      sealed_meta: z.string().nullable().optional(),
+      sealed_meta_nonce: z.string().nullable().optional(),
+      // Sealed rename override (ux Phase 6 T6) — optional so a pre-T6 relay degrades cleanly.
+      sealed_title: z.string().nullable().optional(),
+      sealed_title_nonce: z.string().nullable().optional(),
       created_at: z.string(),
       updated_at: z.string(),
       ended_at: z.string().nullable(),
@@ -281,6 +343,10 @@ export async function listSessions(sessionToken: string): Promise<RelayListResul
       // Default to `launched` so a relay that predates the origin field degrades cleanly.
       origin: session.origin ?? 'launched',
       parentSessionId: session.parent_session_id ?? null,
+      sealedMeta: session.sealed_meta ?? null,
+      sealedMetaNonce: session.sealed_meta_nonce ?? null,
+      sealedTitle: session.sealed_title ?? null,
+      sealedTitleNonce: session.sealed_title_nonce ?? null,
       createdAt: new Date(session.created_at),
       updatedAt: new Date(session.updated_at),
       endedAt: session.ended_at ? new Date(session.ended_at) : null,

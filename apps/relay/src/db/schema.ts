@@ -99,6 +99,22 @@ export const sessions = pgTable(
     /** Working directory the session runs in (single cwd in Phase 1; worktrees in Phase 2). */
     cwd: text('cwd'),
     permissionMode: text('permission_mode'),
+    /**
+     * Sealed session metadata (ux Phase 6): the latest `session.meta` payload as the daemon sent it —
+     * base64 AES-GCM ciphertext under the per-session content key (or a cleartext JSON string with an
+     * empty nonce for a pre-E2E daemon). OPAQUE to the relay by design (invariant #5): stored only so a
+     * cold page load can hand it back to browsers, which decrypt titles client-side.
+     */
+    sealedMeta: text('sealed_meta'),
+    sealedMetaNonce: text('sealed_meta_nonce'),
+    /**
+     * The user's rename override (ux Phase 6 T6): the title they set, sealed under the per-session content
+     * key — kept SEPARATE from `sealed_meta` (the daemon-owned identity) so a later derived title never
+     * clobbers a rename; the browser merges override-wins. OPAQUE to the relay (invariant #5). Both null
+     * until a rename, and cleared again by a reset-to-derived. Added in `0009_session_sealed_title`.
+     */
+    sealedTitle: text('sealed_title'),
+    sealedTitleNonce: text('sealed_title_nonce'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     endedAt: timestamp('ended_at', { withTimezone: true }),

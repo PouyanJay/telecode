@@ -203,6 +203,7 @@ describe('session variants: broadcast, error paths, and the one-turn-at-a-time g
 
       const expected = [
         'session.started',
+        'session.meta',
         'agent.message',
         'agent.permission_request',
         'agent.tool_use',
@@ -229,7 +230,11 @@ describe('session variants: broadcast, error paths, and the one-turn-at-a-time g
       launch(browser, 'do it');
       await col.waitForCount('session.ended', 1);
 
-      expect(col.frames.map((f) => f.type)).toEqual(['session.started', 'session.ended']);
+      expect(col.frames.map((f) => f.type)).toEqual([
+        'session.started',
+        'session.meta',
+        'session.ended',
+      ]);
       const ended = sessionEndedPayloadSchema.parse(
         col.frames.find((f) => f.type === 'session.ended')!.payload,
       );

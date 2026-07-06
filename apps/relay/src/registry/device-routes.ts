@@ -15,6 +15,13 @@ import { type SessionRegistry } from './session-registry';
  */
 const idParamSchema = z.object({ id: z.string().uuid() });
 
+/**
+ * The device rename body (ux Phase 6 T6). Device names are hostnames — stored + served cleartext since
+ * pairing — so this is a plain bounded `name` (trimmed; a blank rename is rejected). Not sealed: unlike a
+ * session title, a device name is not session content and has never been E2E in this product.
+ */
+const renameBodySchema = z.object({ name: z.string().trim().min(1).max(128) });
+
 /** What the revoke cascade ended — one named shape shared by the registry, the route, and the relay. */
 export interface SessionsEndedEvent {
   readonly userId: string;
@@ -124,6 +131,26 @@ export function registerDeviceRoutes(
     }
     const endedSessions = await endRevokedDeviceSessions(userId, params.data.id, request.log);
     request.log.info({ userId, deviceId: params.data.id, endedSessions }, 'device revoked');
+    return reply.code(204).send();
+  });
+
+  app.patch('/me/devices/:id', async (request, reply) => {
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
+    const params = idParamSchema.safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'invalid_request' });
+    const body = renameBodySchema.safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid_request' });
+    const renamed = await registry.rename(userId, params.data.id, body.data.name);
+    if (!renamed) {
+      // A 404 also covers a cross-user attempt (RLS-scoped) or a revoked device; log it for the audit trail.
+      request.log.warn(
+        { userId, deviceId: params.data.id },
+        'device rename: not found or not owned',
+      );
+      return reply.code(404).send({ error: 'device_not_found' });
+    }
+    request.log.info({ userId, deviceId: params.data.id }, 'device renamed');
     return reply.code(204).send();
   });
 }

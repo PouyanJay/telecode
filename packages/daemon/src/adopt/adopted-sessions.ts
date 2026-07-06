@@ -15,9 +15,6 @@ import { type Logger } from 'pino';
 export interface AdoptInput {
   /** The Claude Code session id from the hook event. */
   readonly claudeSessionId: string;
-  /** Derived hints for the registry row (first prompt / working directory). */
-  readonly title?: string;
-  readonly cwd?: string;
 }
 
 export interface AdoptedSessionManager {
@@ -28,6 +25,12 @@ export interface AdoptedSessionManager {
   ensureAdopted(input: AdoptInput): Promise<string>;
   /** Feed the relay's `session.adopted` ACK: bind the `clientRef` (Claude id) to the minted telecode id. */
   resolveAck(clientRef: string, telecodeSessionId: string): void;
+  /**
+   * Seed a Claude→telecode mapping from persisted state (ux Phase 6 T4) so an adopted session that was
+   * announced before a daemon restart is recognized on the next hook event instead of re-announced as a
+   * duplicate card. No announce, no waiter — just the binding.
+   */
+  restore(claudeSessionId: string, telecodeSessionId: string): void;
   /** Whether a `clientRef` is genuinely awaiting an ACK — so a forged/replayed ACK can be ignored. */
   isPending(claudeSessionId: string): boolean;
   /** The telecode id for an already-adopted Claude session, or undefined. */
@@ -35,8 +38,11 @@ export interface AdoptedSessionManager {
 }
 
 export interface AdoptedSessionOptions {
-  /** Announce an external session to the relay (the daemon enqueues the `session.adopted` frame). */
-  readonly announce: (payload: { clientRef: string; title?: string; cwd?: string }) => void;
+  /**
+   * Announce an external session to the relay (the daemon enqueues the `session.adopted` frame). Ids-only
+   * since ux Phase 6 T5 — the session's title/cwd travel in a SEALED `session.meta`, never cleartext here.
+   */
+  readonly announce: (payload: { clientRef: string }) => void;
   /** How long to wait for the relay's ACK before failing the adoption. Default 15s. */
   readonly ackTimeoutMs?: number;
   /** Injected at the composition root (the daemon's child logger) — never created here (TYPESCRIPT.md). */
@@ -69,7 +75,7 @@ export function createAdoptedSessionManager(options: AdoptedSessionOptions): Ado
   }
 
   return {
-    ensureAdopted({ claudeSessionId, title, cwd }): Promise<string> {
+    ensureAdopted({ claudeSessionId }): Promise<string> {
       const known = byClaudeId.get(claudeSessionId);
       if (known !== undefined) return Promise.resolve(known);
       const inflight = pending.get(claudeSessionId);
@@ -89,11 +95,7 @@ export function createAdoptedSessionManager(options: AdoptedSessionOptions): Ado
       pending.set(claudeSessionId, { promise, resolve, reject, timer });
 
       log.info({ claudeSessionId }, 'adopted-sessions: announcing external session');
-      options.announce({
-        clientRef: claudeSessionId,
-        ...(title !== undefined ? { title } : {}),
-        ...(cwd !== undefined ? { cwd } : {}),
-      });
+      options.announce({ clientRef: claudeSessionId });
       return promise;
     },
 
@@ -101,6 +103,12 @@ export function createAdoptedSessionManager(options: AdoptedSessionOptions): Ado
       // The clientRef we announced is the Claude session id; bind it even if the waiter already timed out
       // (a late ACK), so a retried hook event for the same session correlates without re-announcing.
       settle(clientRef, telecodeSessionId);
+    },
+
+    restore(claudeSessionId, telecodeSessionId): void {
+      // Same binding as an ACK — this process has no pending waiter for a session announced in a prior
+      // one, and `settle`'s waiter branch is a no-op when there's none.
+      settle(claudeSessionId, telecodeSessionId);
     },
 
     isPending(claudeSessionId): boolean {

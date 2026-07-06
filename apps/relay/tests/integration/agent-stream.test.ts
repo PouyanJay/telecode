@@ -129,6 +129,7 @@ describe('agent streaming: launch → streamed messages/tool calls → ended', (
     // A read-only tool auto-approves: it streams as agent.tool_use with NO preceding permission_request.
     expect(received.map((e) => e.type)).toEqual([
       'session.started',
+      'session.meta',
       'agent.message',
       'agent.tool_use',
       'agent.message',

@@ -65,6 +65,14 @@ export interface AgentRunOptions {
   readonly permissionMode?: PermissionModeName;
 }
 
+/**
+ * How a run's final turn settled, from the SDK's terminal `result` message (ux Phase 6 status split):
+ * `completed` = a clean finish; `turn_limit` = the turn budget ran out mid-task (followable — resuming
+ * continues the same conversation); `execution_error` = the SDK reported an internal failure without
+ * throwing. Distinguishable ONLY here — the message iterator simply ends in all three cases.
+ */
+export type AgentEndReason = 'completed' | 'turn_limit' | 'execution_error';
+
 export interface AgentRunResult {
   /** Every tool request that passed through `canUseTool`, in order. */
   readonly intercepted: PermissionRequest[];
@@ -72,6 +80,10 @@ export interface AgentRunResult {
   readonly denied: string[];
   /** The agent conversation id to {@link AgentRunOptions.resume} for the next (follow-up) turn. */
   readonly sessionId?: string;
+  /** Absent when the stream ended without a terminal result (abort, old SDK) — treated as completed. */
+  readonly endReason?: AgentEndReason;
+  /** The model the SDK ran (from its `system/init`, ux Phase 6 T5) — surfaced in the session's metadata. */
+  readonly model?: string;
 }
 
 export interface AgentAdapter {
@@ -82,8 +94,17 @@ export interface AgentAdapter {
 export interface FakeAgentAdapterOptions {
   /** The conversation id every run reports (so the daemon can thread `resume` across turns). */
   readonly sessionId?: string;
-  /** Invoked once per `run` with the turn's prompt + the `resume` id / `forkSession` flag it was called with. */
-  readonly onRun?: (call: { prompt: string; resume?: string; forkSession?: boolean }) => void;
+  /** Invoked once per `run` with the turn's prompt + the resume id / forkSession flag / cwd it was called with. */
+  readonly onRun?: (call: {
+    prompt: string;
+    resume?: string;
+    forkSession?: boolean;
+    cwd?: string;
+  }) => void;
+  /** The terminal reason every run reports (simulates the SDK's `result` subtype; default none). */
+  readonly endReason?: AgentEndReason;
+  /** The model every run reports (simulates the SDK's `system/init` model, ux Phase 6 T5; default none). */
+  readonly model?: string;
 }
 
 /**
@@ -99,12 +120,13 @@ export function createFakeAgentAdapter(
   return {
     async run(
       prompt: string,
-      { canUseTool, onEvent, resume, forkSession }: AgentRunOptions,
+      { canUseTool, onEvent, resume, forkSession, cwd }: AgentRunOptions,
     ): Promise<AgentRunResult> {
       options.onRun?.({
         prompt,
         ...(resume !== undefined ? { resume } : {}),
         ...(forkSession !== undefined ? { forkSession } : {}),
+        ...(cwd !== undefined ? { cwd } : {}),
       });
       const intercepted: PermissionRequest[] = [];
       const allowed: string[] = [];
@@ -128,7 +150,14 @@ export function createFakeAgentAdapter(
           denied.push(event.toolName);
         }
       }
-      return { intercepted, allowed, denied, sessionId };
+      return {
+        intercepted,
+        allowed,
+        denied,
+        sessionId,
+        ...(options.endReason !== undefined ? { endReason: options.endReason } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+      };
     },
   };
 }

@@ -151,6 +151,12 @@ export const SESSION_STATUSES = [
   'error',
   // The device is off, so the session can't run; it resumes when the daemon reconnects.
   'offline_paused',
+  // The run stopped early because it exhausted its turn budget (ux Phase 6, B5 "Ended — turn limit"),
+  // NOT because the agent finished or failed — a follow-up message continues the same conversation.
+  'turn_limit',
+  // The daemon no longer holds this session's conversation (it restarted, or the row was retired by
+  // reconcile), so follow-ups can't resume it in place (ux Phase 6, B5 "Needs restart").
+  'needs_restart',
 ] as const;
 export const sessionStatusSchema = z.enum(SESSION_STATUSES);
 export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
@@ -230,12 +236,28 @@ export const agentToolUsePayloadSchema = z.object({
 });
 export type AgentToolUsePayload = z.infer<typeof agentToolUsePayloadSchema>;
 
+/**
+ * The terminal states a `session.ended` can carry (ux Phase 6 status split, B5): `done` = Completed,
+ * `error` = Failed, `turn_limit` = the run exhausted its turn budget (daemon-reported; followable),
+ * `needs_restart` = the daemon lost the conversation (relay-synthesized on reconcile-retire).
+ */
+export const SESSION_END_STATUSES = ['done', 'error', 'turn_limit', 'needs_restart'] as const;
+
 /** Payload for `session.ended` (daemon → web): terminal result of the run. */
 export const sessionEndedPayloadSchema = z.object({
-  status: z.enum(['done', 'error']),
+  status: z.enum(SESSION_END_STATUSES),
   error: z.string().optional(),
 });
 export type SessionEndedPayload = z.infer<typeof sessionEndedPayloadSchema>;
+
+/**
+ * Whether a status is one of the ended states — THE shared terminal check, so adding a status to
+ * {@link SESSION_END_STATUSES} propagates to every consumer (relay status resolution, the web's
+ * terminal guards) instead of leaving hand-maintained unions half-updated.
+ */
+export function isSessionEndStatus(value: unknown): value is SessionEndedPayload['status'] {
+  return typeof value === 'string' && (SESSION_END_STATUSES as readonly string[]).includes(value);
+}
 
 /**
  * Decrypted payload for `session.key` (daemon → web, E2E): the per-session symmetric content key, base64.
@@ -245,6 +267,72 @@ export type SessionEndedPayload = z.infer<typeof sessionEndedPayloadSchema>;
  */
 export const sessionKeyPayloadSchema = z.object({ key: base64KeySchema });
 export type SessionKeyPayload = z.infer<typeof sessionKeyPayloadSchema>;
+
+/**
+ * Where a session's display title came from, carried inside the sealed metadata so peers can apply
+ * precedence without the relay reading anything: a `user` title (typed at launch, or a rename) is
+ * never overwritten by a `derived` one (from the first prompt / the working directory).
+ */
+export const TITLE_SOURCES = ['derived', 'user'] as const;
+export const titleSourceSchema = z.enum(TITLE_SOURCES);
+export type TitleSourceName = z.infer<typeof titleSourceSchema>;
+
+/**
+ * Payload for `session.meta` (daemon → relay → web, ux Phase 6): the session's identity metadata,
+ * sealed under the per-session content key. The daemon emits it on launch/adoption and whenever a
+ * field changes (e.g. the model is learned, the title is refined); the relay stores the opaque blob
+ * (`sealed_meta` + nonce) so a cold page load can decrypt titles client-side, and replays the latest
+ * frame on subscribe. Every field optional: a frame updates what it carries. Bounds mirror the
+ * adopted-announce hints so a buggy peer can't bloat the encrypted frame or the registry row.
+ */
+export const sessionMetaPayloadSchema = z.object({
+  title: z.string().min(1).max(512).optional(),
+  titleSource: titleSourceSchema.optional(),
+  cwd: z.string().min(1).max(1024).optional(),
+  model: z.string().min(1).max(128).optional(),
+  permissionMode: permissionModeSchema.optional(),
+  ts: entryTimestampSchema.optional(),
+});
+export type SessionMetaPayload = z.infer<typeof sessionMetaPayloadSchema>;
+
+/**
+ * Payload for `session.title` (relay → web, ux Phase 6 T6): the user's rename override, kept in a blob
+ * SEPARATE from `session.meta` (the daemon-owned identity) so the two never race — the browser merges
+ * override-wins, and a later derived `session.meta` can never clobber a rename. The relay broadcasts this
+ * frame after a `PATCH /me/sessions/:id`. A SET is sealed (this `{ title }` shape is what the ciphertext
+ * decrypts to, so the relay never reads it); a RESET-to-derived is the cleartext `{ reset: true }` marker
+ * (it carries no secret). The `title` bound mirrors {@link sessionMetaPayloadSchema}'s.
+ */
+export const sessionTitlePayloadSchema = z.union([
+  z.object({ title: z.string().min(1).max(512) }),
+  z.object({ reset: z.literal(true) }),
+]);
+export type SessionTitlePayload = z.infer<typeof sessionTitlePayloadSchema>;
+
+/**
+ * The single ceiling for every OPAQUE sealed blob the relay stores but can never read (`sealed_meta`,
+ * `sealed_title`, …). The plaintext schemas cap their fields (title 512, cwd 1024, model 128 chars), so
+ * even with AES-GCM + base64 overhead a legitimate blob is well under 8 KiB; the nonce is a 12-byte GCM IV
+ * (16 base64 chars). ONE source of truth so the relay's route zod, the relay's DB CHECK (migrations
+ * 0008/0009), and the web's BFF re-validation can never drift.
+ */
+export const MAX_SEALED_BLOB_CHARS = 8192;
+export const MAX_SEALED_BLOB_NONCE_CHARS = 64;
+
+/**
+ * The `PATCH /me/sessions/:id` rename body (ux Phase 6 T6): a SET carries the browser-sealed title blob +
+ * nonce; a RESET-to-derived is `{ sealed_title: null }`. Shared by the relay route and the web BFF (each
+ * re-validates at its own trust boundary) so the snake_case wire shape + bounds live in one place. The
+ * title itself is ciphertext neither the relay nor the web server ever reads (invariant #5).
+ */
+export const sessionRenameBodySchema = z.union([
+  z.object({
+    sealed_title: z.string().min(1).max(MAX_SEALED_BLOB_CHARS),
+    sealed_title_nonce: z.string().min(1).max(MAX_SEALED_BLOB_NONCE_CHARS),
+  }),
+  z.object({ sealed_title: z.null() }),
+]);
+export type SessionRenameBody = z.infer<typeof sessionRenameBodySchema>;
 
 /**
  * Payload for `agent.permission_request` (daemon → web): a consequential tool call the agent wants to

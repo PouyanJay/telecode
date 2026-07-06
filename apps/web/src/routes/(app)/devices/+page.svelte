@@ -2,6 +2,7 @@
   import { enhance } from '$app/forms';
   import { Button, ConfirmDialog, Panel, Pill } from '@telecode/ui';
 
+  import DeviceRenameForm from '$lib/components/DeviceRenameForm.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import { deviceConsequences, revokeConsequenceText } from '$lib/device-consequences';
@@ -97,7 +98,7 @@
               <li class="row hairline-b">
                 <span class="dot" data-tone={status.tone} aria-hidden="true"></span>
                 <div class="id">
-                  <span class="name" title={device.name}>{device.name}</span>
+                  <DeviceRenameForm deviceId={device.id} name={device.name} />
                   <span class="did mono">{device.id.slice(0, 18)}…</span>
                   <a class="board-link" href={deviceBoardHref(device.id)}>
                     {boardSummaryOf(device.id)}

@@ -81,6 +81,12 @@ export interface RelayConnection {
   /** Send an operator control (interrupt / end) for `sessionId`. */
   control(sessionId: string, action: SessionControlAction): void;
   /**
+   * Seal a rename title `{ title }` under `sessionId`'s content key, for the REST rename path (ux Phase 6
+   * T6). Returns the wire blob + nonce, or `null` when the session isn't E2E (no content key) — rename is
+   * only offered for encrypted sessions, so the relay's opaque `sealed_title` is always real ciphertext.
+   */
+  sealTitle(sessionId: string, title: string): Promise<{ payload: string; nonce: string } | null>;
+  /**
    * Read (`set` omitted) or update (`set` provided) the device's adoption policy. Box-sealed to the daemon
    * so the relay never sees repo paths; the daemon replies `adopt.state` via `onAdoptState` (Journey 3).
    */
@@ -361,6 +367,16 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     },
     control(sessionId: string, action: SessionControlAction): void {
       enqueueSend(() => sessionFrame('session.control', sessionId, { action }));
+    },
+    async sealTitle(
+      sessionId: string,
+      title: string,
+    ): Promise<{ payload: string; nonce: string } | null> {
+      // Gated to E2E sessions: no content key → no rename (the caller reports that honestly rather than
+      // sending a fake blob). `cipher.encrypt` always yields a string ciphertext payload + non-empty nonce.
+      if (!cipher.isEncrypted(sessionId)) return null;
+      const sealed = await cipher.encrypt(sessionId, { title });
+      return { payload: sealed.payload, nonce: sealed.nonce };
     },
     sendAdoptConfig(set?: AdoptSettings): void {
       enqueueSend(async () => {

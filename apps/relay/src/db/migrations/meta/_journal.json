@@ -50,6 +50,27 @@
       "when": 1783042491278,
       "tag": "0006_session_parent_id",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1783320108588,
+      "tag": "0007_session_sealed_meta",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783320108589,
+      "tag": "0008_sealed_meta_bounds",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1783420000000,
+      "tag": "0009_session_sealed_title",
+      "breakpoints": true
     }
   ]
 }

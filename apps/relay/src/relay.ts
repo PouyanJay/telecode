@@ -5,14 +5,17 @@ import type { WebSocket } from 'ws';
 
 import {
   helloPayloadSchema,
+  isSessionEndStatus,
   makeEnvelope,
   parseEnvelope,
   sessionAdoptedPayloadSchema,
+  sessionMetaPayloadSchema,
   sessionChainedPayloadSchema,
   sessionEndedPayloadSchema,
   sessionReconcilePayloadSchema,
   WS_CLOSE_UNAUTHORIZED,
   type Envelope,
+  type SessionEndedPayload,
 } from '@telecode/protocol';
 
 import { type AuthService } from './auth/auth-service';
@@ -26,12 +29,13 @@ import { type PushSubscriptionStore } from './push/push-subscription-store';
 import { createDeviceAuthService, hashDeviceToken, registerDeviceAuthRoutes } from './device-auth';
 import { registerRateLimit, type RateLimitConfig } from './rate-limit';
 import { createTelemetry, type Telemetry } from './telemetry';
+import { MAX_SEALED_BLOB_CHARS, MAX_SEALED_BLOB_NONCE_CHARS } from './db/sealed-blob-bounds';
 import { registerInfraRoutes } from './infra/infra-routes';
 import { type InfraScaler } from './infra/infra-scaler';
 import { type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceRoutes } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
-import { registerSessionListRoute } from './registry/session-routes';
+import { registerSessionRoutes, type SessionRenamedEvent } from './registry/session-routes';
 
 /**
  * The relay / control plane. Both the daemon and the browser dial *out* to it (loopback in
@@ -154,6 +158,9 @@ const CACHEABLE_TYPES = new Set<string>([
   'agent.handover',
   'session.ended',
   'session.key',
+  // Sealed session metadata (ux Phase 6): latest-wins identity for the session — cached (like the key,
+  // outside the stream ring) so a reopening browser can label the session immediately.
+  'session.meta',
 ]);
 
 /**
@@ -169,6 +176,28 @@ const UNDELIVERABLE_REPLY_TYPES: ReadonlySet<string> = new Set([
   'session.control',
   'session.subscribe',
 ]);
+
+/**
+/**
+ * The storable form of a `session.meta` payload, WITHOUT reading sealed content. Ciphertext mode
+ * (non-empty nonce): the payload must be a bounded string — size is the only checkable property.
+ * Cleartext mode (legacy pre-E2E daemons): the payload must actually parse as session metadata — the
+ * same trust-boundary validation `session.adopted`/`session.chained` get. `null` = drop the frame.
+ * Bounds are the shared {@link MAX_SEALED_BLOB_CHARS}/{@link MAX_SEALED_BLOB_NONCE_CHARS} (also the DB
+ * CHECK in migration 0008), so a hostile daemon can't bloat rows the relay can't read.
+ */
+function storableSealedMeta(envelope: Envelope): string | null {
+  if (envelope.nonce.length > MAX_SEALED_BLOB_NONCE_CHARS) return null;
+  if (envelope.nonce !== '') {
+    return typeof envelope.payload === 'string' && envelope.payload.length <= MAX_SEALED_BLOB_CHARS
+      ? envelope.payload
+      : null;
+  }
+  const parsed = sessionMetaPayloadSchema.safeParse(envelope.payload);
+  if (!parsed.success) return null;
+  const json = JSON.stringify(parsed.data);
+  return json.length <= MAX_SEALED_BLOB_CHARS ? json : null;
+}
 
 function channelKey(userId: string, deviceId: string): string {
   return `${userId}:${deviceId}`;
@@ -204,10 +233,17 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // stream frames, all stored as the opaque forwarded strings (the relay never decrypts them).
   const cacheMaxFrames = options.cache?.maxFramesPerSession ?? 64;
   const cacheMaxSessions = options.cache?.maxSessions ?? 256;
-  const ciphertextCache = new Map<string, { key?: string; stream: string[] }>();
+  // Each entry records the CHANNEL its frames came in on — a session runs on exactly one device, so a
+  // browser may only replay a session cached on its own channel. Without this, a browser could pull
+  // another tenant's cached ciphertext by guessing a session UUID (payload stays E2E-sealed, but even
+  // its existence/size must not cross the channel boundary).
+  const ciphertextCache = new Map<
+    string,
+    { channel: string; key?: string; meta?: string; stream: string[] }
+  >();
 
   /** Record a forwarded daemon→browser frame for later replay (ciphertext string, never read). */
-  function cacheFrame(sessionId: string, type: string, frame: string): void {
+  function cacheFrame(sessionId: string, channel: string, type: string, frame: string): void {
     let entry = ciphertextCache.get(sessionId);
     if (!entry) {
       // Bound the number of cached sessions: evict the oldest (Map preserves insertion order).
@@ -215,23 +251,30 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         const oldest = ciphertextCache.keys().next().value;
         if (oldest !== undefined) ciphertextCache.delete(oldest);
       }
-      entry = { stream: [] };
+      entry = { channel, stream: [] };
       ciphertextCache.set(sessionId, entry);
     }
     if (type === 'session.key') {
       entry.key = frame; // keep only the latest key frame
+    } else if (type === 'session.meta') {
+      entry.meta = frame; // latest-wins identity metadata (ux Phase 6) — never fills the stream ring
     } else {
       entry.stream.push(frame);
       if (entry.stream.length > cacheMaxFrames) entry.stream.shift();
     }
   }
 
-  /** Replay a session's cached frames to one browser (the `session.key` first, so the stream decrypts). */
-  function replayCache(sessionId: string, browser: WebSocket): void {
+  /**
+   * Replay a session's cached frames to one browser (the `session.key` first, so the stream decrypts).
+   * Scoped to the requesting `channel`: a session cached on another channel is never replayed, so a
+   * browser can't read a session it doesn't own out of the shared cache (authorization boundary).
+   */
+  function replayCache(sessionId: string, channel: string, browser: WebSocket): void {
     const entry = ciphertextCache.get(sessionId);
-    if (!entry) return;
+    if (!entry || entry.channel !== channel) return;
     try {
       if (entry.key !== undefined) browser.send(entry.key);
+      if (entry.meta !== undefined) browser.send(entry.meta);
       for (const frame of entry.stream) browser.send(frame);
     } catch (err) {
       log.warn({ err, sessionId }, 'relay: failed to replay cached frames');
@@ -280,8 +323,8 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
    * payload is ciphertext the relay can't read), fall back to the payload for cleartext-mode peers, and
    * default to `done`. Routing metadata only — the relay never reads the agent payload.
    */
-  function resolveEndedStatus(envelope: Envelope): 'done' | 'error' {
-    if (envelope.status === 'done' || envelope.status === 'error') return envelope.status;
+  function resolveEndedStatus(envelope: Envelope): SessionEndedPayload['status'] {
+    if (isSessionEndStatus(envelope.status)) return envelope.status;
     const fromPayload = sessionEndedPayloadSchema.safeParse(envelope.payload);
     return fromPayload.success ? fromPayload.data.status : 'done';
   }
@@ -302,15 +345,40 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
    * (stale-row reconcile, device revoke) with no daemon to announce it. Cleartext `status` — the relay
    * holds no session key, and browsers read the terminal state off the field.
    */
-  function sessionEndedFrame(userId: string, deviceId: string, sessionId: string): string {
+  function sessionEndedFrame(
+    userId: string,
+    deviceId: string,
+    sessionId: string,
+    status: SessionEndedPayload['status'] = 'done',
+  ): string {
     return JSON.stringify(
       makeEnvelope({
         type: 'session.ended',
         userId,
         deviceId,
         sessionId,
-        status: 'done',
-        payload: { status: 'done' },
+        status,
+        payload: { status },
+      }),
+    );
+  }
+
+  /**
+   * A `session.title` (relay → browsers, ux Phase 6 T6): the user's rename override, broadcast after a
+   * successful `PATCH /me/sessions/:id`. A SET forwards the opaque ciphertext + its nonce verbatim (the
+   * relay never reads it — invariant #5); a RESET-to-derived (null blob) carries the cleartext
+   * `{ reset: true }` marker with an empty nonce (it holds no secret).
+   */
+  function sessionTitleFrame(event: SessionRenamedEvent): string {
+    const isSealed = event.sealedTitle !== null && event.sealedTitleNonce !== null;
+    return JSON.stringify(
+      makeEnvelope({
+        type: 'session.title',
+        userId: event.userId,
+        deviceId: event.deviceId,
+        sessionId: event.sessionId,
+        payload: isSealed ? event.sealedTitle : { reset: true },
+        ...(isSealed ? { nonce: event.sealedTitleNonce } : {}),
       }),
     );
   }
@@ -397,7 +465,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // so recent history shows even while the daemon is offline/reconnecting (Task 8). The daemon's
     // authoritative `session.history` backfill follows when it forwards the subscribe below.
     if (envelope.type === 'session.subscribe' && envelope.session_id) {
-      replayCache(envelope.session_id, replyTo);
+      replayCache(envelope.session_id, channel, replyTo);
     }
     if (envelope.type === 'session.launch' && sessionRegistry) {
       // The relay owns the session registry: mint the row (and its id) from envelope metadata, never
@@ -457,11 +525,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // Presence frames are relay-generated routing metadata (`viewer.presence` relay→daemon, `device.presence`
     // relay→browser) — never legitimately browser-originated. Drop them so an authenticated browser can't
     // forge a `viewer.presence` to flip the daemon's adopted-session gating: the relay is the sole authority
-    // on whether anyone is watching. `relay.error` is likewise relay-generated only.
+    // on whether anyone is watching. `relay.error` and `session.title` are likewise relay-generated only —
+    // a rename must go through `PATCH /me/sessions/:id` (which persists + bounds it), never a raw frame.
     if (
       envelope.type === 'viewer.presence' ||
       envelope.type === 'device.presence' ||
-      envelope.type === 'relay.error'
+      envelope.type === 'relay.error' ||
+      envelope.type === 'session.title'
     ) {
       log.warn(
         { channel, type: envelope.type },
@@ -501,7 +571,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
   /**
    * Reconcile the registry against what the daemon actually holds (`session.reconcile`, sent on every
-   * (re)connect). Retire — mark `done` — any non-terminal session for this device the daemon no longer has,
+   * (re)connect). Retire — mark `needs_restart` — any non-terminal session for this device the daemon no longer has,
    * clearing the phantom `awaiting_input`/`running` rows a revoke/restart leaves behind (they otherwise
    * resurrect on every dashboard refresh), and tell watching browsers so a live dashboard clears without one.
    * `'starting'` is deliberately NOT retired: a session just launched + forwarded to the daemon but not yet
@@ -529,14 +599,18 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // Retire the stale rows concurrently — independent DB writes; one failure must not block the rest.
     const results = await Promise.allSettled(
       stale.map(async (row) => {
-        // Mark `done`, not `error`: the session wasn't failing — it was abandoned during a revoke/restart.
-        // `done` is the closest available terminal state (there is no distinct "lost" status); the browser
-        // renders both terminal states as ended, moving the phantom out of "awaiting" into recent.
-        await registry.markEnded({ userId: envelope.user_id, sessionId: row.id, status: 'done' });
+        // `needs_restart` (status split, ux Phase 6 T2): the daemon LOST this conversation — it wasn't
+        // completed and it didn't fail; it can only continue as a new session. The honest state moves
+        // the phantom out of "awaiting" and tells the user exactly what a follow-up would need.
+        await registry.markEnded({
+          userId: envelope.user_id,
+          sessionId: row.id,
+          status: 'needs_restart',
+        });
         // Tell watching browsers so a live dashboard clears the phantom without a refresh.
         broadcastToBrowsers(
           channel,
-          sessionEndedFrame(envelope.user_id, envelope.device_id, row.id),
+          sessionEndedFrame(envelope.user_id, envelope.device_id, row.id, 'needs_restart'),
         );
       }),
     );
@@ -551,13 +625,16 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   async function routeFromDaemon(envelope: Envelope, channel: string, text: string): Promise<void> {
-    // Symmetry with the browser-side guard: presence and relay.error are RELAY-generated routing
-    // metadata. A daemon is trusted for its channel's content, but must not be able to impersonate the
-    // relay's own control frames either.
+    // Symmetry with the browser-side guard: presence, relay.error, and session.title are RELAY-generated
+    // routing metadata. A daemon is trusted for its channel's content, but must not be able to impersonate
+    // the relay's own control frames — a forged `session.title` would otherwise fall through to a verbatim,
+    // unbounded, unpersisted broadcast that clobbers the title on every open tab (the exact clobber the
+    // sealed_meta/sealed_title split exists to prevent). A rename is REST-only (`PATCH /me/sessions/:id`).
     if (
       envelope.type === 'viewer.presence' ||
       envelope.type === 'device.presence' ||
-      envelope.type === 'relay.error'
+      envelope.type === 'relay.error' ||
+      envelope.type === 'session.title'
     ) {
       log.warn(
         { channel, type: envelope.type },
@@ -692,13 +769,41 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     if (envelope.type === 'session.chained') {
       return;
     }
+    // Sealed session metadata (ux Phase 6): persist the OPAQUE blob latest-wins so a cold page load can
+    // hand it back via GET /me/sessions, then cache + broadcast. The relay never reads sealed content
+    // (invariant #5), but it DOES enforce bounds — and, for a legacy cleartext-mode daemon, the same
+    // schema validation session.adopted/chained get — so a buggy or hostile daemon can't bloat the row.
+    // An invalid or oversized frame is dropped entirely (not stored, not forwarded).
+    if (envelope.type === 'session.meta') {
+      if (envelope.session_id === undefined) return;
+      const sealedMeta = storableSealedMeta(envelope);
+      if (sealedMeta === null) {
+        log.warn(
+          { channel, sessionId: envelope.session_id },
+          'relay: dropped session.meta with invalid payload',
+        );
+        return;
+      }
+      if (sessionRegistry) {
+        await sessionRegistry.setSealedMeta({
+          userId: envelope.user_id,
+          sessionId: envelope.session_id,
+          sealedMeta,
+          sealedMetaNonce: envelope.nonce,
+        });
+        log.info({ channel, sessionId: envelope.session_id }, 'relay: session meta stored');
+      }
+      cacheFrame(envelope.session_id, channel, envelope.type, text);
+      broadcastToBrowsers(channel, text);
+      return;
+    }
     // `session.ended` is terminal: get DONE to the watching browser IMMEDIATELY, then persist. The browser
     // is the live view and the daemon is the source of truth, so making the operator wait on a DB
     // round-trip to see the run finish — slow on a cold/auto-pausing DB — is the wrong tradeoff here. (The
     // ordering for `agent.permission_request` is deliberately the opposite: persist `awaiting_input` first.)
     if (envelope.type === 'session.ended') {
       if (envelope.session_id && CACHEABLE_TYPES.has(envelope.type)) {
-        cacheFrame(envelope.session_id, envelope.type, text);
+        cacheFrame(envelope.session_id, channel, envelope.type, text);
       }
       broadcastToBrowsers(channel, text);
       if (sessionRegistry && envelope.session_id) {
@@ -744,7 +849,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
     // Cache the recent ciphertext for an instant reopen (Task 8) — the forwarded string, never decrypted.
     if (envelope.session_id && CACHEABLE_TYPES.has(envelope.type)) {
-      cacheFrame(envelope.session_id, envelope.type, text);
+      cacheFrame(envelope.session_id, channel, envelope.type, text);
     }
     broadcastToBrowsers(channel, text);
   }
@@ -835,9 +940,14 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         options.infra.operatorEmails,
       );
     }
-    // The dashboard + reconnect list the user's sessions (status, device, title).
+    // The dashboard + reconnect list the user's sessions; a rename (PATCH) broadcasts a `session.title`
+    // frame on the session's device channel so every open tab updates the title without a refresh.
     if (sessionRegistry) {
-      registerSessionListRoute(app, options.auth.service, sessionRegistry);
+      registerSessionRoutes(app, options.auth.service, sessionRegistry, {
+        onSessionRenamed: (event) => {
+          broadcastToBrowsers(channelKey(event.userId, event.deviceId), sessionTitleFrame(event));
+        },
+      });
     }
     // The launch picker lists the user's GitHub repos (only when a token store is configured).
     if (oauthTokenStore) {
@@ -902,6 +1012,18 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
      * authn/authz boundary.
      */
     async function handleHello(envelope: Envelope, channel: string): Promise<void> {
+      // Identity is established ONCE (session-identity T2a): a second hello on a registered socket is
+      // never a legitimate client (both the web and daemon open a fresh socket per (re)connect and hello
+      // once). Reject it rather than silently rebinding `peer`, which would strand the old channel's map
+      // entry pointing at this socket. Closing forces the client's own reconnect path.
+      if (peer.role !== 'unknown') {
+        log.warn(
+          { channel: peer.channel },
+          'relay: rejected a second hello on a registered socket',
+        );
+        socket.close(WS_CLOSE_UNAUTHORIZED, 'hello already sent');
+        return;
+      }
       const hello = helloPayloadSchema.safeParse(envelope.payload);
       if (!hello.success) {
         log.warn({ channel }, 'relay: dropped hello with invalid payload');
@@ -1002,7 +1124,29 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
       if (envelope.type === 'hello') {
         await handleHello(envelope, channel);
-      } else if (peer.role === 'browser') {
+        return;
+      }
+      // Identity binding (session-identity T2a): a peer's (user_id, device_id) is authenticated ONCE,
+      // at hello — every later frame must carry the same pair. The envelope fields are an unauthenticated
+      // claim; without this check an authed daemon could stamp another user's ids on a frame and write
+      // into their registry or broadcast into their channel (RLS + a guessed session UUID were the only
+      // barriers). The socket is the truth. Forged frames are dropped, never re-routed.
+      if (envelope.user_id !== peer.userId || envelope.device_id !== peer.deviceId) {
+        // A registered peer forging ANOTHER identity is the actionable signal — log it loudly with both
+        // its real channel and the one it claimed. A frame before `hello` (unknown role) is routine
+        // client noise (a racing/early send); keep it at debug so it can't drown the real signal or be
+        // used as an unauthenticated log-spam vector.
+        if (peer.role === 'unknown') {
+          log.debug({ type: envelope.type }, 'relay: dropped a frame received before hello');
+        } else {
+          log.warn(
+            { peerChannel: peer.channel, claimedChannel: channel, type: envelope.type },
+            'relay: dropped a frame whose identity does not match the authenticated peer',
+          );
+        }
+        return;
+      }
+      if (peer.role === 'browser') {
         await routeFromBrowser(envelope, channel, text, socket);
       } else if (peer.role === 'daemon') {
         await routeFromDaemon(envelope, channel, text);

@@ -20,8 +20,13 @@ export const SESSION_DISPLAY: Record<SessionStatus, StatusDisplay> = {
   starting: { tone: 'warning', label: 'STARTING…', pulse: false },
   running: { tone: 'accent', label: 'RUNNING', pulse: true },
   awaiting_input: { tone: 'accent', label: 'AWAITING INPUT', pulse: true },
-  done: { tone: 'success', label: 'DONE', pulse: false },
-  error: { tone: 'danger', label: 'ERROR', pulse: false },
+  // The endings read as WHAT happened (ux Phase 6 T2, plan B5) — never one lump "DONE".
+  done: { tone: 'success', label: 'COMPLETED', pulse: false },
+  error: { tone: 'danger', label: 'FAILED', pulse: false },
+  // The run exhausted its turn budget mid-task: settled but followable — a message continues it.
+  turn_limit: { tone: 'warning', label: 'ENDED · TURN LIMIT', pulse: false },
+  // The daemon lost this conversation (restart/retire): it can only continue as a NEW session.
+  needs_restart: { tone: 'warning', label: 'NEEDS RESTART', pulse: false },
   // "PAUSED · OFFLINE", never bare "OFFLINE": that word already means device presence — a paused
   // session and an offline device are different facts and must read differently.
   offline_paused: { tone: 'warning', label: 'PAUSED · OFFLINE', pulse: false },

@@ -195,6 +195,25 @@ describe('session reducer', () => {
     expect(after.status).toBe('done');
   });
 
+  it.each(['turn_limit', 'needs_restart'] as const)(
+    'keeps a %s session on its honest ended state through an empty backfill (never OFFLINE)',
+    (status) => {
+      const settled = fold([
+        frame('session.started', {}),
+        frame('agent.message', { text: 'partial work' }),
+        frame('session.ended', { status }),
+      ]);
+      expect(settled.status).toBe(status);
+
+      const after = applyEnvelope(
+        settled,
+        frame('session.history', { status: 'offline_paused', entries: [] }),
+      );
+      expect(after.entries).toEqual(settled.entries);
+      expect(after.status).toBe(status);
+    },
+  );
+
   it('lets an in-flight session show offline on an empty backfill, but keeps its transcript', () => {
     const live = fold([frame('session.started', {}), frame('agent.message', { text: 'working' })]);
     expect(live.status).toBe('running');

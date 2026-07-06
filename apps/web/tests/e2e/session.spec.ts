@@ -72,7 +72,7 @@ test('launch from the dashboard, stream on the session view, approve the gated t
   // The gate resolves, the tool runs, and the session finishes.
   await expect(page.getByText('APPROVED')).toBeVisible();
   await expect(page.getByText('Finished')).toBeVisible();
-  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('COMPLETED')).toBeVisible();
 });
 
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {
@@ -95,8 +95,11 @@ test('the launched session appears in the dashboard list with live status', asyn
 test('reopen = reconnect: the transcript restores after a reload (daemon backfill)', async ({
   page,
 }) => {
+  // Unique per run: the title assertion below must match exactly ONE dashboard row, and identical
+  // prompts accumulate across local runs (same pattern as CHAIN_TITLE).
+  const REOPEN_PROMPT = `Reopen the README change ${Date.now()}`;
   await signIn(page);
-  await launchFromDashboard(page, 'Add a hello line to the README');
+  await launchFromDashboard(page, REOPEN_PROMPT);
   await page.getByRole('button', { name: 'Approve' }).click();
   await expect(page.getByText('Finished')).toBeVisible();
 
@@ -105,10 +108,17 @@ test('reopen = reconnect: the transcript restores after a reload (daemon backfil
   await page.reload();
   await expect(page.getByText('Planning the change')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText('Finished')).toBeVisible();
-  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('COMPLETED')).toBeVisible();
   // The previously-approved gate replays as decided, not as a fresh actionable prompt.
   await expect(page.getByText('APPROVED')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approve' })).toHaveCount(0);
+
+  // Session identity survives the reload (ux Phase 6): the session view's header names the session
+  // from its metadata, and the dashboard row does the same from the persisted `session.meta` blob —
+  // a launched row used to degrade to its raw session UUID on both surfaces.
+  await expect(page.getByRole('heading', { name: REOPEN_PROMPT })).toBeVisible();
+  await page.goto('/');
+  await expect(page.getByRole('link', { name: REOPEN_PROMPT })).toBeVisible();
 });
 
 test('sends a follow-up that resumes the session for a second turn', async ({ page }) => {
@@ -125,6 +135,22 @@ test('sends a follow-up that resumes the session for a second turn', async ({ pa
   await expect(page.getByText('Following up as requested')).toBeVisible();
 });
 
+test('a turn-limited run reads as ENDED · TURN LIMIT and continues from the composer', async ({
+  page,
+}) => {
+  await signIn(page);
+  // The magic prefix makes the fake daemon end the run on its turn budget (status split, ux Phase 6 T2).
+  await launchFromDashboard(page, `hit the turn limit ${Date.now()}`);
+
+  await expect(page.getByText('Ran out of turns mid-task')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('ENDED · TURN LIMIT')).toBeVisible();
+  // The honest affordance: this ending is a pause, not a death — the composer continues the run.
+  await expect(page.getByText(/Turn limit reached/)).toBeVisible();
+  await page.getByLabel('Prompt').fill('please continue');
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByText('Following up as requested')).toBeVisible();
+});
+
 test('rejects the gated tool and the session finishes without running it', async ({ page }) => {
   await signIn(page);
   await launchFromDashboard(page, 'Try to overwrite a file');
@@ -135,7 +161,7 @@ test('rejects the gated tool and the session finishes without running it', async
 
   await expect(page.getByText('REJECTED')).toBeVisible();
   await expect(page.getByText('Finished')).toBeVisible();
-  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('COMPLETED')).toBeVisible();
   // The Write tool never ran — no executed tool-call entry appears in the transcript.
   await expect(page.getByText('TOOL', { exact: true })).toHaveCount(0);
 });
@@ -146,7 +172,7 @@ test('interrupt stops a running turn and the session ends (done)', async ({ page
   // The turn is in flight (gated, awaiting input), so the Interrupt control is offered.
   await expect(page.getByRole('button', { name: 'Approve' })).toBeVisible();
   await page.getByRole('button', { name: 'Interrupt' }).click();
-  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('COMPLETED')).toBeVisible();
 });
 
 test('interrupt stops the turn and the session stays followable', async ({ page }) => {
@@ -156,7 +182,7 @@ test('interrupt stops the turn and the session stays followable', async ({ page 
 
   // Interrupt aborts the in-flight turn (like Esc); the session ends the turn but stays open.
   await page.getByRole('button', { name: 'Interrupt' }).click();
-  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('COMPLETED')).toBeVisible();
   // Continue by typing — the composer is open for a follow-up (no separate Resume needed).
   await expect(page.getByPlaceholder('Send a follow-up instruction…')).toBeEnabled();
 });
@@ -187,7 +213,7 @@ test('a taken-over conversation reads as ONE thread: crumb, lineage strip, takeo
   // The magic prompt makes the fake daemon mint an adopted "terminal" parent + a chained telecode
   // continuation through the real relay/registry (see fake-daemon.ts).
   await launchFromDashboard(page, 'chain a takeover');
-  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
+  await expect(page.getByLabel('Session details').getByText('COMPLETED')).toBeVisible();
 
   // Cold-load the dashboard until the registry serves the chain (the dance settles asynchronously).
   const threadRow = () =>

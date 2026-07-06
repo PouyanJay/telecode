@@ -110,4 +110,55 @@ describe('relay reads session status from the cleartext envelope field (E2E)', (
     daemon.close();
     browser.close();
   });
+
+  it('marks ended with the envelope status turn_limit (status split, ux Phase 6 T2)', async () => {
+    const daemon = await connectDaemon(relayUrl, userId, deviceId);
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    const sessionId = await launchSession(daemon, browser);
+
+    const ended = waitForEnvelope(browser, (e) => e.type === 'session.ended');
+    daemon.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.ended',
+          userId,
+          deviceId,
+          sessionId,
+          status: 'turn_limit',
+          payload: 'b64-ciphertext-the-relay-cannot-parse',
+        }),
+      ),
+    );
+    await ended;
+
+    await expectSessionStatus(admin, sessionId, 'turn_limit');
+
+    daemon.close();
+    browser.close();
+  });
+
+  it('falls back to the PAYLOAD status for a cleartext-mode peer with no envelope field', async () => {
+    const daemon = await connectDaemon(relayUrl, userId, deviceId);
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    const sessionId = await launchSession(daemon, browser);
+
+    const ended = waitForEnvelope(browser, (e) => e.type === 'session.ended');
+    daemon.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.ended',
+          userId,
+          deviceId,
+          sessionId,
+          payload: { status: 'turn_limit' },
+        }),
+      ),
+    );
+    await ended;
+
+    await expectSessionStatus(admin, sessionId, 'turn_limit');
+
+    daemon.close();
+    browser.close();
+  });
 });

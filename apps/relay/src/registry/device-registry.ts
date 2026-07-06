@@ -70,6 +70,13 @@ export interface DeviceRegistry {
    */
   revoke(userId: string, deviceId: string): Promise<boolean>;
   /**
+   * Rename an active device for the authenticated user (ux Phase 6 T6). Device names are hostnames the
+   * daemon reports at pairing — stored and served cleartext — so a rename is a plain `name` update, RLS-
+   * scoped so a user can only rename their own. Returns true if an active device was renamed, false if none
+   * matched (a 404 for the route). A revoked device can't be renamed (it's in the Revoked list, not active).
+   */
+  rename(userId: string, deviceId: string, name: string): Promise<boolean>;
+  /**
    * Re-authorize a revoked device for the authenticated user: clear `revoked_at` and rotate the token
    * hash on the SAME row, so the device keeps its id (and every session that references it). Descriptor
    * fields are refreshed only when the re-pairing daemon supplied them. RLS-scoped like `revoke`.
@@ -182,6 +189,19 @@ export function createDeviceRegistry(
           )
           .returning({ id: devices.id });
         return revoked.length > 0;
+      });
+    },
+
+    async rename(userId, deviceId, name): Promise<boolean> {
+      return withUserContext(db, userId, async (scoped) => {
+        const renamed = await scoped
+          .update(devices)
+          .set({ name })
+          .where(
+            and(eq(devices.id, deviceId), eq(devices.userId, userId), isNull(devices.revokedAt)),
+          )
+          .returning({ id: devices.id });
+        return renamed.length > 0;
       });
     },
 

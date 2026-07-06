@@ -2,6 +2,7 @@ import {
   deriveSharedKey,
   exportContentKey,
   generateContentKey,
+  importContentKey,
   importIdentityPrivateKey,
   importIdentityPublicKey,
   openPayload,
@@ -45,6 +46,14 @@ export interface SessionCipher {
   sealToBrowser(browserPublicKey: string, payload: unknown): Promise<EncryptedEnvelopeFields>;
   /** Mint + store the session's content key (idempotent). */
   establish(sessionId: string): void;
+  /**
+   * Export a session's content key as base64 for durable persistence (ux Phase 6 T3), or `undefined`
+   * if the session has no key. A restart {@link restoreKey}s it so the key never rotates — a metadata
+   * or transcript blob sealed under it (cached at the relay / stored in Postgres) stays decryptable.
+   */
+  exportKey(sessionId: string): Promise<string | undefined>;
+  /** Restore a persisted content key (idempotent — never clobbers an already-established key). */
+  restoreKey(sessionId: string, keyBase64: string): void;
   /** Wrap the session's content key to `browserPublicKey` for a `session.key` message. */
   keyDelivery(sessionId: string, browserPublicKey: string): Promise<EncryptedEnvelopeFields>;
   /** Seal a payload under the session's content key (AES-GCM). */
@@ -105,6 +114,17 @@ export function createSessionCipher(privateKeyBase64?: string): SessionCipher {
 
     establish(sessionId): void {
       if (!contentKeys.has(sessionId)) contentKeys.set(sessionId, generateContentKey(true));
+    },
+
+    async exportKey(sessionId): Promise<string | undefined> {
+      const key = contentKeys.get(sessionId);
+      return key === undefined ? undefined : exportContentKey(await key);
+    },
+
+    restoreKey(sessionId, keyBase64): void {
+      // Idempotent: a live session already holds its key — never replace it with a stale persisted one.
+      if (!contentKeys.has(sessionId))
+        contentKeys.set(sessionId, importContentKey(keyBase64, true));
     },
 
     async keyDelivery(sessionId, browserPublicKey): Promise<EncryptedEnvelopeFields> {

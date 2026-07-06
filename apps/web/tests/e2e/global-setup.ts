@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
 import path from 'node:path';
 
 import { loadRepoEnv, REPO_ROOT } from './env';
@@ -65,11 +66,24 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
   const relay = runTs('apps/relay/src/main.ts', {
     RELAY_PORT,
-    LOG_LEVEL: 'error',
+    // Overridable so a flaky run can be diagnosed from the relay's own logs (E2E_RELAY_LOG_FILE tees
+    // them to a file; default keeps the run quiet exactly as before).
+    LOG_LEVEL: process.env.E2E_RELAY_LOG_LEVEL ?? 'error',
+    // The whole suite calls from 127.0.0.1 and was already brushing the default 300-requests/minute
+    // per-IP budget; one more page load per run tripped it, and a tripped limiter cascades (the /ws
+    // upgrade 429s, SSR auth 429s bounce to /signin, reconnects keep the budget saturated). This
+    // suite tests functionality — abuse prevention has its own integration tests (rate-limit*.test.ts),
+    // and production exempts the web tier's aggregated egress via RATELIMIT_ALLOWLIST the same way.
+    RATELIMIT_DISABLED: 'true',
     DATABASE_URL: databaseUrl,
     CHANNEL_TOKEN_SECRET: channelTokenSecret,
     RELAY_SERVICE_SECRET: serviceSecret,
   });
+  if (process.env.E2E_RELAY_LOG_FILE) {
+    const sink = createWriteStream(process.env.E2E_RELAY_LOG_FILE, { flags: 'a' });
+    relay.stdout?.pipe(sink);
+    relay.stderr?.pipe(sink);
+  }
   await waitForHealth(RELAY_HEALTH);
 
   return () => {

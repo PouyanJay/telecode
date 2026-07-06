@@ -1,5 +1,9 @@
 import {
+  exportContentKey,
+  generateContentKey,
+  importContentKey,
   makeEnvelope,
+  sealPayload,
   type AdoptSettings,
   type AdoptStatePayload,
   type SessionLaunchPayload,
@@ -8,6 +12,9 @@ import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RelayConnection, type RelayConnectionOptions } from './relay-client';
+import { type ContentKeyStore } from './content-key-store';
+import type { RegistrySessionRow } from './session-groups';
+import type { SessionMetaMap } from './session-meta';
 import {
   adoptStates,
   answer,
@@ -15,7 +22,14 @@ import {
   connect,
   disconnect,
   launch,
+  overlayMissingMetas,
+  renameSession,
   requestAdoptConfig,
+  resetSessionTitle,
+  seedSessionMetas,
+  seedSessionTitleOverrides,
+  sessionMetas,
+  sessionTitleOverrides,
   sessions,
   setAdoptConfig,
 } from './session-store';
@@ -53,6 +67,7 @@ function makeFakeConnection() {
       answer: (sessionId, payload) => answered.push({ sessionId, payload }),
       answerHandover: (sessionId, payload) => handovers.push({ sessionId, payload }),
       control: () => undefined,
+      sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
       sendAdoptConfig: (set) => adoptConfigs.push(set),
       close: () => undefined,
     };
@@ -133,6 +148,10 @@ function makeFakeConnection() {
           payload: clientRef !== undefined ? { clientRef } : {},
         }),
       );
+    },
+    /** Simulate a live (cleartext, decrypted-upstream) `session.meta` frame for a session (ux Phase 6). */
+    emitMeta(sessionId: string, payload: unknown) {
+      emit(makeEnvelope({ type: 'session.meta', userId, deviceId, sessionId, payload }));
     },
   };
 }
@@ -321,5 +340,215 @@ describe('session-store launch correlation (Task 11)', () => {
     // B resolves only to ITS own started frame.
     fake.started('session-B', refB);
     await expect(launchB).resolves.toBe('session-B');
+  });
+});
+
+describe('overlayMissingMetas (cold-load merge, T3)', () => {
+  const meta = (title: string): SessionMetaMap => new Map([['s1', { title }]]);
+
+  it('adds a decrypted meta only when the live map lacks it', () => {
+    expect(overlayMissingMetas(new Map(), meta('cold')).get('s1')).toEqual({ title: 'cold' });
+  });
+
+  it('never overwrites an id the live map already holds (a live frame wins)', () => {
+    expect(overlayMissingMetas(meta('live'), meta('stale cold decode')).get('s1')).toEqual({
+      title: 'live',
+    });
+  });
+
+  it('returns the SAME map instance when there is nothing new to add', () => {
+    const live = meta('live');
+    expect(overlayMissingMetas(live, new Map())).toBe(live);
+    expect(overlayMissingMetas(live, meta('stale'))).toBe(live);
+  });
+});
+
+describe('seedSessionMetas mid-flight race (T3)', () => {
+  const row = (id: string, sealedMeta: string, sealedMetaNonce: string): RegistrySessionRow => ({
+    id,
+    title: null,
+    status: 'done',
+    deviceId,
+    origin: 'launched',
+    parentSessionId: null,
+    createdAt: new Date('2026-07-01T10:00:00Z'),
+    sealedMeta,
+    sealedMetaNonce,
+    sealedTitle: null,
+    sealedTitleNonce: null,
+  });
+
+  it('a live session.meta arriving DURING the cold-load decrypt still wins', async () => {
+    vi.useRealTimers(); // this test races real microtasks, not the launch timeout
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+
+    // A REAL sealed blob for s1 with a STALE title — the cold-load decode genuinely produces it, so
+    // "live wins" is a real assertion (not vacuously true because the decode yielded nothing).
+    const contentKey = await generateContentKey(true);
+    const sealed = await sealPayload({ title: 'stale cold-load title' }, contentKey);
+
+    // A deferred content-key store: get() stays pending until the test releases it, so a live frame
+    // can be injected while the decrypt is mid-flight.
+    let releaseGet: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (releaseGet = resolve));
+    const store: ContentKeyStore = {
+      get: async () => {
+        await gate;
+        return importContentKey(await exportContentKey(contentKey), false);
+      },
+      put: () => Promise.resolve(),
+      clear: () => Promise.resolve(),
+    };
+
+    seedSessionMetas([row('s1', sealed.payload, sealed.nonce)], store);
+
+    // While the decrypt is gated, a live session.meta frame lands for the same session.
+    fake.emitMeta('s1', { title: 'live wins' });
+    expect(get(sessionMetas).get('s1')).toMatchObject({ title: 'live wins' });
+
+    // Release the cold-load decode (it now resolves the STALE title) and flush its microtasks.
+    releaseGet();
+    await vi.waitFor(() => expect(get(sessionMetas).get('s1')).toBeDefined());
+    await Promise.resolve();
+
+    // The live frame's title is preserved — the overlay re-checked the CURRENT map and skipped s1.
+    expect(get(sessionMetas).get('s1')).toMatchObject({ title: 'live wins' });
+  });
+});
+
+describe('session rename (ux Phase 6 T6)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Route a session to the single connected device so `connectionFor` resolves it. */
+  function connectWithSession(
+    fake: ReturnType<typeof makeFakeConnection>,
+    sessionId: string,
+  ): void {
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started(sessionId);
+  }
+
+  it('seals the title, PATCHes the rename BFF, and reflects it optimistically', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const fake = makeFakeConnection();
+    connectWithSession(fake, 'sess-1');
+
+    const result = await renameSession('sess-1', 'My deploy run');
+    expect(result).toEqual({ ok: true });
+
+    // PATCHes the BFF with the SEALED blob the connection produced — never the plaintext title.
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sessions/sess-1/title',
+      expect.objectContaining({ method: 'PATCH' }),
+    );
+    const body: unknown = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body).toEqual({ sealed_title: 'sealed-title', sealed_title_nonce: 'nonce' });
+    // The actor sees the new name immediately (the relay also broadcasts to other tabs).
+    expect(get(sessionTitleOverrides).get('sess-1')).toBe('My deploy run');
+  });
+
+  it('surfaces a failure and does NOT set the override when the BFF rejects', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 502 })),
+    );
+    const fake = makeFakeConnection();
+    connectWithSession(fake, 'sess-1');
+
+    const result = await renameSession('sess-1', 'nope');
+    expect(result.ok).toBe(false);
+    expect(get(sessionTitleOverrides).has('sess-1')).toBe(false);
+  });
+
+  it('resets a title by PATCHing null and clearing the override', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const fake = makeFakeConnection();
+    connectWithSession(fake, 'sess-1');
+
+    await renameSession('sess-1', 'temp name');
+    expect(get(sessionTitleOverrides).get('sess-1')).toBe('temp name');
+
+    const result = await resetSessionTitle('sess-1');
+    expect(result).toEqual({ ok: true });
+    const resetBody: unknown = JSON.parse(
+      (fetchMock.mock.calls.at(-1)![1] as RequestInit).body as string,
+    );
+    expect(resetBody).toEqual({ sealed_title: null });
+    expect(get(sessionTitleOverrides).has('sess-1')).toBe(false);
+  });
+
+  it('reports "not connected" and never PATCHes when the session has no live channel', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    // No connect() this test → connectionFor returns null.
+    const result = await renameSession('sess-orphan', 'x');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('Not connected');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses (honestly) to rename a cleartext session — sealTitle returns null, no PATCH', async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(null, { status: 204 })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    // A cleartext (non-E2E) connection: its sealTitle yields null (no content key).
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      (options) => {
+        options.onStatus('connected');
+        return {
+          launch: () => undefined,
+          subscribe: () => undefined,
+          sendUserMessage: () => undefined,
+          decide: () => undefined,
+          answer: () => undefined,
+          answerHandover: () => undefined,
+          control: () => undefined,
+          sealTitle: async () => null,
+          sendAdoptConfig: () => undefined,
+          close: () => undefined,
+        };
+      },
+    );
+    const result = await renameSession('sess-clear', 'x');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('encrypted session');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('seeds a cleartext sealed_title from the registry into the override map (cold load)', () => {
+    const row: RegistrySessionRow = {
+      id: 'sess-seed',
+      title: null,
+      status: 'done',
+      deviceId,
+      origin: 'launched',
+      parentSessionId: null,
+      createdAt: new Date('2026-07-01T10:00:00Z'),
+      sealedMeta: null,
+      sealedMetaNonce: null,
+      sealedTitle: JSON.stringify({ title: 'renamed before reload' }),
+      sealedTitleNonce: '',
+    };
+    seedSessionTitleOverrides([row], null);
+    expect(get(sessionTitleOverrides).get('sess-seed')).toBe('renamed before reload');
   });
 });

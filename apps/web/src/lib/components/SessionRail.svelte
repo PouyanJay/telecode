@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { SessionMetaPayload } from '@telecode/protocol';
+
   import { summarizeChanges } from '$lib/changes';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionState } from '$lib/session';
@@ -15,10 +17,13 @@
     session,
     deviceName,
     connection,
+    meta,
   }: {
     session: SessionState;
     deviceName: string | null;
     connection: ConnectionState;
+    /** Decrypted session metadata (ux Phase 6): the model that ran it + its working directory. */
+    meta?: SessionMetaPayload | undefined;
   } = $props();
 
   const display = $derived(SESSION_DISPLAY[session.status]);
@@ -37,6 +42,18 @@
       <div class="meta hairline-b">
         <span class="meta-key">Device</span>
         <span class="meta-val mono">{deviceName}</span>
+      </div>
+    {/if}
+    {#if meta?.model}
+      <div class="meta hairline-b">
+        <span class="meta-key">Model</span>
+        <span class="meta-val mono">{meta.model}</span>
+      </div>
+    {/if}
+    {#if meta?.cwd}
+      <div class="meta hairline-b">
+        <span class="meta-key">Directory</span>
+        <span class="meta-val mono" title={meta.cwd}>{meta.cwd}</span>
       </div>
     {/if}
     <div class="meta">

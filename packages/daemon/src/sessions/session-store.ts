@@ -2,12 +2,12 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  base64KeySchema,
   permissionModeSchema,
   sessionHistoryEntrySchema,
+  sessionMetaPayloadSchema,
+  sessionOriginSchema,
   sessionStatusSchema,
-  type PermissionModeName,
-  type SessionHistoryEntry,
-  type SessionStatusName,
 } from '@telecode/protocol';
 import { z } from 'zod';
 import type { Logger } from 'pino';
@@ -28,13 +28,26 @@ const persistedSessionSchema = z.object({
   status: sessionStatusSchema,
   permissionMode: permissionModeSchema,
   transcript: z.array(sessionHistoryEntrySchema),
+  // The session's E2E content key (base64) — persisted so a restart re-establishes the SAME key
+  // rather than rotating it, keeping any blob sealed under it (relay cache / Postgres) decryptable
+  // (ux Phase 6 T3). Absent for a cleartext-mode daemon or a pre-T3 file.
+  contentKey: base64KeySchema.optional(),
+  // The last sealed metadata the daemon emitted (title/cwd/model/mode) — persisted so a restored
+  // session re-emits its identity on subscribe instead of a bare UUID (ux Phase 6 T3).
+  meta: sessionMetaPayloadSchema.optional(),
+  // How the session came to exist (ux Phase 6 T4) — restore rebuilds the resume map (launched) or the
+  // adoption mapping (external) accordingly.
+  origin: sessionOriginSchema.optional(),
+  // The Claude/SDK conversation id (T4): a launched session's resume id, or an adopted session's Claude
+  // id — persisted so a follow-up resumes the same conversation across a restart (no silent drop) and an
+  // adopted session isn't re-announced as a duplicate card. Bounded like the announce clientRef.
+  claudeSessionId: z.string().min(1).max(256).optional(),
+  // The session's working directory — persisted so a restored follow-up runs in the same worktree.
+  cwd: z.string().min(1).max(1024).optional(),
 });
 
-export interface PersistedSession {
-  readonly status: SessionStatusName;
-  readonly permissionMode: PermissionModeName;
-  readonly transcript: SessionHistoryEntry[];
-}
+/** Derived from the schema so a new persisted field is declared once (the schema is the source of truth). */
+export type PersistedSession = z.infer<typeof persistedSessionSchema>;
 
 export interface SessionStore {
   /** Load every persisted session (validated at this trust boundary). Missing dir ⇒ empty map. */

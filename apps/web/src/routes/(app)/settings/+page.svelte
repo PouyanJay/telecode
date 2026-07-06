@@ -15,6 +15,7 @@
   import { pushPermission, subscribeToPush, type PushState } from '$lib/push';
   import {
     adoptStates,
+    clearPersistedContentKeys,
     deviceChannels,
     requestAdoptConfig,
     setAdoptConfig,
@@ -333,7 +334,16 @@
 
     <Panel title="Account">
       <div class="body">
-        <form method="POST" action="/?/logout" use:enhance>
+        <!-- Wipe the persisted per-session content keys before the server clears the cookie (ux Phase 6
+             T3): sign-out must not leave a shared machine able to decrypt this account's sealed titles. -->
+        <form
+          method="POST"
+          action="/?/logout"
+          use:enhance={() => async ({ update }) => {
+            await clearPersistedContentKeys();
+            await update();
+          }}
+        >
           <Button type="submit" variant="secondary" size="sm">Sign out</Button>
         </form>
       </div>

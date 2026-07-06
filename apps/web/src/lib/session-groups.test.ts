@@ -27,10 +27,19 @@ describe('groupSessions', () => {
       row('err', 'error', '2026-06-29T10:00:00Z'),
       row('paused', 'offline_paused', '2026-06-29T10:00:00Z'),
       row('idle', 'idle', '2026-06-29T10:00:00Z'),
+      row('limit', 'turn_limit', '2026-06-29T10:00:00Z'),
+      row('restart', 'needs_restart', '2026-06-29T10:00:00Z'),
     ]);
     expect(groups.awaiting.map((r) => r.id)).toEqual(['await']);
     expect(groups.active.map((r) => r.id).sort()).toEqual(['run', 'start']);
-    expect(groups.recent.map((r) => r.id).sort()).toEqual(['done', 'err', 'idle', 'paused']);
+    expect(groups.recent.map((r) => r.id).sort()).toEqual([
+      'done',
+      'err',
+      'idle',
+      'limit',
+      'paused',
+      'restart',
+    ]);
   });
 
   it('orders each group newest-first', () => {
@@ -86,6 +95,10 @@ describe('buildSessionRows', () => {
       origin: 'launched' as const,
       parentSessionId: null,
       createdAt: new Date('2026-07-05T10:00:00Z'),
+      sealedMeta: null,
+      sealedMetaNonce: null,
+      sealedTitle: null,
+      sealedTitleNonce: null,
     },
   ];
   const deviceNameOf = (deviceId: string): string | null =>
@@ -226,6 +239,10 @@ describe('buildSessionRows variants', () => {
           origin: 'external',
           parentSessionId: null,
           createdAt: new Date('2026-07-01T00:00:00Z'),
+          sealedMeta: null,
+          sealedMetaNonce: null,
+          sealedTitle: null,
+          sealedTitleNonce: null,
         },
       ],
       live: new Map(),

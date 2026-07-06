@@ -12,6 +12,7 @@ import {
   type Envelope,
 } from '@telecode/protocol';
 
+import { defaultContentKeyStore, type ContentKeyStore } from './content-key-store';
 import { loadOrCreateIdentityKeyPair } from './keystore';
 
 /**
@@ -62,6 +63,9 @@ export function createBrowserSessionCipher(
   // By default the identity keypair is loaded from (or created in) IndexedDB, so it persists across
   // reopens — a same-device reload reuses the same non-extractable key (Phase 4 Task 7). Tests inject one.
   keyPairFactory: () => Promise<CryptoKeyPairHandle> = loadOrCreateIdentityKeyPair,
+  // Per-session content keys are persisted here so a cold load can decrypt sealed metadata offline
+  // (ux Phase 6 T3). Absent in a non-browser context (SSR) — persistence then silently no-ops.
+  contentKeyStore: ContentKeyStore | null = defaultContentKeyStore(),
 ): BrowserSessionCipher {
   const enabled = Boolean(daemonPublicKey);
   // The daemon's public key, imported once on first use.
@@ -130,7 +134,11 @@ export function createBrowserSessionCipher(
           await openPayload(envelope, await sharedKey()),
         );
         // Import the content key as non-extractable so it, too, can't be read back out of the browser.
-        contentKeys.set(envelope.session_id, await importContentKey(unwrapped.key, false));
+        const key = await importContentKey(unwrapped.key, false);
+        contentKeys.set(envelope.session_id, key);
+        // Persist it (ux Phase 6 T3) so a cold reload can decrypt this session's sealed metadata blob
+        // offline. Best-effort — a failed write only costs an offline title, never a live-session frame.
+        void contentKeyStore?.put(envelope.session_id, key).catch(() => undefined);
       } catch {
         // A `session.key` we can't open — e.g. the relay replayed one from its cache (Task 8) that was
         // wrapped to a different browser. Ignore it; the daemon delivers one wrapped to us. (Stream-frame

@@ -1,6 +1,6 @@
 import { fail } from '@sveltejs/kit';
 
-import { listRevokedDevices, revokeDevice } from '$lib/server/relay-api';
+import { listRevokedDevices, renameDevice, revokeDevice } from '$lib/server/relay-api';
 import { getSessionToken } from '$lib/server/session-cookie';
 
 import type { Actions, PageServerLoad } from './$types';
@@ -44,5 +44,33 @@ export const actions: Actions = {
       return fail(400, { error: 'Could not revoke this device. Please try again.' });
     }
     return { revoked: true };
+  },
+
+  /**
+   * Rename a paired device. Device names are hostnames — cleartext — so this is a plain form action (no
+   * browser sealing). The relay scopes it to the owner and trims/bounds the name authoritatively.
+   */
+  rename: async ({ request, cookies }) => {
+    const token = getSessionToken(cookies);
+    if (!token) {
+      return fail(401, { error: 'Your session expired — sign in again.' });
+    }
+    const form = await request.formData();
+    const deviceId = form.get('deviceId');
+    const name = form.get('name');
+    if (typeof deviceId !== 'string' || !UUID_RE.test(deviceId)) {
+      return fail(400, { error: 'No device specified.' });
+    }
+    if (typeof name !== 'string' || name.trim() === '' || name.trim().length > 128) {
+      return fail(400, { error: 'Enter a name between 1 and 128 characters.' });
+    }
+    const result = await renameDevice(token, deviceId, name.trim());
+    if (result.notFound) {
+      return fail(404, { error: 'This device no longer exists.' });
+    }
+    if (!result.ok) {
+      return fail(400, { error: 'Could not rename this device. Please try again.' });
+    }
+    return { renamed: true };
   },
 };

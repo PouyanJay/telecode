@@ -52,6 +52,8 @@ const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
  * so the e2e can assert the collapsed thread row, lineage strip, and takeover divider.
  */
 const CHAIN_PROMPT = 'chain a takeover';
+// Magic prompt: the run exhausts its turn budget (ux Phase 6 T2) — ends `turn_limit`, stays followable.
+const TURN_LIMIT_PROMPT = 'hit the turn limit';
 const CHAIN_PARENT_REF = 'chain-parent';
 const CHAIN_CHILD_REF = 'chain-child';
 // Overridable so the spec can use a per-run unique title — earlier runs' chains persist in the
@@ -182,6 +184,20 @@ socket.addEventListener('message', (event: MessageEvent) => {
     rec.status = 'running';
     const clientRef = launch.success ? launch.data.clientRef : undefined;
     send('session.started', clientRef !== undefined ? { clientRef } : {}, sid);
+    // Session identity (ux Phase 6): the real daemon derives a title from the first prompt and emits
+    // sealed metadata; this cleartext fake mirrors the shape so specs can assert titles after reloads.
+    if (launch.success) {
+      send('session.meta', { title: launch.data.prompt, titleSource: 'derived' }, sid);
+    }
+
+    if (launch.success && launch.data.prompt.startsWith(TURN_LIMIT_PROMPT)) {
+      // The run stops early on its turn budget: NOT done, NOT an error — and a follow-up continues it.
+      rec.transcript.push({ kind: 'message', text: 'Ran out of turns mid-task' });
+      send('agent.message', { text: 'Ran out of turns mid-task' }, sid);
+      rec.status = 'turn_limit';
+      send('session.ended', { status: 'turn_limit' }, sid);
+      return;
+    }
 
     if (launch.success && launch.data.prompt === CHAIN_PROMPT) {
       // The trigger session's only job is to kick off the dance — end it and announce the parent.

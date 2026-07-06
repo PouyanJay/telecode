@@ -18,6 +18,7 @@ export function fakeDeviceRegistry(overrides: Partial<DeviceRegistry> = {}): Dev
     findActiveByUser: unimplemented('findActiveByUser'),
     findRevokedByUser: unimplemented('findRevokedByUser'),
     revoke: unimplemented('revoke'),
+    rename: unimplemented('rename'),
     restoreDevice: async () => true,
   };
   return { ...base, ...overrides };

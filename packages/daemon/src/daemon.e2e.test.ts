@@ -1,21 +1,11 @@
-import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  deriveSharedKey,
   encodeKey,
   generateKeyPair,
-  importContentKey,
-  importIdentityPrivateKey,
-  importIdentityPublicKey,
   makeEnvelope,
-  openPayload,
-  sealPayload,
-  sessionKeyPayloadSchema,
-  type EncryptedEnvelopeFields,
-  type Envelope,
   type KeyPair,
   type MessageType,
 } from '@telecode/protocol';
@@ -24,73 +14,31 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createFakeAgentAdapter, type AgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
+import {
+  decryptWithContentKey,
+  encryptWithContentKey,
+  mkE2eIds as mkIds,
+  ofType,
+  sendSealedLaunch,
+  sendSubscribe,
+  startE2eDaemon as harnessStartE2eDaemon,
+  unwrapContentKey,
+  type E2eIds as Ids,
+} from './e2e-harness';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
 import { createSessionStore } from './sessions/session-store';
-
-/**
- * Browser-side E2E simulation over WebCrypto (Phase 4) — mirrors what the real browser cipher does, with
- * the same shapes the old tweetnacl helpers had so the scenarios below read unchanged. The daemon's
- * keypair is generated with tweetnacl (raw X25519) and imported into WebCrypto here, exactly as the
- * daemon does — proving the AES-GCM handshake interoperates with the daemon's stored keys.
- */
-type SealedFields = { readonly payload?: unknown; readonly nonce: string };
-
-async function sealEnvelopePayload(
-  payload: unknown,
-  recipientPublicKey: Uint8Array,
-  senderPrivateKey: Uint8Array,
-): Promise<EncryptedEnvelopeFields> {
-  const shared = await deriveSharedKey(
-    await importIdentityPrivateKey(encodeKey(senderPrivateKey)),
-    await importIdentityPublicKey(encodeKey(recipientPublicKey)),
-  );
-  return sealPayload(payload, shared);
-}
-
-async function unwrapContentKey(
-  envelope: SealedFields,
-  senderPublicKey: Uint8Array,
-  recipientPrivateKey: Uint8Array,
-): Promise<string> {
-  const shared = await deriveSharedKey(
-    await importIdentityPrivateKey(encodeKey(recipientPrivateKey)),
-    await importIdentityPublicKey(encodeKey(senderPublicKey)),
-  );
-  return sessionKeyPayloadSchema.parse(await openPayload(envelope, shared)).key;
-}
-
-async function encryptWithContentKey(
-  payload: unknown,
-  contentKey: string,
-): Promise<EncryptedEnvelopeFields> {
-  return sealPayload(payload, await importContentKey(contentKey, false));
-}
-
-async function decryptWithContentKey(envelope: SealedFields, contentKey: string): Promise<unknown> {
-  return openPayload(envelope, await importContentKey(contentKey, false));
-}
 
 /**
  * Phase 3 daemon-side E2E. A keypair-bearing daemon must: decrypt a `session.launch` sealed (box) to its
  * public key, mint a per-session content key, deliver it (`session.key`, box-wrapped to the browser's
  * ephemeral key), encrypt every outbound stream frame under that content key (secretbox), and decrypt
  * encrypted inbound frames. The relay (here the fake relay) only ever forwards ciphertext. The test acts
- * as the browser: it holds an ephemeral keypair + the daemon pubkey. Task 11 adds the variant matrix
- * (follow-ups, controls, reconnect/multi-browser, tampered frames, error state).
+ * as the browser: it holds an ephemeral keypair + the daemon pubkey (crypto plumbing in `e2e-harness.ts`).
+ * Task 11 adds the variant matrix (follow-ups, controls, reconnect/multi-browser, tampered frames, error).
  */
 const silent = pino({ level: 'silent' });
 const daemons: Daemon[] = [];
 const relays: FakeRelay[] = [];
-
-interface Ids {
-  userId: string;
-  deviceId: string;
-  sessionId: string;
-}
-
-function mkIds(): Ids {
-  return { userId: randomUUID(), deviceId: randomUUID(), sessionId: randomUUID() };
-}
 
 async function startE2eDaemon(
   userId: string,
@@ -98,44 +46,15 @@ async function startE2eDaemon(
   daemonKp: KeyPair,
   agentAdapter: AgentAdapter,
 ): Promise<FakeRelay> {
-  const relay = await startFakeRelay(userId, deviceId);
-  relays.push(relay);
-  const daemon = createDaemon({
-    relayUrl: relay.url,
-    userId,
-    deviceId,
-    keyPair: {
-      publicKey: encodeKey(daemonKp.publicKey),
-      privateKey: encodeKey(daemonKp.privateKey),
-    },
+  const { daemon, relay } = await harnessStartE2eDaemon({
+    ids: { userId, deviceId },
+    daemonKeyPair: daemonKp,
     agentAdapter,
-    logger: silent,
+    extras: { logger: silent },
   });
   daemons.push(daemon);
-  await daemon.start();
+  relays.push(relay);
   return relay;
-}
-
-/** Browser-side: seal a launch to the daemon and send it with the browser's ephemeral pubkey announced. */
-async function sendSealedLaunch(
-  relay: FakeRelay,
-  ids: Ids,
-  daemonKp: KeyPair,
-  browserKp: KeyPair,
-  prompt: string,
-): Promise<void> {
-  const sealed = await sealEnvelopePayload({ prompt }, daemonKp.publicKey, browserKp.privateKey);
-  relay.send(
-    makeEnvelope({
-      type: 'session.launch',
-      userId: ids.userId,
-      deviceId: ids.deviceId,
-      sessionId: ids.sessionId,
-      senderPublicKey: encodeKey(browserKp.publicKey),
-      payload: sealed.payload,
-      nonce: sealed.nonce,
-    }),
-  );
 }
 
 /** Launch a session and return the content key the daemon delivered (`session.key`, box-wrapped). */
@@ -146,7 +65,7 @@ async function launchAndKey(
   browserKp: KeyPair,
   prompt: string,
 ): Promise<string> {
-  await sendSealedLaunch(relay, ids, daemonKp, browserKp, prompt);
+  await sendSealedLaunch(relay, ids, daemonKp, browserKp, { prompt });
   const keyFrame = await relay.waitForFrame(ofType('session.key', ids.sessionId));
   return unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
 }
@@ -172,23 +91,6 @@ async function sendEncrypted(
   );
 }
 
-/** Browser-side: a cleartext subscribe announcing a pubkey, so the daemon re-delivers the content key. */
-function sendSubscribe(relay: FakeRelay, ids: Ids, senderPublicKey: string): void {
-  relay.send(
-    makeEnvelope({
-      type: 'session.subscribe',
-      userId: ids.userId,
-      deviceId: ids.deviceId,
-      sessionId: ids.sessionId,
-      senderPublicKey,
-      payload: {},
-    }),
-  );
-}
-
-const ofType = (type: string, sessionId: string) => (e: Envelope) =>
-  e.type === type && e.session_id === sessionId;
-
 const fakeAdapter = (events: Parameters<typeof createFakeAgentAdapter>[0]): AgentAdapter =>
   createFakeAgentAdapter(events, { sessionId: 'sdk-1' });
 
@@ -210,7 +112,7 @@ describe('daemon E2E encryption (Task 6)', () => {
     );
 
     const PROMPT = 'delete all production data';
-    await sendSealedLaunch(relay, ids, daemonKp, browserKp, PROMPT);
+    await sendSealedLaunch(relay, ids, daemonKp, browserKp, { prompt: PROMPT });
 
     // 1. The daemon delivers the content key, box-wrapped to the browser's ephemeral pubkey: the key
     //    itself travels as opaque ciphertext (a base64 string), never plaintext.
@@ -439,7 +341,7 @@ describe('daemon E2E: subscribe never mints keys for unknown sessions (bounded)'
 describe('daemon E2E: key delivery on subscribe for a restored session', () => {
   it(
     're-keys and encrypts the backfill after a restart (no cleartext history, no missing key)',
-    { timeout: 15000 },
+    { timeout: 30000 }, // generous: real keygen + two daemon lifecycles, slow under parallel suite load
     async () => {
       const ids = mkIds();
       const daemonKp = await generateKeyPair();

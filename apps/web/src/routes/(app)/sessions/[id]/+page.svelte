@@ -23,9 +23,13 @@
     connectionState,
     decide,
     deviceChannels,
+    renameSession,
+    resetSessionTitle,
     sendControl,
     sendUserMessage,
     sessionDevices,
+    sessionMetas,
+    sessionTitleOverrides,
     sessions as liveSessions,
     subscribe,
   } from '$lib/session-store';
@@ -88,14 +92,23 @@
   // Operator controls (Task 9): interrupt stops the in-flight turn; end terminates it. Both need a live
   // channel, and nothing is actionable on a terminal session.
   const connected = $derived($connectionState === 'connected');
-  const isTerminal = $derived(session.status === 'done' || session.status === 'error');
+  // turn_limit is deliberately NOT terminal here: the controls stay (End can settle it for good)
+  // and the composer continues the same conversation. needs_restart IS terminal — nothing to control.
+  const isTerminal = $derived(
+    session.status === 'done' || session.status === 'error' || session.status === 'needs_restart',
+  );
   const showControls = $derived(known && session.status !== 'idle');
-  // The session's first prompt names it (in the header + browser tab); fall back to a short id prefix.
+  // The session's name (header + browser tab): the user's rename override first (ux Phase 6 T6), then
+  // decrypted metadata (survives reloads), then the first prompt seen this visit, then a short id prefix.
   const SESSION_ID_DISPLAY_LENGTH = 12;
   const sessionTitle = $derived(
-    session.entries.find((e) => e.kind === 'user')?.text ??
+    $sessionTitleOverrides.get(sessionId) ??
+      $sessionMetas.get(sessionId)?.title ??
+      session.entries.find((e) => e.kind === 'user')?.text ??
       sessionId.slice(0, SESSION_ID_DISPLAY_LENGTH),
   );
+  // A "Reset to default name" affordance appears only when the user has actually set an override.
+  const hasTitleOverride = $derived($sessionTitleOverrides.has(sessionId));
 
   // A forked handover continuation links back to the adopted session it continues (Journey 4): live from
   // the daemon's session.chained, or from the persisted registry on a cold reload.
@@ -219,6 +232,9 @@
     {isTerminal}
     {showControls}
     {connected}
+    canReset={hasTitleOverride}
+    onrename={(title) => renameSession(sessionId, title)}
+    onreset={() => resetSessionTitle(sessionId)}
     oninterrupt={() => onControl('interrupt')}
     onend={() => onControl('end')}
   />
@@ -297,6 +313,14 @@
 
       {#if known}
         <div class="dock hairline-t">
+          {#if session.status === 'turn_limit'}
+            <!-- The honest affordance for a budget-exhausted run (B5): a pause, not a death. Standing
+                 (no dismiss) — it reads for as long as the state does. -->
+            <SessionNotice
+              tone="warning"
+              message="Turn limit reached — the run stopped early. Send a message to continue it."
+            />
+          {/if}
           <Composer
             isBusy={isBusy}
             submitLabel="Send"
@@ -308,7 +332,12 @@
     </div>
 
     {#if known}
-      <SessionRail {session} deviceName={device?.name ?? null} connection={$connectionState} />
+      <SessionRail
+        {session}
+        deviceName={device?.name ?? null}
+        connection={$connectionState}
+        meta={$sessionMetas.get(sessionId)}
+      />
     {/if}
   </div>
 </div>

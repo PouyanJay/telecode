@@ -14,13 +14,17 @@ import {
   openPayload,
   sealPayload,
   sessionAdoptedPayloadSchema,
+  sessionHistoryPayloadSchema,
+  sessionMetaPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { pino } from 'pino';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createFakeAgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
 import { hookRpc } from './hook-rpc';
+import { createSessionStore } from './sessions/session-store';
 import { markViewerPresent, startFakeRelay, type FakeRelay } from './fake-relay';
 
 /**
@@ -421,7 +425,7 @@ describe('daemon: adopted sessions end-to-end', () => {
     expect(await ask).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
   });
 
-  it('adopts a session on SessionStart, before any tool, with a cwd-derived title', async () => {
+  it('adopts a session on SessionStart with an IDS-ONLY announce + a sealed cwd-derived title (T5)', async () => {
     // A chat-only session (never calls a tool) is invisible today. SessionStart adopts it eagerly.
     const start = hookRpc(socketPath, {
       hook_event_name: 'SessionStart',
@@ -431,11 +435,24 @@ describe('daemon: adopted sessions end-to-end', () => {
     });
     const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
     const payload = sessionAdoptedPayloadSchema.parse(announce.payload);
+    // The announce is ids-only now (ux Phase 6 T5) — the project name/path never reach the relay in the
+    // clear; they travel in the sealed session.meta (cleartext here since this daemon has no keypair).
     expect(payload.clientRef).toBe(CLAUDE_SESSION);
-    expect(payload.title).toBe('myrepo'); // derived from the cwd basename so the row has a sensible name
-    expect(payload.cwd).toBe('/Users/me/myrepo');
+    expect(payload.title).toBeUndefined();
+    expect(payload.cwd).toBeUndefined();
     ackAdopted(relay, announce);
     expect(await start).toEqual({});
+
+    const meta = sessionMetaPayloadSchema.parse(
+      (
+        await relay.waitForFrame(
+          (e) => e.type === 'session.meta' && e.session_id === TELECODE_SESSION,
+        )
+      ).payload,
+    );
+    expect(meta.title).toBe('myrepo'); // derived from the cwd basename so the row has a sensible name
+    expect(meta.titleSource).toBe('derived');
+    expect(meta.cwd).toBe('/Users/me/myrepo');
   });
 
   it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {
@@ -743,6 +760,47 @@ describe('daemon: an unanswered adopted question fails closed (no hook-socket de
 });
 
 describe('daemon: adopted sessions are E2E-encrypted (invariant #5)', () => {
+  it('seals the adopted session.meta — title/cwd never reach the relay in cleartext (T5)', async () => {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-meta-e2e-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const keyPair = await generateKeyPair();
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+      keyPair: {
+        publicKey: encodeKey(keyPair.publicKey),
+        privateKey: encodeKey(keyPair.privateKey),
+      },
+    });
+    await daemon.start();
+    try {
+      const decision = hookRpc(socketPath, {
+        hook_event_name: 'SessionStart',
+        session_id: CLAUDE_SESSION,
+        cwd: '/Users/me/secret-project',
+        source: 'startup',
+      });
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      const meta = await relay.waitForFrame(
+        (e) => e.type === 'session.meta' && e.session_id === TELECODE_SESSION,
+      );
+      // Invariant #5 / the P1-2 privacy fix: the project name/path are OPAQUE ciphertext to the relay —
+      // a non-empty nonce, a string payload, and the plaintext cwd nowhere in the frame.
+      expect(meta.nonce).not.toBe('');
+      expect(typeof meta.payload).toBe('string');
+      expect(JSON.stringify(meta)).not.toContain('secret-project');
+      await decision;
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('sends adopted-session frames to the relay as ciphertext, not plaintext', async () => {
     const relay = await startFakeRelay(USER, DEVICE);
     const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-e2e-'));
@@ -1155,5 +1213,147 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     expect((announce.payload as { clientRef: string }).clientRef).toBe(CLAUDE_SESSION);
     ackAdopted(relay, announce);
     await after;
+  });
+});
+
+describe('daemon: adopted session survives a restart without a duplicate card (session-identity T4)', () => {
+  let dir: string;
+  // Track every daemon/relay so a thrown assertion never leaks a reconnect-looping daemon or an open WS
+  // server into a later test (the single afterEach drains them regardless of outcome).
+  const started: { relay: FakeRelay; daemon: Daemon }[] = [];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-restart-'));
+  });
+  afterEach(async () => {
+    await Promise.all(started.splice(0).map((s) => s.daemon.stop()));
+    await Promise.all(started.map((s) => s.relay.close()));
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function startAdoptDaemon(): Promise<{ relay: FakeRelay; daemon: Daemon; socket: string }> {
+    const relay = await startFakeRelay(USER, DEVICE);
+    const socket = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      sessionStore: createSessionStore({ dir: join(dir, 'sessions') }),
+      adopt: { socketPath: socket, ackTimeoutMs: 2000 },
+      logger: pino({ level: 'silent' }),
+    });
+    await daemon.start();
+    started.push({ relay, daemon });
+    return { relay, daemon, socket };
+  }
+
+  async function awaitPersistedClaudeId(): Promise<void> {
+    await vi.waitFor(
+      async () => {
+        const persisted = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(persisted?.claudeSessionId).toBe(CLAUDE_SESSION);
+      },
+      { timeout: 5000, interval: 50 },
+    );
+  }
+
+  const readTool = (session: string) => ({
+    hook_event_name: 'PreToolUse',
+    session_id: session,
+    cwd: '/repo',
+    tool_name: 'Read',
+    tool_input: { file_path: 'README.md' },
+    tool_use_id: 'toolu_restart',
+  });
+
+  it('recognizes the adopted Claude session after a restart instead of re-announcing it', async () => {
+    // Daemon A: adopt the session and let the mapping persist.
+    const a = await startAdoptDaemon();
+    const firstDecision = hookRpc(a.socket, readTool(CLAUDE_SESSION));
+    ackAdopted(a.relay, await a.relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await firstDecision;
+    await awaitPersistedClaudeId();
+    await a.daemon.stop();
+    await a.relay.close();
+
+    // Daemon B: a fresh process on the same store. Its FIRST session.reconcile (sent right after
+    // hello.ack) must already list the restored id — that's what keeps the relay from retiring the
+    // restored non-terminal adopted row as stale.
+    const b = await startAdoptDaemon();
+    const reconcile = await b.relay.waitForFrame((e) => e.type === 'session.reconcile');
+    expect((reconcile.payload as { heldSessionIds: string[] }).heldSessionIds).toContain(
+      TELECODE_SESSION,
+    );
+
+    // And a hook event for the SAME Claude session is handled WITHOUT a second `session.adopted`
+    // announce — the restored mapping is recognized, so the read-tool decision resolves `allow`
+    // immediately (a re-announce would await an ack that never comes, then fail-closed to `ask`).
+    const decision = await hookRpc(b.socket, readTool(CLAUDE_SESSION));
+    expect(decision).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
+  });
+
+  it('restores an adopted transcript grown by a Stop after adoption (not the adoption snapshot)', async () => {
+    const transcriptPath = join(dir, 'transcript.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'work done after Stop' }] },
+      })}\n`,
+    );
+
+    // Daemon A: adopt, then a Stop grows the transcript (the Stop-hook persist keeps disk fresh).
+    const a = await startAdoptDaemon();
+    const firstDecision = hookRpc(a.socket, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(a.relay, await a.relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await firstDecision;
+    await hookRpc(a.socket, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      transcript_path: transcriptPath,
+    });
+    await vi.waitFor(
+      async () => {
+        const persisted = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(
+          persisted?.transcript.some(
+            (e) => e.kind === 'message' && e.text === 'work done after Stop',
+          ),
+        ).toBe(true);
+      },
+      { timeout: 5000, interval: 50 },
+    );
+    await a.daemon.stop();
+    await a.relay.close();
+
+    // Daemon B: a subscribe backfills the POST-Stop transcript, not a frozen adoption-time snapshot.
+    const b = await startAdoptDaemon();
+    b.relay.send(
+      makeEnvelope({
+        type: 'session.subscribe',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: {},
+      }),
+    );
+    const history = await b.relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === TELECODE_SESSION,
+    );
+    const payload = sessionHistoryPayloadSchema.parse(history.payload);
+    expect(
+      payload.entries.some((e) => e.kind === 'message' && e.text === 'work done after Stop'),
+    ).toBe(true);
   });
 });

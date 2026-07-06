@@ -6,6 +6,7 @@ import WebSocket from 'ws';
 
 import {
   adoptConfigPayloadSchema,
+  isSessionEndStatus,
   echoPayloadSchema,
   handoverAnswerPayloadSchema,
   makeEnvelope,
@@ -33,11 +34,14 @@ import {
   type SessionHistoryEntry,
   type SessionHistoryPayload,
   type SessionLaunchPayload,
+  type SessionMetaPayload,
+  type SessionOrigin,
   type SessionStatusName,
 } from '@telecode/protocol';
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
+import { deriveSessionTitle, derivedMetaPatch, resolveLaunchTitle } from './derive-title';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { adoptedGateDecision } from './adopt/adopted-gate-decision';
 import { type HookEvent } from './adopt/hook-event';
@@ -64,7 +68,7 @@ import { createClaudeAgentAdapter } from './claude-agent-adapter';
 import { classifyTool } from './permission-policy';
 import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
-import { type SessionStore } from './sessions/session-store';
+import { type PersistedSession, type SessionStore } from './sessions/session-store';
 import { type WorktreeManager } from './sessions/worktree-manager';
 
 /** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
@@ -72,6 +76,24 @@ const HANDOVER_TITLE_PREVIEW_CHARS = 60;
 
 /** Default gate timeout: long enough to reach a phone, short enough to never strand a turn overnight. */
 const DEFAULT_GATE_TIMEOUT_MS = 30 * 60_000;
+
+/**
+ * Keep only the keys whose values are set — so an optional field is carried when present and omitted
+ * (never an explicit `undefined`) otherwise. One place to thread the persisted-session optional fields
+ * through the persist ⇄ restore round-trip instead of a spread-conditional per call site.
+ */
+function definedFields<T extends Record<string, unknown>>(
+  obj: T,
+): {
+  [K in keyof T]?: Exclude<T[K], undefined>;
+} {
+  const out: { [K in keyof T]?: Exclude<T[K], undefined> } = {};
+  for (const key of Object.keys(obj) as (keyof T)[]) {
+    const value = obj[key];
+    if (value !== undefined) out[key] = value as Exclude<T[typeof key], undefined>;
+  }
+  return out;
+}
 
 /**
  * The local daemon: it dials *out* to the relay (laptops sit behind NAT — nothing ever
@@ -286,6 +308,26 @@ export function createDaemon(options: DaemonOptions): Daemon {
     transcript: SessionHistoryEntry[];
     /** The mode the operator launched with; drives the per-tool gate (and is reused for follow-up turns). */
     permissionMode: PermissionModeName;
+    /**
+     * The session's accumulated identity metadata (ux Phase 6): title/cwd/model/permission-mode as last
+     * emitted in a `session.meta` frame. Kept merged so a subscriber reopening the session — or a partial
+     * update (e.g. the model learned mid-run) — always yields the complete picture.
+     */
+    meta?: SessionMetaPayload;
+    /**
+     * How the session came to exist (ux Phase 6 T4) — persisted so a restart can rebuild the right map:
+     * `launched` restores its SDK resume id into `sdkSessions`, `external` restores the adoption mapping
+     * so an adopted session isn't re-announced as a duplicate card.
+     */
+    origin?: SessionOrigin;
+    /**
+     * The Claude/SDK conversation id (T4): the resume id for a launched session, or the adopted Claude
+     * `session_id` for an external one. Persisted so a follow-up resumes the same conversation across a
+     * restart instead of being silently dropped.
+     */
+    claudeSessionId?: string;
+    /** The worktree/working directory the session runs in — persisted so a restored follow-up reuses it. */
+    cwd?: string;
   }
   const sessionRecords = new Map<string, SessionRecord>();
 
@@ -309,16 +351,50 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (sessionId === undefined) return;
     const rec = recordFor(sessionId);
     rec.status = status;
-    // Persist on the terminal states so a finished session survives a daemon restart (invariant #7). The
-    // full transcript is already recorded by the time a turn settles to done/error, so this captures it. A
-    // running/awaiting session is intentionally not persisted — it can't be resumed across a restart anyway.
-    if ((status === 'done' || status === 'error') && sessionStore) {
+    // Persist on the settled states so a finished session survives a daemon restart (invariant #7). The
+    // full transcript is already recorded by the time a turn settles, so this captures it (turn_limit is
+    // settled-but-followable — its transcript matters most, the run stopped mid-task). A running launched
+    // session isn't persisted here — it has no captured resume id yet; adopted sessions persist separately
+    // on first adoption + every Stop, regardless of status (ux Phase 6 T4).
+    if (isSessionEndStatus(status)) {
+      persistSession(sessionId, rec);
+    }
+  }
+
+  /**
+   * Persist a session's record to disk (best-effort, fire-and-forget): its transcript + the E2E content
+   * key (so a restart never rotates it) + its sealed metadata (so a restored session re-emits its
+   * identity). Exporting the key is async, so this is separated from the sync {@link setStatus}.
+   */
+  function persistSession(sessionId: string, rec: SessionRecord): void {
+    if (!sessionStore) return;
+    void (async (): Promise<void> => {
+      // A failed export silently degrades the no-rotation guarantee (T3) back to a rotating key — log it
+      // so a "titles stopped decrypting after a restart" report is diagnosable rather than a mystery.
+      const contentKey = await cipher.exportKey(sessionId).catch((err: unknown) => {
+        log.warn(
+          { err, sessionId },
+          'daemon: failed to export session content key for persistence',
+        );
+        return undefined;
+      });
       sessionStore.save(sessionId, {
-        status,
+        status: rec.status,
         permissionMode: rec.permissionMode,
         transcript: rec.transcript,
+        // Optional fields carried only when set (never persist an explicit `undefined`) — one place to
+        // add the next persisted field instead of a spread-conditional per call site.
+        ...definedFields({
+          contentKey,
+          meta: rec.meta,
+          origin: rec.origin,
+          claudeSessionId: rec.claudeSessionId,
+          cwd: rec.cwd,
+        }),
       });
-    }
+    })().catch((err: unknown) => {
+      log.error({ err, sessionId }, 'daemon: failed to persist session');
+    });
   }
 
   /**
@@ -342,17 +418,45 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (!sessionStore) return;
     try {
       for (const [sessionId, persisted] of await sessionStore.loadAll()) {
-        if (!sessionRecords.has(sessionId)) {
-          sessionRecords.set(sessionId, {
-            status: persisted.status,
-            transcript: persisted.transcript,
-            permissionMode: persisted.permissionMode,
-          });
-        }
+        if (sessionRecords.has(sessionId)) continue;
+        sessionRecords.set(sessionId, {
+          // A persisted `awaiting_input` has no live gate to resume into (pendingPermissions/questions
+          // die with the process) — restoring it as-is would show an un-dismissable phantom gate. Coerce
+          // it to `needs_restart` (the honest "start a new session" state) instead.
+          status: persisted.status === 'awaiting_input' ? 'needs_restart' : persisted.status,
+          transcript: persisted.transcript,
+          permissionMode: persisted.permissionMode,
+          ...definedFields({
+            meta: persisted.meta,
+            origin: persisted.origin,
+            claudeSessionId: persisted.claudeSessionId,
+            cwd: persisted.cwd,
+          }),
+        });
+        // Restore the session's content key (ux Phase 6 T3) so a subscribe re-delivers the SAME key and
+        // re-emits the sealed metadata under it — a browser holding the old key (or the relay's cached
+        // blob) stays decryptable, and the daemon never rotates a restored session's key.
+        if (persisted.contentKey !== undefined) cipher.restoreKey(sessionId, persisted.contentKey);
+        restoreConversationState(sessionId, persisted);
       }
       log.info({ deviceId: options.deviceId }, 'daemon: restored persisted sessions');
     } catch (err) {
       log.warn({ err, deviceId: options.deviceId }, 'daemon: failed to restore persisted sessions');
+    }
+  }
+
+  /**
+   * Rebuild a restored session's resume/adoption state (ux Phase 6 T4) so a follow-up after a restart
+   * continues the same conversation (launched → `sdkSessions`) and an adopted session isn't re-announced
+   * as a duplicate card (external → the adoption mapping).
+   */
+  function restoreConversationState(sessionId: string, persisted: PersistedSession): void {
+    if (persisted.cwd !== undefined) sessionCwds.set(sessionId, persisted.cwd);
+    if (persisted.claudeSessionId === undefined) return;
+    if (persisted.origin === 'external') {
+      adoptedSessions?.restore(persisted.claudeSessionId, sessionId);
+    } else {
+      sdkSessions.set(sessionId, persisted.claudeSessionId);
     }
   }
 
@@ -394,6 +498,30 @@ export function createDaemon(options: DaemonOptions): Daemon {
         }),
       );
     });
+  }
+
+  /**
+   * Merge a metadata patch into the session's record and emit the merged `session.meta` (ux Phase 6),
+   * sealed under the session content key by {@link sendForSession} for an E2E session. The relay stores
+   * the opaque blob for cold loads; key-holding browsers decrypt it for titles. Titles are prompt-derived
+   * content — sealed on the wire and never logged. NOTE: the wire frame always carries the FULL merged
+   * snapshot, not the patch — receivers are latest-wins, so a narrow update (e.g. a model learned
+   * mid-run) deliberately re-broadcasts title/cwd/permissionMode with it.
+   */
+  function emitSessionMeta(source: Envelope, patch: SessionMetaPayload): void {
+    const sessionId = source.session_id;
+    if (sessionId === undefined) return;
+    const rec = recordFor(sessionId);
+    rec.meta = { ...rec.meta, ...patch };
+    sendForSession(source, 'session.meta', { ...rec.meta, ts: now() });
+  }
+
+  /** Emit an updated `session.meta` the first time a turn reveals the model (ux Phase 6 T5) — only on change. */
+  function emitModelUpdate(source: Envelope, model: string | undefined): void {
+    const sessionId = source.session_id;
+    if (sessionId === undefined || model === undefined) return;
+    if (recordFor(sessionId).meta?.model === model) return;
+    emitSessionMeta(source, { model });
   }
 
   /** Deliver a session's content key, box-wrapped to a browser's ephemeral pubkey (`session.key`). */
@@ -765,10 +893,42 @@ export function createDaemon(options: DaemonOptions): Daemon {
       }
       if (sessionId !== undefined && result.sessionId !== undefined) {
         sdkSessions.set(sessionId, result.sessionId);
+        // Capture the resume id on the record (ux Phase 6 T4) so the terminal persist below carries it —
+        // a follow-up after a restart resumes the SAME conversation instead of being silently dropped.
+        const rec = recordFor(sessionId);
+        rec.claudeSessionId = result.sessionId;
+        rec.origin ??= 'launched';
       }
-      log.info({ deviceId: options.deviceId, sessionId }, 'daemon: turn ended');
-      setStatus(sessionId, 'done');
-      sendForSession(envelope, 'session.ended', { status: 'done' });
+      emitModelUpdate(envelope, result.model);
+      // Status split (ux Phase 6 T2): report HOW the turn settled. A turn-limit ending is a pause —
+      // the conversation id above is kept, so the next user.message resumes it. An SDK-internal soft
+      // failure ends as `error` (it used to read as a dishonest `done`). No terminal result = completed.
+      // An abort that RACED the natural end (the adapter returns normally with a captured endReason
+      // after its signal fired): the operator's interrupt wins — the turn ends `done`, exactly as the
+      // catch path treats an abort that landed mid-stream.
+      const endReason = abort.signal.aborted ? 'completed' : (result.endReason ?? 'completed');
+      log.info({ deviceId: options.deviceId, sessionId, endReason }, 'daemon: turn ended');
+      switch (endReason) {
+        case 'turn_limit':
+          setStatus(sessionId, 'turn_limit');
+          sendForSession(envelope, 'session.ended', { status: 'turn_limit' });
+          break;
+        case 'execution_error':
+          setStatus(sessionId, 'error');
+          sendForSession(envelope, 'session.ended', {
+            status: 'error',
+            error: 'the agent run failed',
+          });
+          break;
+        case 'completed':
+          setStatus(sessionId, 'done');
+          sendForSession(envelope, 'session.ended', { status: 'done' });
+          break;
+        default: {
+          const _exhaustive: never = endReason;
+          return _exhaustive;
+        }
+      }
     } catch (err) {
       // An aborted run is an operator interrupt/end, not a failure — end the turn cleanly as `done`.
       if (abort.signal.aborted) {
@@ -822,6 +982,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (repoPath === undefined) return undefined;
       const worktree = await worktreeManager.ensureWorktree(sessionId, repoPath);
       sessionCwds.set(sessionId, worktree.path);
+      recordFor(sessionId).cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
       // Log owner/name + branch only — never the clone URL or local paths (kept out of log sinks).
       log.info(
         {
@@ -900,7 +1061,48 @@ export function createDaemon(options: DaemonOptions): Daemon {
       'session.started',
       launch.data.clientRef !== undefined ? { clientRef: launch.data.clientRef } : {},
     );
+    // Sealed session identity (ux Phase 6): a user-named launch keeps its title; otherwise derive one
+    // from the first prompt. Sent after `started` so the launching browser pairs its clientRef first.
+    if (envelope.session_id !== undefined) {
+      emitSessionMeta(envelope, {
+        ...resolveLaunchTitle(launch.data.title, launch.data.prompt),
+        ...(cwd !== undefined ? { cwd } : {}),
+        permissionMode: recordFor(envelope.session_id).permissionMode,
+      });
+    }
     await runTurn(envelope, launch.data.prompt, { ...(cwd !== undefined ? { cwd } : {}) });
+  }
+
+  /**
+   * A follow-up whose conversation can't be resumed. Two cases, handled differently so the daemon never
+   * fabricates durable state for an id it never owned (a stale tab can send any UUID):
+   *  - The daemon HOLDS a launched session (in-memory, or restored from disk) but lost its resume id — e.g.
+   *    it restarted before the session captured one (ux Phase 6 T4). Answer HONESTLY with `needs_restart`
+   *    (a terminal state the UI offers "resume as a new session" from), never a silent drop.
+   *  - The daemon has no record of this id, or it's an adopted (not SDK-driven) session. Drop it — creating
+   *    and persisting a phantom `needs_restart` record for an arbitrary UUID would be an unbounded write
+   *    vector.
+   */
+  function handleUnresumableFollowUp(
+    envelope: Envelope,
+    sessionId: string | undefined,
+    text: string,
+  ): void {
+    const rec = sessionId !== undefined ? sessionRecords.get(sessionId) : undefined;
+    if (rec === undefined || rec.origin === 'external') {
+      log.warn(
+        { deviceId: options.deviceId, sessionId },
+        'daemon: follow-up dropped — no launched conversation to resume',
+      );
+      return;
+    }
+    log.warn(
+      { deviceId: options.deviceId, sessionId },
+      'daemon: follow-up cannot resume — reporting needs_restart',
+    );
+    record(sessionId, { kind: 'user', text, ts: now() });
+    setStatus(sessionId, 'needs_restart');
+    sendForSession(envelope, 'session.ended', { status: 'needs_restart' });
   }
 
   /** Run a follow-up turn for an existing session by resuming its agent conversation. */
@@ -921,10 +1123,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     const resume = sessionId !== undefined ? sdkSessions.get(sessionId) : undefined;
     if (resume === undefined) {
-      log.warn(
-        { deviceId: options.deviceId, sessionId },
-        'daemon: no agent conversation to resume for follow-up',
-      );
+      handleUnresumableFollowUp(envelope, sessionId, message.data.text);
       return;
     }
     log.info({ deviceId: options.deviceId, sessionId }, 'daemon: follow-up received');
@@ -1019,6 +1218,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
           { deviceId: options.deviceId, sessionId, known: rec !== undefined },
           'daemon: session subscribe — backfilling history',
         );
+        // Reopen identity (ux Phase 6): re-send the session's metadata so a fresh browser can label the
+        // session even when the relay's cache was lost. Enqueued after the key delivery above, so an E2E
+        // subscriber can always decrypt it.
+        if (rec?.meta !== undefined) {
+          sendForSession(envelope, 'session.meta', { ...rec.meta, ts: now() });
+        }
         sendForSession(envelope, 'session.history', historyPayloadFor(sessionId));
         return;
       }
@@ -1160,10 +1365,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
-   * The `session.reconcile` frame: the ids of the sessions this daemon currently holds in memory. The relay
-   * retires any OTHER non-terminal session for this device — clearing stale `running`/`awaiting_input` rows
-   * a revoke/restart left behind (the daemon persists only terminal sessions across a restart, so a lost
-   * running/awaiting one is genuinely gone). Cleartext routing metadata (session ids only), E2E-safe.
+   * The `session.reconcile` frame: the ids of the sessions this daemon currently holds — including ones
+   * restored from disk at start (ux Phase 6 T4), so a restored running adopted session rides this set and
+   * the relay does NOT retire it. The relay retires any OTHER non-terminal session for this device,
+   * clearing stale rows a revoke left behind. Cleartext routing metadata (session ids only), E2E-safe.
    */
   function reconcileFrame(): string {
     return JSON.stringify(
@@ -1241,11 +1446,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
   // (`transcript-mirror`) are wired together here.
   const transcriptMirrors = new Map<string, TranscriptMirror>();
 
-  /** Announce a discovered external session to the relay (cleartext routing metadata, like session.launch). */
-  function announceAdopted(payload: { clientRef: string; title?: string; cwd?: string }): void {
-    // A `session_id`-less announce: routing metadata, always cleartext — it can't go through
-    // sendForSession (which needs a source envelope), so the frame is built inline. makeEnvelope
-    // defaults the nonce to '' (cleartext).
+  /**
+   * Announce a discovered external session to the relay — IDS-ONLY (ux Phase 6 T5): the clientRef is the
+   * only field, so the session's title/cwd never reach the relay in cleartext (they follow in a sealed
+   * `session.meta`). A `session_id`-less announce can't go through sendForSession (which needs a source
+   * envelope), so the frame is built inline; makeEnvelope defaults the nonce to '' (cleartext routing).
+   */
+  function announceAdopted(payload: { clientRef: string }): void {
     enqueueSend(async () =>
       JSON.stringify(
         makeEnvelope({
@@ -1288,8 +1495,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
   function registerChained(payload: {
     clientRef: string;
     parentSessionId: string;
-    title?: string;
-    cwd?: string;
   }): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -1465,6 +1670,37 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
   }
 
+  /**
+   * On first adoption (ux Phase 6 T5): emit the session's identity as a SEALED `session.meta` (a
+   * cwd-derived title so a session adopted before any prompt reads sensibly, plus the cwd — under the
+   * content key, never cleartext to the relay), then persist the record so a restart rebuilds the adoption
+   * mapping (ux Phase 6 T4). The mirror refines the title from the first real prompt later.
+   */
+  function sealAndPersistFirstAdoptionIdentity(
+    telecodeSessionId: string,
+    cwd: string | undefined,
+    rec: SessionRecord,
+  ): void {
+    const title = cwd !== undefined ? basename(cwd) : undefined;
+    emitSessionMeta(adoptedSource(telecodeSessionId), derivedMetaPatch(title, cwd));
+    persistSession(telecodeSessionId, rec);
+  }
+
+  /**
+   * Refine an adopted session's DERIVED title to its first real user prompt once the mirror has captured
+   * one (ux Phase 6 T5) — the cwd-basename is only the sensible default for a session adopted before any
+   * prompt. A no-op for a user-renamed title (T6) or once already refined to the prompt.
+   */
+  function refineAdoptedTitleFromPrompt(telecodeSessionId: string): void {
+    const rec = sessionRecords.get(telecodeSessionId);
+    if (rec === undefined || rec.meta?.titleSource === 'user') return;
+    const firstPrompt = rec.transcript.find((entry) => entry.kind === 'user')?.text;
+    if (firstPrompt === undefined) return;
+    const derived = deriveSessionTitle(firstPrompt);
+    if (derived === undefined || rec.meta?.title === derived) return;
+    emitSessionMeta(adoptedSource(telecodeSessionId), derivedMetaPatch(derived, undefined));
+  }
+
   /** Pull transcript lines appended since the last event into the session record + push them to browsers. */
   async function mirrorTranscript(
     telecodeSessionId: string,
@@ -1566,12 +1802,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const title = `Continue: ${handover.question.slice(0, HANDOVER_TITLE_PREVIEW_CHARS)}`;
     let childId: string;
     try {
-      childId = await registerChained({
-        clientRef,
-        parentSessionId: parentId,
-        title,
-        ...(handover.cwd !== undefined ? { cwd: handover.cwd } : {}),
-      });
+      // Ids-only announce (ux Phase 6 T5): the continuation's title/cwd travel in the sealed session.meta
+      // below, so they never reach the relay in cleartext (the P1-2 privacy fix).
+      childId = await registerChained({ clientRef, parentSessionId: parentId });
     } catch (err) {
       // The relay never minted the child (offline / dropped). Leave the parent as-is; a later answer can
       // retry. (Journey 4 T2 adds the summary-seeded fresh-launch fallback for a resume that errors.)
@@ -1586,6 +1819,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // content key when it subscribes, exactly like an adopted session). Cleartext only on a pre-E2E daemon.
     if (cipher.enabled) cipher.establish(childId);
     recordFor(childId).permissionMode = 'default';
+    recordFor(childId).origin = 'launched';
+    // The continuation's identity, SEALED (ux Phase 6 T5) — title from the taken-over question + the
+    // inherited cwd, under the content key so they never reach the relay in cleartext.
+    emitSessionMeta(childSource, derivedMetaPatch(title, handover.cwd));
     record(childId, { kind: 'user', text: answerText, ts: now() });
     setStatus(childId, 'running');
     sendForSession(childSource, 'session.started', {});
@@ -1628,7 +1865,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (cipher.enabled) cipher.establish(knownId);
       await mirrorTranscript(knownId, event.transcript_path);
       const status = recordFor(knownId).status;
-      if (status !== 'done' && status !== 'error') {
+      if (!isSessionEndStatus(status)) {
         setStatus(knownId, 'done');
         sendForSession(adoptedSource(knownId), 'session.ended', { status: 'done' });
         log.info(
@@ -1691,6 +1928,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
       return {};
     }
+    // Refine the derived title once a chat-only session (no PreToolUse) mirrors its first prompt (T5).
+    refineAdoptedTitleFromPrompt(knownId);
+    // Keep the persisted transcript current (ux Phase 6 T4): an adopted session isn't terminal on Stop,
+    // so without this its on-disk copy would stay frozen at adoption time and a restart would backfill a
+    // stale transcript. Best-effort, coalesced by the store.
+    persistSession(knownId, recordFor(knownId));
 
     // Free-form handover offer (Journey 4). The mirror above is intentionally unconditional (an already-
     // adopted session keeps flowing regardless of a mid-session policy change); only the OFFER is gated here:
@@ -1804,15 +2047,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
 
     let telecodeSessionId: string;
     try {
-      // Name the registry row from the project directory (e.g. `…/myrepo` → "myrepo") so a session adopted
-      // before any user prompt — esp. a chat-only one adopted on SessionStart — still reads sensibly in the
-      // dashboard. Once the transcript mirrors a user message the UI can prefer that; the cwd title is the
-      // sensible default. Adoption announces once, so this title comes from the first event we see.
-      const title = event.cwd !== undefined ? basename(event.cwd) : '';
+      // The announce is now ids-only (ux Phase 6 T5): the title/cwd travel in the SEALED session.meta
+      // below, so an adopted session's project name + path never reach the relay in cleartext (the P1-2
+      // privacy fix — consistent with the sealed adopt.config denylist).
       telecodeSessionId = await adoptedSessions.ensureAdopted({
         claudeSessionId: event.session_id,
-        ...(event.cwd !== undefined ? { cwd: event.cwd } : {}),
-        ...(title !== '' ? { title } : {}),
       });
     } catch (err) {
       log.warn(
@@ -1821,13 +2060,28 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
       return preToolUseOutput('ask');
     }
+    // Capture the adoption identity on the record (ux Phase 6 T4); the first-adoption branch below persists
+    // it. An adopted session can be non-terminal for a long time, and that snapshot is what lets a restart
+    // rebuild the adoption mapping so the SAME Claude session isn't re-announced as a duplicate card.
+    const adoptedRec = recordFor(telecodeSessionId);
+    const isFirstAdoption = adoptedRec.claudeSessionId === undefined;
+    adoptedRec.origin = 'external';
+    adoptedRec.claudeSessionId = event.session_id;
+    if (event.cwd !== undefined) adoptedRec.cwd = event.cwd;
     // An adopted session is live the moment we first see it.
-    if (recordFor(telecodeSessionId).status === 'starting') setStatus(telecodeSessionId, 'running');
+    if (adoptedRec.status === 'starting') setStatus(telecodeSessionId, 'running');
     // E2E (invariant #5): mint this session's content key so its frames go to the relay as ciphertext, not
     // plaintext. Idempotent. The key is delivered to the browser on `session.subscribe` (it announces its
     // pubkey then), exactly like a launched session's reconnect. Cleartext only on a pre-E2E daemon (tests).
+    // MUST run BEFORE the first persist below (ux Phase 6 T4): otherwise the first on-disk snapshot has no
+    // content key, and a restart in that window would mint a fresh key — the exact rotation T3 forbids.
     if (cipher.enabled) cipher.establish(telecodeSessionId);
+    if (isFirstAdoption)
+      sealAndPersistFirstAdoptionIdentity(telecodeSessionId, event.cwd, adoptedRec);
     await mirrorTranscript(telecodeSessionId, event.transcript_path);
+    // Refine the derived title from the first real user prompt once the mirror has it (ux Phase 6 T5) —
+    // a cwd-basename is only the sensible default until the conversation has content.
+    refineAdoptedTitleFromPrompt(telecodeSessionId);
 
     if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
       return handlePreToolUseHook(event, event.tool_name, telecodeSessionId);

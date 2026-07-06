@@ -1,8 +1,16 @@
 import {
+  deriveSharedKey,
   encodeKey,
+  exportContentKey,
+  generateContentKey,
   generateIdentityKeyPair,
   generateKeyPair,
+  importIdentityPrivateKey,
+  importIdentityPublicKey,
   makeEnvelope,
+  sealPayload,
+  type Envelope,
+  type KeyPair,
 } from '@telecode/protocol';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -329,5 +337,97 @@ describe('key self-healing: re-subscribe on a keyless encrypted frame', () => {
     await flush();
     expect(subscribesFor(s2, 'sess-x')).toBe(0);
     clear.conn.close();
+  });
+});
+
+describe('sealTitle: rename is E2E-gated (ux Phase 6 T6)', () => {
+  beforeEach(() => {
+    vi.useRealTimers(); // real WebCrypto keygen/derivation needs real event-loop turns
+  });
+
+  const encryptedFrame = (sessionId: string): string =>
+    JSON.stringify(
+      makeEnvelope({
+        type: 'agent.permission_request',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId,
+        payload: 'b64ciphertext',
+        nonce: 'b64nonce',
+      }),
+    );
+  const subscribesFor = (socket: FakeSocket, sessionId: string): number =>
+    socket.sent.filter(
+      (f) => f.includes('"session.subscribe"') && f.includes(`"session_id":"${sessionId}"`),
+    ).length;
+
+  /** Play the daemon: box-wrap a content key to the browser's announced pubkey (a `session.key` payload). */
+  async function wrapKeyForBrowser(
+    contentKey: CryptoKey,
+    daemon: KeyPair,
+    browserPublicKeyB64: string,
+  ): Promise<{ payload: string; nonce: string }> {
+    const shared = await deriveSharedKey(
+      await importIdentityPrivateKey(encodeKey(daemon.privateKey)),
+      await importIdentityPublicKey(browserPublicKeyB64),
+    );
+    return sealPayload({ key: await exportContentKey(contentKey) }, shared);
+  }
+
+  /** The browser announces its pubkey on its self-healing subscribe — pull it from the sent frame. */
+  function announcedBrowserKey(socket: FakeSocket, sessionId: string): string {
+    const frame = socket.sent.find(
+      (f) => f.includes('"session.subscribe"') && f.includes(`"session_id":"${sessionId}"`),
+    );
+    const env = JSON.parse(frame!) as Envelope;
+    return env.sender_public_key!;
+  }
+
+  it('returns real ciphertext for an E2E session and null for a cleartext one', async () => {
+    const daemonKp = await generateKeyPair();
+    const { sockets, conn } = connectWithFakes({
+      daemonPublicKey: encodeKey(daemonKp.publicKey),
+      keyPairFactory: () => generateIdentityKeyPair(false),
+    });
+    const s = sockets[0]!;
+    s.fireOpen();
+    await flush();
+    s.fireMessage(helloAck());
+    await flush();
+
+    // Provoke the browser to announce its pubkey (self-healing subscribe on a keyless encrypted frame),
+    // then deliver a content key wrapped to it so the session becomes E2E.
+    s.fireMessage(encryptedFrame('sess-e2e'));
+    await vi.waitFor(() => expect(subscribesFor(s, 'sess-e2e')).toBe(1));
+    const browserPub = announcedBrowserKey(s, 'sess-e2e');
+    const contentKey = await generateContentKey(true);
+    const wrapped = await wrapKeyForBrowser(contentKey, daemonKp, browserPub);
+    s.fireMessage(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'session.key',
+          userId: USER,
+          deviceId: DEVICE,
+          sessionId: 'sess-e2e',
+          payload: wrapped.payload,
+          nonce: wrapped.nonce,
+        }),
+      ),
+    );
+
+    // A rename for the E2E session seals real ciphertext — never the plaintext title (invariant #5). The
+    // key lands through the async inbound chain (real WebCrypto), so poll sealTitle until it's available.
+    let sealed: { payload: string; nonce: string } | null = null;
+    await vi.waitFor(async () => {
+      sealed = await conn.sealTitle('sess-e2e', 'my secret project name');
+      expect(sealed).not.toBeNull();
+    });
+    expect(typeof sealed!.payload).toBe('string');
+    expect(sealed!.nonce).not.toBe('');
+    expect(sealed!.payload).not.toContain('secret project');
+
+    // A session with no delivered key can't be renamed — sealTitle refuses rather than faking a blob.
+    expect(await conn.sealTitle('sess-no-key', 'x')).toBeNull();
+    conn.close();
   });
 });

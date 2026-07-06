@@ -15,6 +15,7 @@ import {
 } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
+import { openSealedWithStoredKey, type ContentKeyStore } from './content-key-store';
 import { loadOrCreateIdentityKeyPair, type IdentityKeyStore } from './keystore';
 import { createBrowserSessionCipher } from './session-cipher';
 
@@ -158,6 +159,39 @@ describe('browser session cipher', () => {
       cipher.receiveKey(sessionEnvelope('session.key', wrappedForOther)),
     ).resolves.toBeUndefined();
     expect(cipher.isEncrypted('s')).toBe(false);
+  });
+
+  it('persists the unwrapped content key so a cold load can decrypt sealed metadata (T3)', async () => {
+    const daemon = await generateIdentityKeyPair(true);
+    // An in-memory ContentKeyStore stands in for IndexedDB — the cipher's third injectable seam.
+    const persisted = new Map<string, CryptoKeyHandle>();
+    const store: ContentKeyStore = {
+      get: (id) => Promise.resolve(persisted.get(id)),
+      put: (id, key) => {
+        persisted.set(id, key);
+        return Promise.resolve();
+      },
+      clear: () => {
+        persisted.clear();
+        return Promise.resolve();
+      },
+    };
+    const cipher = createBrowserSessionCipher(
+      await exportIdentityPublicKey(daemon.publicKey),
+      () => generateIdentityKeyPair(false),
+      store,
+    );
+
+    const contentKey = await generateContentKey(true);
+    const wrapped = await daemonWrapKey(daemon.privateKey, (await cipher.publicKey())!, contentKey);
+    await cipher.receiveKey(sessionEnvelope('session.key', wrapped));
+
+    // The key landed in the store — and a blob sealed under it opens on a "cold load" (store only).
+    expect(persisted.has('s')).toBe(true);
+    const sealed = await sealPayload({ title: 'offline title' }, contentKey);
+    expect(await openSealedWithStoredKey(store, 's', sealed.payload, sealed.nonce)).toEqual({
+      title: 'offline title',
+    });
   });
 
   it('reuses the persisted identity across reopens — a stable browser public key (Phase 4 T7)', async () => {
