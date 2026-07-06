@@ -11,6 +11,7 @@ import {
   disconnect,
   launch,
   seedSessionDevices,
+  sendUserMessage,
   sessionDevices,
   sessions,
   subscribe,
@@ -31,10 +32,12 @@ interface FakeConn {
   readonly options: RelayConnectionOptions;
   readonly subscribed: string[];
   readonly decisions: { sessionId: string; payload: unknown }[];
+  readonly messages: { sessionId: string; text: string }[];
   readonly launched: unknown[];
   closed: boolean;
   emit(envelope: Envelope): void;
   setStatus(status: 'connecting' | 'connected' | 'error'): void;
+  reconnect(): void;
 }
 
 /** A pool-aware fake factory: records one controllable connection per createConn call. */
@@ -45,17 +48,19 @@ function makeFakePool() {
       options,
       subscribed: [],
       decisions: [],
+      messages: [],
       launched: [],
       closed: false,
       emit: (envelope) => options.onEvent(envelope),
       setStatus: (status) => options.onStatus(status),
+      reconnect: () => options.onReconnect?.(),
     };
     byDevice.set(options.deviceId, conn);
     options.onStatus('connected');
     return {
       launch: (payload) => conn.launched.push(payload),
       subscribe: (id) => conn.subscribed.push(id),
-      sendUserMessage: () => undefined,
+      sendUserMessage: (sessionId, text) => conn.messages.push({ sessionId, text }),
       decide: (sessionId, payload) => conn.decisions.push({ sessionId, payload }),
       answer: () => undefined,
       answerHandover: () => undefined,
@@ -218,5 +223,57 @@ describe('multi-device connection pool (ux Phase 5 T1)', () => {
     await expect(pending).resolves.toBe('sess-new');
     // The launch's own started frame routed the new session to its device.
     expect(get(sessionDevices).get('sess-new')).toBe('device-b');
+  });
+
+  it('rejects a launch with no target while several devices are pooled (no guessing)', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+
+    await expect(launch({ prompt: 'where?' })).rejects.toThrow();
+    expect(pool.byDevice.get('device-a')?.launched).toEqual([]);
+    expect(pool.byDevice.get('device-b')?.launched).toEqual([]);
+  });
+
+  it('drops an unrouted send when several devices are pooled — never misroutes (AD-2)', () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+
+    // No registry seed, no live frame: the session's device is unknown. A decision must not be
+    // guessed onto some channel (the wrong daemon would drop it while the real gate still pends).
+    decide('sess-mystery', { requestId: 'r1', behavior: 'allow' });
+    subscribe('sess-mystery');
+
+    for (const conn of pool.byDevice.values()) {
+      expect(conn.decisions).toEqual([]);
+      expect(conn.subscribed).toEqual([]);
+    }
+  });
+
+  it('reattaches only the reconnected device’s sessions after ITS socket redials', () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    pool.byDevice.get('device-a')!.emit(frame('device-a', 'session.started', 'sess-a'));
+    pool.byDevice.get('device-b')!.emit(frame('device-b', 'session.started', 'sess-b1'));
+    pool.byDevice.get('device-b')!.emit(frame('device-b', 'session.started', 'sess-b2'));
+
+    pool.byDevice.get('device-b')!.reconnect();
+
+    expect(pool.byDevice.get('device-b')?.subscribed).toEqual(['sess-b1', 'sess-b2']);
+    expect(pool.byDevice.get('device-a')?.subscribed).toEqual([]);
+  });
+
+  it('routes a follow-up message on the session’s own channel and echoes it locally', () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    pool.byDevice.get('device-b')!.emit(frame('device-b', 'session.started', 'sess-b'));
+
+    sendUserMessage('sess-b', 'keep going');
+
+    expect(pool.byDevice.get('device-b')?.messages).toEqual([
+      { sessionId: 'sess-b', text: 'keep going' },
+    ]);
+    expect(pool.byDevice.get('device-a')?.messages).toEqual([]);
+    const state = get(sessions).get('sess-b');
+    expect(state?.entries.some((e) => e.kind === 'user' && e.text === 'keep going')).toBe(true);
   });
 });
