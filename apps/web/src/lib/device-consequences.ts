@@ -15,8 +15,8 @@ interface RegistrySession {
   readonly status: SessionStatus;
 }
 
-// A revoke ends every non-terminal session on the device; these three are already over.
-const TERMINAL: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['done', 'error']);
+// A revoke ends every non-terminal session on the device; these are already over.
+const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['done', 'error']);
 
 /**
  * Count what revoking `deviceId` will end. Live status (from the demuxed channel, keyed by session id)
@@ -34,7 +34,7 @@ export function deviceConsequences(
   for (const session of registry) {
     if (session.deviceId !== deviceId) continue;
     const status = liveStatus.get(session.id) ?? session.status;
-    if (TERMINAL.has(status)) continue;
+    if (TERMINAL_STATUSES.has(status)) continue;
     ending += 1;
     if (status === 'awaiting_input') awaiting += 1;
   }

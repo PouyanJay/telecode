@@ -153,6 +153,15 @@ describe('approveDevice', () => {
       deviceName: null,
     });
   });
+
+  it('reports failure when the relay is unreachable (fetch rejects), never throws', async () => {
+    stubFetch(() => Promise.reject(new Error('ECONNREFUSED')));
+    expect(await approveDevice('ABCD-2345', 'user-1')).toEqual({
+      ok: false,
+      restored: false,
+      deviceName: null,
+    });
+  });
 });
 
 describe('listSessions', () => {

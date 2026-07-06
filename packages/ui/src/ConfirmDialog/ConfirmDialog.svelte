@@ -2,7 +2,7 @@
   import type { Snippet } from 'svelte';
   import { fade, scale } from 'svelte/transition';
 
-  import { trapFocus } from '../actions';
+  import { lockBodyScroll, prefersReducedMotion, trapFocus } from '../actions';
   import { Button } from '../Button';
 
   /**
@@ -40,8 +40,9 @@
     details,
   }: Props = $props();
 
-  const titleId = `confirm-title-${Math.random().toString(36).slice(2)}`;
-  const bodyId = `confirm-body-${Math.random().toString(36).slice(2)}`;
+  const uid = $props.id();
+  const titleId = `confirm-title-${uid}`;
+  const bodyId = `confirm-body-${uid}`;
 
   function cancel(): void {
     if (busy) return; // don't yank a dialog out from under an in-flight action
@@ -49,27 +50,18 @@
     oncancel?.();
   }
 
-  const reduce =
-    typeof window !== 'undefined' &&
-    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const reduce = prefersReducedMotion();
   const pop = reduce ? { duration: 0 } : { duration: 180, start: 0.96 };
   const dim = reduce ? { duration: 0 } : { duration: 180 };
 
   // Lock background scroll while the dialog is open.
-  $effect(() => {
-    if (!open || typeof document === 'undefined') return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  });
+  $effect(() => (open ? lockBodyScroll() : undefined));
 </script>
 
 {#if open}
   <!-- Backdrop dismisses; keyboard users use Escape or the Cancel button, so it carries no key handler. -->
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="backdrop" transition:fade={dim} onclick={cancel} aria-hidden="true"></div>
+  <div class="ui-backdrop" transition:fade={dim} onclick={cancel} aria-hidden="true"></div>
 
   <div class="wrap">
     <div
@@ -97,12 +89,6 @@
 <svelte:window onkeydown={(event) => open && event.key === 'Escape' && cancel()} />
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: var(--z-overlay);
-    background: rgba(0, 0, 0, 0.55);
-  }
   .wrap {
     position: fixed;
     inset: 0;

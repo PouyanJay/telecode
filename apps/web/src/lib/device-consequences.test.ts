@@ -41,6 +41,11 @@ describe('deviceConsequences', () => {
     expect(deviceConsequences('dev-a', registry, live)).toEqual({ ending: 0, awaiting: 0 });
   });
 
+  it('excludes error-status sessions (both terminal states are already over)', () => {
+    const registry = [reg('s1', 'dev-a', 'error'), reg('s2', 'dev-a', 'running')];
+    expect(deviceConsequences('dev-a', registry, new Map())).toEqual({ ending: 1, awaiting: 0 });
+  });
+
   it('treats idle and offline_paused as non-terminal (still ended by a revoke)', () => {
     const registry = [reg('s1', 'dev-a', 'offline_paused'), reg('s2', 'dev-a', 'idle')];
     expect(deviceConsequences('dev-a', registry, new Map())).toEqual({ ending: 2, awaiting: 0 });

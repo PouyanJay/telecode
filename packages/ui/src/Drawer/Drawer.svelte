@@ -2,7 +2,7 @@
   import type { Snippet } from 'svelte';
   import { fade, fly } from 'svelte/transition';
 
-  import { trapFocus } from '../actions';
+  import { lockBodyScroll, prefersReducedMotion, trapFocus } from '../actions';
   import { IconButton } from '../IconButton';
 
   /**
@@ -29,30 +29,21 @@
 
   // Captured once at mount: Svelte's fly/fade take a static config object, so a reactive MediaQueryList
   // would buy nothing without a custom transition factory. Re-evaluated each time the drawer remounts.
-  const reduce =
-    typeof window !== 'undefined' &&
-    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const reduce = prefersReducedMotion();
   const mobile =
     typeof window !== 'undefined' && window.matchMedia?.('(max-width: 640px)').matches === true;
   const slide = reduce ? { duration: 0 } : mobile ? { y: 360, duration: 260 } : { x: 440, duration: 260 };
   const dim = reduce ? { duration: 0 } : { duration: 180 };
 
   // Lock the page behind the drawer so background scroll doesn't bleed through while it's open.
-  $effect(() => {
-    if (!open || typeof document === 'undefined') return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  });
+  $effect(() => (open ? lockBodyScroll() : undefined));
 </script>
 
 {#if open}
   <!-- The backdrop is a decorative dismiss target; keyboard users dismiss via Escape or the Close
        button, so it carries no key handler by design. -->
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="backdrop" transition:fade={dim} onclick={close} aria-hidden="true"></div>
+  <div class="ui-backdrop" transition:fade={dim} onclick={close} aria-hidden="true"></div>
 
   <div
     class="drawer"
@@ -82,12 +73,6 @@
 <svelte:window onkeydown={(event) => open && event.key === 'Escape' && close()} />
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: var(--z-overlay);
-    background: rgba(0, 0, 0, 0.55);
-  }
   .drawer {
     position: fixed;
     inset: 0 0 0 auto;

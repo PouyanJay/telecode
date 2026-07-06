@@ -94,7 +94,7 @@
                 </span>
                 <div class="rowaction">
                   <button
-                    class="revoke-btn"
+                    class="row-btn row-btn-danger"
                     type="button"
                     onclick={() => askRevoke(device.id, device.name)}
                     aria-label="Revoke {device.name}"
@@ -127,10 +127,10 @@
                   <span class="os mono">{device.os ?? '—'}</span>
                   <div class="reauth-cell">
                     {#if device.pendingReauth}
-                      <Pill label="AWAITING RE-AUTH" tone="warning" pulse />
+                      <Pill label="AWAITING RE-AUTH" tone="warning" dot pulse />
                     {:else}
                       <button
-                        class="revoke-btn"
+                        class="row-btn"
                         type="button"
                         aria-expanded={reauthorizingId === device.id}
                         onclick={() =>
@@ -327,8 +327,9 @@
   .revoked-outage {
     margin-top: var(--space-6);
   }
-  /* The trigger reads as a quiet control that turns danger on intent (matches the panel's hairline rows). */
-  .revoke-btn {
+  /* A quiet row-level control (matches the panel's hairline rows). The danger modifier turns the
+     destructive Revoke trigger red on intent; the plain variant (Re-authorize) stays neutral. */
+  .row-btn {
     padding: 5px var(--space-3);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm);
@@ -341,11 +342,14 @@
       color var(--dur-fast) var(--ease),
       border-color var(--dur-fast) var(--ease);
   }
-  .revoke-btn:hover {
+  .row-btn:hover {
     color: var(--text);
-    border-color: var(--border-strong);
   }
-  .revoke-btn:focus-visible {
+  .row-btn-danger:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+  .row-btn:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--focus-ring);
   }

@@ -377,10 +377,6 @@ export async function mintChannelToken(sessionToken: string): Promise<string | n
 }
 
 /**
- * Approve a pending device pairing for the authenticated user (server-derived). Service-secret guarded;
- * the relay binds the device to `userId` — the client never supplies it. Resolves true on success.
- */
-/**
  * The outcome of a device approval. `restored` is true when the approval re-authorized a revoked
  * device (identity + history preserved) rather than pairing a new one, and `deviceName` names it so
  * the activate page can say so. A pre-restore relay (deploy skew) returns just `{ ok: true }` → we
@@ -396,16 +392,22 @@ export async function approveDevice(
   userCode: string,
   userId: string,
 ): Promise<ApproveDeviceResult> {
-  const res = await fetch(`${RELAY_HTTP_URL}/device/approve`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-telecode-service-secret': SERVICE_SECRET },
-    body: JSON.stringify({ user_code: userCode, user_id: userId }),
-  });
-  if (!res.ok) return { ok: false, restored: false, deviceName: null };
-  // Tolerate an older relay that returns a bare { ok: true } with no restore fields.
-  const parsed = deviceApproveResponseSchema.safeParse(await res.json().catch(() => null));
-  if (!parsed.success) return { ok: true, restored: false, deviceName: null };
-  return { ok: true, restored: parsed.data.restored, deviceName: parsed.data.device_name };
+  const failure: ApproveDeviceResult = { ok: false, restored: false, deviceName: null };
+  try {
+    const res = await fetch(`${RELAY_HTTP_URL}/device/approve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-telecode-service-secret': SERVICE_SECRET },
+      body: JSON.stringify({ user_code: userCode, user_id: userId }),
+    });
+    if (!res.ok) return failure;
+    // Tolerate an older relay that returns a bare { ok: true } with no restore fields.
+    const parsed = deviceApproveResponseSchema.safeParse(await res.json().catch(() => null));
+    if (!parsed.success) return { ok: true, restored: false, deviceName: null };
+    return { ok: true, restored: parsed.data.restored, deviceName: parsed.data.device_name };
+  } catch {
+    // Relay unreachable — a retryable failure, not a thrown 500 at the activate action.
+    return failure;
+  }
 }
 
 /** Revoke a session (logout). Best-effort. */

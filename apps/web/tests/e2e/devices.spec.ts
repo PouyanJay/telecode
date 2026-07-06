@@ -149,10 +149,9 @@ test('revoke a device, then re-authorize it back to the same identity with its h
 
   await gotoDevices(page);
   // Back in the active list, gone from Revoked (this run's device name is unique to this test).
-  await expect(main.getByRole('listitem').filter({ hasText: deviceName })).toContainText(
-    paired.deviceId.slice(0, 18),
-  );
-  await expect(main.getByText('AWAITING RE-AUTH')).toBeHidden();
+  const restoredRow = main.getByRole('listitem').filter({ hasText: deviceName });
+  await expect(restoredRow).toContainText(paired.deviceId.slice(0, 18));
+  await expect(restoredRow.getByText('AWAITING RE-AUTH')).toBeHidden();
 });
 
 test('the activate page confirms a restore preserved the device history', async ({ page }) => {
@@ -166,10 +165,11 @@ test('the activate page confirms a restore preserved the device history', async 
   await signIn(page);
   // Revoke via the relay directly (owner-scoped by the session token), then re-pair the daemon half
   // and enter the code on /activate.
-  await fetch(`${RELAY_HTTP}/me/devices/${paired.deviceId}`, {
+  const del = await fetch(`${RELAY_HTTP}/me/devices/${paired.deviceId}`, {
     method: 'DELETE',
     headers: { authorization: `Bearer ${await sessionToken(page)}` },
   });
+  if (!del.ok) throw new Error(`revoke setup failed: ${del.status}`);
 
   // Daemon requests a restore code (unapproved) — the code the user will type.
   const codeRes = await fetch(`${RELAY_HTTP}/device/code`, {
