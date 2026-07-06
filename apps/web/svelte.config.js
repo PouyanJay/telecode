@@ -8,7 +8,12 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
  */
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
-  preprocess: vitePreprocess(),
+  // `script: true` strips <script lang="ts"> with esbuild BEFORE the Svelte compiler. The compiler's
+  // native type stripping (the plugin's default on Svelte 5) drops the annotation of an optional
+  // parameter but leaves its `?` — `(message?: string)` becomes the invalid JS `(message?)` — which
+  // breaks `vite build`/`vite dev` (and broke the prod deploy of 7e8f940) while svelte-check and
+  // vitest stay green. esbuild erases the full TS syntax, so the build matches what the gates check.
+  preprocess: vitePreprocess({ script: true }),
   kit: {
     adapter: adapter(),
   },
