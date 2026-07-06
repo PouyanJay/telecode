@@ -18,28 +18,27 @@
   } = $props();
 </script>
 
+{#snippet cellContent(segment: ThreadSegment, index: number)}
+  {@const count = entryCountOf(segment.sessionId)}
+  <span class="eyebrow">SEGMENT {index + 1} · {segmentLabel(segment.origin)}</span>
+  <span class="meta mono">
+    {index > 0 ? 'taken over ' : 'started '}{clockTime(segment.startedAt)}{count !== null
+      ? ` · ${count} ${count === 1 ? 'entry' : 'entries'}`
+      : ''}
+  </span>
+{/snippet}
+
 <nav class="strip hairline-b" aria-label="Conversation lineage">
   <ol class="segs" role="list">
     {#each segments as segment, i (segment.sessionId)}
-      {@const count = entryCountOf(segment.sessionId)}
       <li class="seg hairline-r" class:current={segment.isCurrent}>
         {#if segment.isCurrent}
           <span class="cell" aria-current="page">
-            <span class="eyebrow">SEGMENT {i + 1} · {segmentLabel(segment.origin)}</span>
-            <span class="meta mono">
-              {i > 0 ? 'taken over ' : 'started '}{clockTime(segment.startedAt)}{count !== null
-                ? ` · ${count} ${count === 1 ? 'entry' : 'entries'}`
-                : ''}
-            </span>
+            {@render cellContent(segment, i)}
           </span>
         {:else}
           <a class="cell" href="/sessions/{segment.sessionId}">
-            <span class="eyebrow">SEGMENT {i + 1} · {segmentLabel(segment.origin)}</span>
-            <span class="meta mono">
-              {i > 0 ? 'taken over ' : 'started '}{clockTime(segment.startedAt)}{count !== null
-                ? ` · ${count} ${count === 1 ? 'entry' : 'entries'}`
-                : ''}
-            </span>
+            {@render cellContent(segment, i)}
           </a>
         {/if}
       </li>
