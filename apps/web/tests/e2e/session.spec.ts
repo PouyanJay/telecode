@@ -172,10 +172,12 @@ test('the launched session appears in the dashboard list with live status', asyn
   await page.getByRole('link', { name: 'Back to sessions' }).click();
   await expect(page).toHaveURL(/\/$/);
 
-  // This specific session is listed, showing its live awaiting-input status (sorted to the top).
-  const row = page.getByRole('link', { name: /Add a hello line to the README/ });
-  await expect(row).toBeVisible();
-  await expect(row).toContainText('AWAITING INPUT');
+  // An awaiting session surfaces at the top of the dashboard as a needs-you inbox card (approval
+  // reliability T6): named ask, the session title linking in, and the inline decision actions.
+  const card = page.getByRole('article', { name: 'APPROVAL NEEDED' });
+  await expect(card).toBeVisible();
+  await expect(card.getByRole('link', { name: /Add a hello line to the README/ })).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible();
 });
 
 test('reopen = reconnect: the transcript restores after a reload (daemon backfill)', async ({
@@ -215,8 +217,9 @@ test('rejects the gated tool and the session finishes without running it', async
   await signIn(page);
   await launchFromDashboard(page, 'Try to overwrite a file');
 
-  await expect(page.getByRole('button', { name: 'Reject' })).toBeVisible();
-  await page.getByRole('button', { name: 'Reject' }).click();
+  // `exact` — "Reject with note…" (deny-with-note, approval reliability T5) also matches otherwise.
+  await expect(page.getByRole('button', { name: 'Reject', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Reject', exact: true }).click();
 
   await expect(page.getByText('REJECTED')).toBeVisible();
   await expect(page.getByText('Finished')).toBeVisible();
