@@ -2151,6 +2151,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     // Refine the derived title once a chat-only session (no PreToolUse) mirrors its first prompt (T5).
     refineAdoptedTitleFromPrompt(knownId);
+    // A Stop proves the external conversation is alive: a restart's `needs_restart` guess for this
+    // adopted session is disproven (chat-only turns fire no PreToolUse, so the revive must live
+    // here too, not only on the tool path).
+    if (recordFor(knownId).status === 'needs_restart') setStatus(knownId, 'running');
     // A Stop AFTER an offering one means a NEW local turn ran — the user answered at the device, so
     // any still-pending offer is stale. Cleared BEFORE the offer block below, which may then offer
     // afresh if THIS turn also ended on a free-form question.
@@ -2293,8 +2297,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     adoptedRec.origin = 'external';
     adoptedRec.claudeSessionId = event.session_id;
     if (event.cwd !== undefined) adoptedRec.cwd = event.cwd;
-    // An adopted session is live the moment we first see it.
-    if (adoptedRec.status === 'starting') setStatus(telecodeSessionId, 'running');
+    // An adopted session is live the moment we first see it — and hook activity DISPROVES a
+    // restart's honest `needs_restart` guess (T4 restores awaiting_input that way): the external
+    // conversation demonstrably continues, so the session revives rather than reading dead forever.
+    if (adoptedRec.status === 'starting' || adoptedRec.status === 'needs_restart') {
+      setStatus(telecodeSessionId, 'running');
+    }
     // E2E (invariant #5): mint this session's content key so its frames go to the relay as ciphertext, not
     // plaintext. Idempotent. The key is delivered to the browser on `session.subscribe` (it announces its
     // pubkey then), exactly like a launched session's reconnect. Cleartext only on a pre-E2E daemon (tests).
