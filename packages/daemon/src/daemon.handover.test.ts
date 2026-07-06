@@ -19,6 +19,7 @@ import {
   type AgentRunResult,
 } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
+import { createSessionStore, type SessionStore } from './sessions/session-store';
 import {
   decryptWithContentKey,
   encryptWithContentKey,
@@ -115,6 +116,7 @@ describe('daemon: free-form handover & resume', () => {
   async function start(
     agentAdapter: AgentAdapter,
     keyPair?: { publicKey: string; privateKey: string },
+    sessionStore?: SessionStore,
   ): Promise<void> {
     daemon = createDaemon({
       relayUrl: relay.url,
@@ -123,6 +125,7 @@ describe('daemon: free-form handover & resume', () => {
       agentAdapter,
       adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
       ...(keyPair ? { keyPair } : {}),
+      ...(sessionStore ? { sessionStore } : {}),
     });
     await daemon.start();
   }
@@ -643,6 +646,36 @@ describe('daemon: free-form handover & resume', () => {
       tool_name: 'Read',
       tool_input: {},
     });
+
+    const reconciled = await relay.waitForFrame((e) => e.type === 'session.history');
+    const payload = reconciled.payload as { status: string; entries: { kind: string }[] };
+    expect(payload.status).toBe('running');
+    expect(payload.entries.some((entry) => entry.kind === 'handover')).toBe(false);
+  });
+
+  it('survives a daemon RESTART: a persisted un-answered offer still clears on local activity', async () => {
+    // The in-memory pendingHandovers map dies with the process; only the transcript (with the
+    // pending offer entry) is persisted. The supersede must be transcript-driven, or a restart
+    // resurrects READY TO TAKE OVER forever — the exact failure seen in production.
+    const store = createSessionStore({ dir: join(dir, 'store') });
+    await start(createFakeAgentAdapter([]), undefined, store);
+    await adopt(relay, socketPath);
+    await hookRpc(socketPath, stopEvent('Which database should we use for the app?'));
+    await relay.waitForFrame((e) => e.type === 'agent.handover');
+    // The offering Stop persists the record (pending offer + awaiting_input) before we kill it.
+    await daemon?.stop();
+
+    // A fresh process restores from disk (empty offer map) and the conversation continues locally.
+    daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
+      sessionStore: store,
+    });
+    await daemon.start();
+    await hookRpc(socketPath, stopEvent('Done — applied the Postgres setup as you asked.'));
 
     const reconciled = await relay.waitForFrame((e) => e.type === 'session.history');
     const payload = reconciled.payload as { status: string; entries: { kind: string }[] };

@@ -2108,24 +2108,30 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * dropped requestId lands on the existing settled-offer reconcile path.
    */
   function supersedePendingHandoverByLocalActivity(telecodeSessionId: string): void {
-    const stale = [...pendingHandovers.entries()].find(
-      ([, offer]) => offer.telecodeSessionId === telecodeSessionId,
-    );
-    if (stale === undefined) return;
-    const [requestId] = stale;
-    pendingHandovers.delete(requestId);
     const rec = recordFor(telecodeSessionId);
-    rec.transcript = rec.transcript.filter(
-      (entry) => !(entry.kind === 'handover' && entry.requestId === requestId),
-    );
+    // Never resurrect a session that already ended (e.g. a handed-off parent whose Claude session
+    // keeps running locally) — its story is over regardless of leftover entries.
+    if (isSessionEndStatus(rec.status)) return;
+    // TRANSCRIPT-driven, not map-driven: an un-answered offer entry can outlive the in-memory
+    // `pendingHandovers` map across a daemon restart (T4 persists the transcript, not the map) —
+    // and it must still clear. An ANSWERED offer carries `answerText` and is never pruned.
+    const isStaleOffer = (entry: SessionHistoryEntry): boolean =>
+      entry.kind === 'handover' && entry.answerText === undefined;
+    if (!rec.transcript.some(isStaleOffer)) return;
+    for (const [requestId, offer] of pendingHandovers) {
+      if (offer.telecodeSessionId === telecodeSessionId) pendingHandovers.delete(requestId);
+    }
+    rec.transcript = rec.transcript.filter((entry) => !isStaleOffer(entry));
     setStatus(telecodeSessionId, 'running');
+    // Persist the pruned state too — a restart in this window must not resurrect the offer.
+    persistSession(telecodeSessionId, rec);
     sendForSession(
       adoptedSource(telecodeSessionId),
       'session.history',
       historyPayloadFor(telecodeSessionId),
     );
     log.info(
-      { deviceId: options.deviceId, sessionId: telecodeSessionId, requestId },
+      { deviceId: options.deviceId, sessionId: telecodeSessionId },
       'daemon: pending handover superseded by local activity',
     );
   }
