@@ -592,4 +592,61 @@ describe('daemon: free-form handover & resume', () => {
       'Which region should we deploy to?',
     );
   });
+
+  it('a later LOCAL turn supersedes an unanswered offer (no eternal READY TO TAKE OVER)', async () => {
+    await start(createFakeAgentAdapter([]));
+    await adopt(relay, socketPath);
+
+    await hookRpc(socketPath, stopEvent('Which database should we use for the app?'));
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    const requestId = (offer.payload as { requestId: string }).requestId;
+
+    // The user answers AT THE DEVICE: the next turn runs locally and ends on a plain statement.
+    await hookRpc(socketPath, stopEvent('Done — applied the Postgres setup as you asked.'));
+
+    // The daemon reconciles watchers: back to running, and the stale offer entry is GONE.
+    const reconciled = await relay.waitForFrame((e) => e.type === 'session.history');
+    const payload = reconciled.payload as { status: string; entries: { kind: string }[] };
+    expect(payload.status).toBe('running');
+    expect(payload.entries.some((entry) => entry.kind === 'handover')).toBe(false);
+
+    // A late answer from a slow tab lands on the settled-offer path (reconcile, never a fork).
+    relay.send(
+      makeEnvelope({
+        type: 'handover.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: PARENT_SESSION,
+        payload: { requestId, answerText: 'Use Postgres.' },
+      }),
+    );
+    const lateReconcile = await relay.waitForFrame((e) => e.type === 'session.history');
+    expect(
+      (lateReconcile.payload as { entries: { kind: string }[] }).entries.some(
+        (entry) => entry.kind === 'handover',
+      ),
+    ).toBe(false);
+  });
+
+  it('a new LOCAL tool call supersedes the offer before its own gate', async () => {
+    await start(createFakeAgentAdapter([]));
+    await adopt(relay, socketPath);
+
+    await hookRpc(socketPath, stopEvent('Which database should we use for the app?'));
+    await relay.waitForFrame((e) => e.type === 'agent.handover');
+
+    // The conversation continues locally: a read-only PreToolUse fires (no remote gate of its own).
+    await hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+
+    const reconciled = await relay.waitForFrame((e) => e.type === 'session.history');
+    const payload = reconciled.payload as { status: string; entries: { kind: string }[] };
+    expect(payload.status).toBe('running');
+    expect(payload.entries.some((entry) => entry.kind === 'handover')).toBe(false);
+  });
 });
