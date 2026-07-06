@@ -470,3 +470,35 @@ describe('daemon resume-as-new (session-identity T8)', () => {
     }
   });
 });
+
+describe('resume-as-new variants: every terminal parent status is continuable (T9)', () => {
+  it.each([
+    { endReason: undefined, endedAs: 'done' },
+    { endReason: 'turn_limit' as const, endedAs: 'turn_limit' },
+    { endReason: 'execution_error' as const, endedAs: 'error' },
+  ])('a parent ended as $endedAs forks into a linked child', async ({ endReason, endedAs }) => {
+    const runCalls: RunCall[] = [];
+    const ids = await startDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'ran' }], {
+        sessionId: `sdk-${endedAs}`,
+        ...(endReason !== undefined ? { endReason } : {}),
+        onRun: (call) => runCalls.push(call),
+      }),
+    );
+    const { relay } = ids;
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    const ended = await launchToEnd(relay, ids, parentId, `end as ${endedAs}`);
+    expect(ended.payload).toMatchObject({ status: endedAs });
+
+    sendResumeNew(relay, ids, parentId, { prompt: `continue after ${endedAs}` });
+    const announce = await ackChained(relay, ids, childId);
+    expect(announce.parentSessionId).toBe(parentId);
+    await relay.waitForFrame(ofType('session.ended', childId));
+    expect(runCalls.at(-1)).toMatchObject({
+      prompt: `continue after ${endedAs}`,
+      resume: `sdk-${endedAs}`,
+      forkSession: true,
+    });
+  });
+});

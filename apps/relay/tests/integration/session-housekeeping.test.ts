@@ -28,6 +28,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 
 interface WireSession {
   id: string;
+  title: string | null;
   status: string;
   archived_at: string | null;
   updated_at: string;
@@ -636,6 +637,59 @@ describe('session housekeeping: GET pagination + archive + delete', () => {
         daemon.close();
         watcher.close();
       }
+    });
+  });
+
+  describe('list variants: the full status × archive matrix buckets correctly (T9)', () => {
+    it('active always in full; ended paginate; archived only in the archived view; legacy titles intact', async () => {
+      const alice = await seedUser('alice');
+      const base = { userId: alice.userId, deviceId: alice.deviceId };
+      // Every persisted status the registry can hold, plus the archive shelf where it is legal.
+      const active: string[] = [];
+      for (const status of ['starting', 'running', 'awaiting_input']) {
+        active.push(await seedSessionRow({ ...base, status, updatedAt: '2026-07-03T00:00:00Z' }));
+      }
+      const ended: string[] = [];
+      for (const status of ['done', 'error', 'turn_limit', 'needs_restart']) {
+        ended.push(await seedSessionRow({ ...base, status, updatedAt: '2026-07-02T00:00:00Z' }));
+      }
+      const archived: string[] = [];
+      for (const status of ['done', 'error', 'turn_limit', 'needs_restart']) {
+        archived.push(
+          await seedSessionRow({
+            ...base,
+            status,
+            updatedAt: '2026-07-01T00:00:00Z',
+            archived: true,
+          }),
+        );
+      }
+      // A legacy pre-Phase-6 row: cleartext title, no sealed blobs — must surface as-is.
+      const legacy = await admin.query<{ id: string }>(
+        `insert into sessions (user_id, device_id, title, status, updated_at, ended_at)
+         values ($1, $2, 'legacy cleartext', 'done', '2026-07-02T12:00:00Z', '2026-07-02T12:00:00Z')
+         returning id`,
+        [alice.userId, alice.deviceId],
+      );
+
+      const defaultList = await listSessions(alice.token);
+      const defaultIds = defaultList.body.sessions.map((s) => s.id);
+      for (const id of [...active, ...ended, legacy.rows[0]!.id]) expect(defaultIds).toContain(id);
+      for (const id of archived) expect(defaultIds).not.toContain(id);
+      const legacyRow = defaultList.body.sessions.find((s) => s.id === legacy.rows[0]!.id) as
+        | (WireSession & { title: string | null })
+        | undefined;
+      expect(legacyRow?.title).toBe('legacy cleartext');
+
+      const archivedList = await listSessions(alice.token, '?archived=true');
+      expect(archivedList.body.sessions.map((s) => s.id).sort()).toEqual([...archived].sort());
+
+      // The ended section still paginates inside the mixed account (active never consumes the limit).
+      const page1 = await listSessions(alice.token, '?limit=2');
+      const page1Ids = page1.body.sessions.map((s) => s.id);
+      for (const id of active) expect(page1Ids).toContain(id);
+      expect(page1Ids.filter((id) => [...ended, legacy.rows[0]!.id].includes(id))).toHaveLength(2);
+      expect(page1.body.next_cursor).not.toBeNull();
     });
   });
 });

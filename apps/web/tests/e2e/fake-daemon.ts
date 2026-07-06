@@ -1,7 +1,15 @@
 import {
+  deriveSharedKey,
+  exportContentKey,
+  generateContentKey,
+  importContentKey,
+  importIdentityPrivateKey,
+  importIdentityPublicKey,
   makeEnvelope,
+  openPayload,
   parseEnvelope,
   permissionDecisionPayloadSchema,
+  sealPayload,
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
@@ -64,6 +72,74 @@ const CHAIN_CHILD_REF = 'chain-child';
 // registry, and a fixed title would make "exactly one thread row" impossible on a reused local DB.
 const CHAIN_PARENT_TITLE = process.env.FAKE_CHAIN_TITLE ?? 'Fix the pairing bug';
 
+/**
+ * OPT-IN E2E mode (T9): with a private key in the env (and the matching public key registered at
+ * pairing), this fake speaks the daemon side of the real crypto — unseals box-sealed launches,
+ * mints + delivers per-session content keys, and opens content-key-sealed browser actions — so
+ * E2E-gated flows (rename) can be driven end-to-end. Outbound frames stay cleartext (the browser
+ * renders either); the sealed-outbound path is proven by the daemon package's own integration tests.
+ */
+const e2ePrivateKey = process.env.FAKE_PRIVATE_KEY;
+const contentKeys = new Map<string, string>(); // sessionId -> base64 content key
+
+async function sharedWith(browserPublicKeyB64: string): Promise<CryptoKey> {
+  return deriveSharedKey(
+    await importIdentityPrivateKey(e2ePrivateKey!),
+    await importIdentityPublicKey(browserPublicKeyB64),
+  );
+}
+
+/** Open a launch-style frame box-sealed to this daemon; cleartext channels pass through untouched. */
+async function openInboundLaunch(envelope: Envelope): Promise<unknown> {
+  if (
+    e2ePrivateKey === undefined ||
+    typeof envelope.payload !== 'string' ||
+    envelope.sender_public_key === undefined
+  ) {
+    return envelope.payload;
+  }
+  return openPayload(
+    { payload: envelope.payload, nonce: envelope.nonce },
+    await sharedWith(envelope.sender_public_key),
+  );
+}
+
+/** Open a browser action sealed under the session content key; cleartext passes through untouched. */
+async function openSessionPayload(envelope: Envelope): Promise<unknown> {
+  const key = envelope.session_id !== undefined ? contentKeys.get(envelope.session_id) : undefined;
+  if (key === undefined || typeof envelope.payload !== 'string' || envelope.nonce === '') {
+    return envelope.payload;
+  }
+  return openPayload(
+    { payload: envelope.payload, nonce: envelope.nonce },
+    await importContentKey(key, false),
+  );
+}
+
+/** Mint (once) + deliver the session's content key, box-sealed to the announcing browser's pubkey. */
+async function deliverContentKey(sessionId: string, browserPublicKeyB64: string): Promise<void> {
+  if (e2ePrivateKey === undefined) return;
+  let key = contentKeys.get(sessionId);
+  if (key === undefined) {
+    key = await exportContentKey(await generateContentKey(true));
+    contentKeys.set(sessionId, key);
+  }
+  const sealed = await sealPayload({ key }, await sharedWith(browserPublicKeyB64));
+  // The one sealed outbound frame this fake sends — built directly (the shared `send` is cleartext-only).
+  socket.send(
+    JSON.stringify(
+      makeEnvelope({
+        type: 'session.key',
+        userId,
+        deviceId,
+        sessionId,
+        payload: sealed.payload,
+        nonce: sealed.nonce,
+      }),
+    ),
+  );
+}
+
 const socket = new WebSocket(relayUrl);
 let requestSeq = 0;
 
@@ -102,6 +178,8 @@ socket.addEventListener('open', () => {
   send('hello', { role: 'daemon', token: deviceToken });
 });
 
+// Frames are handled in order through a chain (decryption is async), mirroring the real daemon.
+let inbound: Promise<void> = Promise.resolve();
 socket.addEventListener('message', (event: MessageEvent) => {
   let envelope: Envelope;
   try {
@@ -109,7 +187,13 @@ socket.addEventListener('message', (event: MessageEvent) => {
   } catch {
     return;
   }
+  inbound = inbound
+    .then(() => handleEnvelope(envelope))
+    // Never wedge the chain — but a crypto/handler failure must reach stdout for log triangulation.
+    .catch((err: unknown) => console.error('fake-daemon: frame handling failed', err));
+});
 
+async function handleEnvelope(envelope: Envelope): Promise<void> {
   if (envelope.type === 'hello.ack') {
     if (adoptAnnounceTitle !== undefined) {
       send('session.adopted', { clientRef: ADOPT_ANNOUNCE_REF, title: adoptAnnounceTitle });
@@ -205,10 +289,14 @@ socket.addEventListener('message', (event: MessageEvent) => {
   }
 
   if (envelope.type === 'session.launch') {
-    const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
+    const launch = sessionLaunchPayloadSchema.safeParse(await openInboundLaunch(envelope));
     const rec = recordFor(sid);
     if (launch.success) rec.transcript.push({ kind: 'user', text: launch.data.prompt });
     rec.status = 'running';
+    // E2E: the launching browser gets the session's content key BEFORE any frame it must pair on.
+    if (envelope.sender_public_key !== undefined) {
+      await deliverContentKey(sid, envelope.sender_public_key);
+    }
     const clientRef = launch.success ? launch.data.clientRef : undefined;
     send('session.started', clientRef !== undefined ? { clientRef } : {}, sid);
     // Session identity (ux Phase 6): the real daemon derives a title from the first prompt and emits
@@ -264,7 +352,7 @@ socket.addEventListener('message', (event: MessageEvent) => {
 
   // Resume-as-new (T8): mint a linked child via the chained dance; the ACK handler above runs it.
   if (envelope.type === 'session.resume_new') {
-    const resume = sessionResumeNewPayloadSchema.safeParse(envelope.payload);
+    const resume = sessionResumeNewPayloadSchema.safeParse(await openInboundLaunch(envelope));
     if (!resume.success) return;
     const ref = `resume-child-${++requestSeq}`;
     pendingResumes.set(ref, {
@@ -276,7 +364,7 @@ socket.addEventListener('message', (event: MessageEvent) => {
   }
 
   if (envelope.type === 'permission.decision') {
-    const decision = permissionDecisionPayloadSchema.safeParse(envelope.payload);
+    const decision = permissionDecisionPayloadSchema.safeParse(await openSessionPayload(envelope));
     if (!decision.success) return;
     const rec = recordFor(sid);
     const gate = rec.transcript.find(
@@ -308,7 +396,7 @@ socket.addEventListener('message', (event: MessageEvent) => {
   }
 
   if (envelope.type === 'session.control') {
-    const control = sessionControlPayloadSchema.safeParse(envelope.payload);
+    const control = sessionControlPayloadSchema.safeParse(await openSessionPayload(envelope));
     if (!control.success) return;
     const rec = recordFor(sid);
     // interrupt | end: settle any pending gate and end the current turn (mirrors the daemon's stop-turn).
@@ -321,7 +409,11 @@ socket.addEventListener('message', (event: MessageEvent) => {
 
   if (envelope.type === 'session.subscribe') {
     // Reopen = reconnect: backfill the recorded transcript so a reloaded browser restores its view.
+    // E2E: re-deliver the content key to the announcing browser first (idempotent, same key).
     const rec = records.get(sid);
+    if (envelope.sender_public_key !== undefined && rec !== undefined) {
+      await deliverContentKey(sid, envelope.sender_public_key);
+    }
     send(
       'session.history',
       rec
@@ -330,7 +422,7 @@ socket.addEventListener('message', (event: MessageEvent) => {
       sid,
     );
   }
-});
+}
 
 socket.addEventListener('error', () => {
   console.error('fake-daemon: socket error');

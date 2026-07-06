@@ -21,12 +21,20 @@ export interface PairedDevice {
   sessionToken: string;
 }
 
-/** Run the device-grant flow; when `priorDeviceToken` is passed the relay may restore the same row. */
+export interface PairDeviceOptions {
+  /** A revoked device's prior token — the relay may restore the same row (identity preserved). */
+  readonly priorDeviceToken?: string;
+  /** The daemon's X25519 public key (base64) — registers the device for E2E channels. */
+  readonly publicKey?: string;
+}
+
+/** Run the device-grant flow (see {@link PairDeviceOptions} for restore / E2E variations). */
 export async function pairDevice(
   serviceSecret: string,
   name: string,
-  priorDeviceToken?: string,
+  options: PairDeviceOptions = {},
 ): Promise<PairedDevice> {
+  const { priorDeviceToken, publicKey } = options;
   const svc = { 'content-type': 'application/json', 'x-telecode-service-secret': serviceSecret };
 
   const sessionRes = await fetch(`${RELAY_HTTP}/auth/session`, {
@@ -45,6 +53,7 @@ export async function pairDevice(
     body: JSON.stringify({
       name,
       ...(priorDeviceToken ? { prior_device_token: priorDeviceToken } : {}),
+      ...(publicKey ? { public_key: publicKey } : {}),
     }),
   });
   const { device_code, user_code } = (await codeRes.json()) as {

@@ -92,3 +92,26 @@ describe('appendSessionRows', () => {
     expect(merged[0]!.title).toBe('loaded first');
   });
 });
+
+describe('page-helper variants (T9)', () => {
+  it('rejects a row with an unknown status (closed enum at the BFF boundary)', async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        okJson({ sessions: [{ ...wireRow('s1'), status: 'exploded' }], nextCursor: null }),
+      ),
+    );
+    expect(await fetchSessionPage({ cursor: 'C' })).toBeNull();
+  });
+
+  it('an empty page with a null cursor is valid (the list simply drained)', async () => {
+    stubFetch(() => Promise.resolve(okJson({ sessions: [], nextCursor: null })));
+    expect(await fetchSessionPage({ cursor: 'C' })).toEqual({ rows: [], nextCursor: null });
+  });
+
+  it('appendSessionRows tolerates empty inputs on either side', () => {
+    const row = buildRegistryRow({ id: 'only' });
+    expect(appendSessionRows([], [row])).toEqual([row]);
+    expect(appendSessionRows([row], [])).toEqual([row]);
+    expect(appendSessionRows([], [])).toEqual([]);
+  });
+});
