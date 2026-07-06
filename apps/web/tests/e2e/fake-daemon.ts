@@ -2,6 +2,8 @@ import {
   makeEnvelope,
   parseEnvelope,
   permissionDecisionPayloadSchema,
+  sessionAdoptedPayloadSchema,
+  sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
   sessionLaunchPayloadSchema,
   type Envelope,
@@ -34,6 +36,17 @@ const deviceId = required('FAKE_DEVICE_ID');
 const deviceToken = required('FAKE_DEVICE_TOKEN');
 
 const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
+
+/**
+ * Launch prompt that triggers the chained-thread dance (ux Phase 3): the daemon ends the trigger
+ * session immediately, announces an adopted "terminal" session with a mirrored transcript, then
+ * registers a telecode continuation chained to it — producing a real parent→child pair in the registry
+ * so the e2e can assert the collapsed thread row, lineage strip, and takeover divider.
+ */
+const CHAIN_PROMPT = 'chain a takeover';
+const CHAIN_PARENT_REF = 'chain-parent';
+const CHAIN_CHILD_REF = 'chain-child';
+const CHAIN_PARENT_TITLE = 'Fix the pairing bug';
 
 const socket = new WebSocket(relayUrl);
 let requestSeq = 0;
@@ -87,6 +100,46 @@ socket.addEventListener('message', (event: MessageEvent) => {
   const sid = envelope.session_id;
   if (sid === undefined) return;
 
+  // The relay's adopted-announce ACK: it minted the parent's registry row. Mirror a short "terminal"
+  // transcript (daemon-stamped ts, like the real mirror), end it, and register the continuation.
+  if (envelope.type === 'session.adopted') {
+    const ack = sessionAdoptedPayloadSchema.safeParse(envelope.payload);
+    if (!ack.success || ack.data.clientRef !== CHAIN_PARENT_REF) return;
+    const rec = recordFor(sid);
+    const base = Date.now() - 60 * 60_000; // the terminal stretch ran an hour ago
+    rec.transcript.push(
+      { kind: 'user', text: 'Investigate the flaky pairing', ts: base },
+      { kind: 'message', text: 'Found the race in the token poll', ts: base + 60_000 },
+    );
+    rec.status = 'done';
+    send('session.ended', { status: 'done' }, sid);
+    send('session.chained', {
+      clientRef: CHAIN_CHILD_REF,
+      parentSessionId: sid,
+      title: 'Continuing: fix the pairing bug',
+    });
+    return;
+  }
+
+  // The relay's chained ACK: the continuation's row exists, linked to the parent. Bring it live.
+  if (envelope.type === 'session.chained') {
+    const ack = sessionChainedPayloadSchema.safeParse(envelope.payload);
+    if (!ack.success || ack.data.clientRef !== CHAIN_CHILD_REF) return;
+    const rec = recordFor(sid);
+    // One stamp per entry, minted once — the live frame and the backfill must carry the SAME instant
+    // (the real daemon's record-time invariant).
+    const userTs = Date.now() - 5 * 60_000;
+    const messageTs = Date.now() - 4 * 60_000;
+    rec.transcript.push(
+      { kind: 'user', text: 'Ship the fix from here', ts: userTs },
+      { kind: 'message', text: 'Continuing in telecode', ts: messageTs },
+    );
+    rec.status = 'running';
+    send('session.started', {}, sid);
+    send('agent.message', { text: 'Continuing in telecode', ts: messageTs }, sid);
+    return;
+  }
+
   if (envelope.type === 'session.launch') {
     const launch = sessionLaunchPayloadSchema.safeParse(envelope.payload);
     const rec = recordFor(sid);
@@ -94,6 +147,16 @@ socket.addEventListener('message', (event: MessageEvent) => {
     rec.status = 'running';
     const clientRef = launch.success ? launch.data.clientRef : undefined;
     send('session.started', clientRef !== undefined ? { clientRef } : {}, sid);
+
+    if (launch.success && launch.data.prompt === CHAIN_PROMPT) {
+      // The trigger session's only job is to kick off the dance — end it and announce the parent.
+      rec.transcript.push({ kind: 'message', text: 'Chaining a takeover' });
+      send('agent.message', { text: 'Chaining a takeover' }, sid);
+      rec.status = 'done';
+      send('session.ended', { status: 'done' }, sid);
+      send('session.adopted', { clientRef: CHAIN_PARENT_REF, title: CHAIN_PARENT_TITLE });
+      return;
+    }
 
     rec.transcript.push({ kind: 'message', text: 'Planning the change' });
     send('agent.message', { text: 'Planning the change' }, sid);

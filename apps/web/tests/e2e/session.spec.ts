@@ -267,3 +267,49 @@ test('the launch drawer prompts to connect GitHub when no repo is available (dev
   await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
   await expect(page.getByText('Planning the change')).toBeVisible();
 });
+
+test('a taken-over conversation reads as ONE thread: crumb, lineage strip, takeover divider', async ({
+  page,
+}) => {
+  await signIn(page);
+  // The magic prompt makes the fake daemon mint an adopted "terminal" parent + a chained telecode
+  // continuation through the real relay/registry (see fake-daemon.ts).
+  await launchFromDashboard(page, 'chain a takeover');
+  await expect(page.getByLabel('Session details').getByText('DONE')).toBeVisible();
+
+  // Cold-load the dashboard until the registry serves the chain (the dance settles asynchronously).
+  const threadRow = () => page.getByRole('main').getByRole('link', { name: /Fix the pairing bug/ });
+  await expect(async () => {
+    await page.goto('/');
+    await expect(threadRow()).toHaveCount(1, { timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
+
+  // ONE collapsed row for the conversation — the parent has no row of its own — carrying the segment
+  // crumb: origin and the hop, with times.
+  await expect(threadRow()).toContainText('terminal');
+  await expect(threadRow()).toContainText('taken over');
+
+  // The row opens the LEAF (the live continuation), which tells the whole story:
+  await threadRow().click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/);
+  const strip = page.getByRole('navigation', { name: 'Conversation lineage' });
+  await expect(strip).toBeVisible();
+  await expect(strip).toContainText('SEGMENT 1 · terminal');
+  await expect(strip).toContainText('SEGMENT 2 · telecode');
+
+  // The inherited terminal transcript is inlined COLLAPSED above the takeover divider.
+  const disclosure = page.getByText(/earlier entries from the terminal segment/);
+  await expect(disclosure).toBeVisible();
+  await expect(page.getByText('Found the race in the token poll')).not.toBeVisible();
+  await disclosure.click();
+  await expect(page.getByText('Found the race in the token poll')).toBeVisible();
+  await expect(page.getByText(/Taken over in telecode/)).toBeVisible();
+
+  // Jumping to segment 1 (the superseded parent) shows the forward pointer instead of a dead end…
+  await strip.getByRole('link', { name: /SEGMENT 1/ }).click();
+  const forward = page.getByRole('link', { name: /Continued in telecode/ });
+  await expect(forward).toBeVisible();
+  // …and it navigates back into the continuation.
+  await forward.click();
+  await expect(page.getByText('Continuing in telecode')).toBeVisible();
+});

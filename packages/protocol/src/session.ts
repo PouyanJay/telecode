@@ -197,8 +197,20 @@ export const sessionReconcilePayloadSchema = z.object({
 });
 export type SessionReconcilePayload = z.infer<typeof sessionReconcilePayloadSchema>;
 
+/**
+ * A daemon-stamped entry creation time, epoch milliseconds (Phase 3 threads & lineage). Carried on every
+ * entry-producing message and on backfilled history entries so segment/entry times stay honest across
+ * reloads (a client receive-time lies after a reconnect). Optional for wire compatibility: an old daemon
+ * stamps nothing and the UI falls back to client receive-time; an old client's zod strips the field.
+ */
+export const entryTimestampSchema = z.number().int().nonnegative();
+export type EntryTimestamp = z.infer<typeof entryTimestampSchema>;
+
 /** Payload for `agent.message` (daemon → web): a chunk of streamed agent text. */
-export const agentMessagePayloadSchema = z.object({ text: z.string() });
+export const agentMessagePayloadSchema = z.object({
+  text: z.string(),
+  ts: entryTimestampSchema.optional(),
+});
 export type AgentMessagePayload = z.infer<typeof agentMessagePayloadSchema>;
 
 /**
@@ -214,6 +226,7 @@ export type AgentNoticePayload = z.infer<typeof agentNoticePayloadSchema>;
 export const agentToolUsePayloadSchema = z.object({
   toolName: z.string().min(1),
   input: z.record(z.unknown()),
+  ts: entryTimestampSchema.optional(),
 });
 export type AgentToolUsePayload = z.infer<typeof agentToolUsePayloadSchema>;
 
@@ -242,6 +255,7 @@ export const agentPermissionRequestPayloadSchema = z.object({
   requestId: z.string().min(1),
   toolName: z.string().min(1),
   input: z.record(z.unknown()),
+  ts: entryTimestampSchema.optional(),
 });
 export type AgentPermissionRequestPayload = z.infer<typeof agentPermissionRequestPayloadSchema>;
 
@@ -297,6 +311,7 @@ export type AgentQuestionItem = z.infer<typeof agentQuestionItemSchema>;
 export const agentQuestionPayloadSchema = z.object({
   requestId: z.string().min(1),
   questions: z.array(agentQuestionItemSchema).min(1).max(10),
+  ts: entryTimestampSchema.optional(),
 });
 export type AgentQuestionPayload = z.infer<typeof agentQuestionPayloadSchema>;
 
@@ -341,6 +356,7 @@ export const agentHandoverPayloadSchema = z.object({
   requestId: z.string().min(1),
   question: z.string().min(1).max(8000),
   summary: z.string().max(8000),
+  ts: entryTimestampSchema.optional(),
 });
 export type AgentHandoverPayload = z.infer<typeof agentHandoverPayloadSchema>;
 
@@ -404,12 +420,13 @@ export type SessionSubscribePayload = z.infer<typeof sessionSubscribePayloadSche
  * (`pending` still awaits a human); `allow`/`deny` render as approved/rejected.
  */
 export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('user'), text: z.string() }),
-  z.object({ kind: z.literal('message'), text: z.string() }),
+  z.object({ kind: z.literal('user'), text: z.string(), ts: entryTimestampSchema.optional() }),
+  z.object({ kind: z.literal('message'), text: z.string(), ts: entryTimestampSchema.optional() }),
   z.object({
     kind: z.literal('tool'),
     toolName: z.string().min(1),
     input: z.record(z.unknown()),
+    ts: entryTimestampSchema.optional(),
   }),
   z.object({
     kind: z.literal('permission'),
@@ -417,6 +434,7 @@ export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
     toolName: z.string().min(1),
     input: z.record(z.unknown()),
     decision: z.enum(['pending', 'allow', 'deny']),
+    ts: entryTimestampSchema.optional(),
   }),
   // An adopted-session multiple-choice question (Journey 2). Carries the question(s) so a replay can render
   // the picker; `answers` is present once the human has answered (one per question) and absent while pending
@@ -426,6 +444,7 @@ export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
     requestId: z.string().min(1),
     questions: z.array(agentQuestionItemSchema).min(1),
     answers: z.array(questionAnswerItemSchema).optional(),
+    ts: entryTimestampSchema.optional(),
   }),
   // A free-form handover offer (Journey 4). Carries the exact question + summary so a replay can render the
   // "continue here" card; `answerText` is present once the human took it over (resolved) and absent while
@@ -436,6 +455,7 @@ export const sessionHistoryEntrySchema = z.discriminatedUnion('kind', [
     question: z.string().min(1),
     summary: z.string(),
     answerText: z.string().min(1).optional(),
+    ts: entryTimestampSchema.optional(),
   }),
 ]);
 export type SessionHistoryEntry = z.infer<typeof sessionHistoryEntrySchema>;

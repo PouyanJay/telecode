@@ -11,6 +11,7 @@ function row(id: string, status: SessionStatus, createdAt: string): SessionRow {
     deviceName: 'studio-mbp',
     origin: 'launched',
     isContinuation: false,
+    parentSessionId: null,
     createdAt: new Date(createdAt),
   };
 }
@@ -233,6 +234,7 @@ describe('buildSessionRows variants', () => {
         deviceName: 'macbook',
         origin: 'external',
         isContinuation: false,
+        parentSessionId: null,
         createdAt: new Date('2026-07-01T00:00:00Z'),
       },
     ]);

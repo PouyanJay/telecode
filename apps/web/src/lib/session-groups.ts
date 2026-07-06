@@ -22,6 +22,11 @@ export interface SessionRow {
    * from a plain launch in the list, not only inside the session view.
    */
   readonly isContinuation: boolean;
+  /**
+   * The session this one continues, when known — the chain link `buildThreadRows` collapses into one
+   * thread row (ux Phase 3). From the registry, or a live `session.chained` frame for a fresh fork.
+   */
+  readonly parentSessionId: string | null;
   readonly createdAt: Date;
 }
 
@@ -63,6 +68,7 @@ export function buildSessionRows(input: {
       deviceName: input.deviceNameOf(session.deviceId),
       origin: session.origin,
       isContinuation: session.parentSessionId !== null,
+      parentSessionId: session.parentSessionId,
       createdAt: session.createdAt,
     });
   }
@@ -71,6 +77,8 @@ export function buildSessionRows(input: {
     // A live state that is still `idle` carries no frames yet — keep what the registry says.
     const status = state.status === 'idle' ? (existing?.status ?? 'starting') : state.status;
     const title = existing?.title ?? firstPrompt(state.entries) ?? null;
+    // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
+    const parentSessionId = existing?.parentSessionId ?? state.parentSessionId;
     byId.set(id, {
       id,
       title,
@@ -78,8 +86,8 @@ export function buildSessionRows(input: {
       deviceName: existing?.deviceName ?? input.watchedDeviceName,
       // A session launched this visit is `launched`; an adopted one carries its origin from the registry.
       origin: existing?.origin ?? 'launched',
-      // Continuation link from either source: the persisted registry, or a live `session.chained` frame.
-      isContinuation: (existing?.isContinuation ?? false) || state.parentSessionId !== null,
+      isContinuation: parentSessionId !== null,
+      parentSessionId,
       createdAt: existing?.createdAt ?? input.now ?? new Date(),
     });
   }
@@ -89,10 +97,11 @@ export function buildSessionRows(input: {
 /** The dashboard's three buckets (the mockup's "Needs your decision" / "Active" / "Recent"). */
 export type SessionGroupKey = 'awaiting' | 'active' | 'recent';
 
-export interface SessionGroups {
-  readonly awaiting: readonly SessionRow[];
-  readonly active: readonly SessionRow[];
-  readonly recent: readonly SessionRow[];
+/** Generic over the row so a collapsed thread row (ux Phase 3) keeps its type through grouping. */
+export interface SessionGroups<Row extends SessionRow = SessionRow> {
+  readonly awaiting: readonly Row[];
+  readonly active: readonly Row[];
+  readonly recent: readonly Row[];
 }
 
 /**
@@ -119,11 +128,10 @@ function groupKey(status: SessionStatus): SessionGroupKey {
 }
 
 /** Partition rows into the dashboard's three groups, newest-first within each. */
-export function groupSessions(rows: readonly SessionRow[]): SessionGroups {
-  const groups: Record<SessionGroupKey, SessionRow[]> = { awaiting: [], active: [], recent: [] };
+export function groupSessions<Row extends SessionRow>(rows: readonly Row[]): SessionGroups<Row> {
+  const groups: Record<SessionGroupKey, Row[]> = { awaiting: [], active: [], recent: [] };
   for (const row of rows) groups[groupKey(row.status)].push(row);
-  const newestFirst = (a: SessionRow, b: SessionRow): number =>
-    b.createdAt.getTime() - a.createdAt.getTime();
+  const newestFirst = (a: Row, b: Row): number => b.createdAt.getTime() - a.createdAt.getTime();
   return {
     awaiting: groups.awaiting.sort(newestFirst),
     active: groups.active.sort(newestFirst),

@@ -109,3 +109,38 @@ describe('createSessionStore', () => {
     );
   });
 });
+
+describe('per-entry timestamps across a restart (Phase 3)', () => {
+  it('round-trips entry ts stamps through save → loadAll', async () => {
+    const store = createSessionStore({ dir: await tempDir() });
+    const stamped: PersistedSession = {
+      status: 'done',
+      permissionMode: 'default',
+      transcript: [
+        { kind: 'user', text: 'do it', ts: 1_783_290_000_000 },
+        { kind: 'message', text: 'done', ts: 1_783_290_001_000 },
+      ],
+    };
+    store.save(SID, stamped);
+    await vi.waitFor(async () => {
+      expect((await store.loadAll()).get(SID)).toEqual(stamped);
+    });
+  });
+
+  it('loads a pre-Phase-3 file whose entries carry no ts (never discarded, ts stays unknown)', async () => {
+    const dir = await tempDir();
+    const store = createSessionStore({ dir });
+    const OLD_SID = '22222222-2222-2222-2222-222222222222';
+    await writeFile(
+      join(dir, `${OLD_SID}.json`),
+      JSON.stringify({
+        status: 'done',
+        permissionMode: 'default',
+        transcript: [{ kind: 'user', text: 'from an old daemon' }],
+      }),
+    );
+    const loaded = await store.loadAll();
+    expect(loaded.get(OLD_SID)?.transcript[0]?.ts).toBeUndefined();
+    expect(loaded.get(OLD_SID)?.transcript[0]).toMatchObject({ text: 'from an old daemon' });
+  });
+});

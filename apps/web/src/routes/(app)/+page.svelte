@@ -13,6 +13,7 @@
   import { buildOnboardingSteps } from '$lib/onboarding';
   import { pairingInstructions } from '$lib/pairing-instructions';
   import { buildSessionRows, groupSessions, sessionCounts } from '$lib/session-groups';
+  import { buildThreadRows } from '$lib/threads';
   import {
     connectionState,
     decide,
@@ -74,14 +75,17 @@
   }
 
   // The persisted registry overlaid with live status — built by the ONE shared merge (buildSessionRows),
-  // the same source the system bar counts from, so the two surfaces can never disagree.
+  // then collapsed into threads (ux Phase 3: a parentSessionId chain is ONE conversation, one row). The
+  // system bar counts the same collapsed rows, so the two surfaces can never disagree.
   const rows = $derived(
-    buildSessionRows({
-      registry: data.sessions,
-      live: $liveSessions,
-      deviceNameOf: (deviceId) => data.devices.find((d) => d.id === deviceId)?.name ?? null,
-      watchedDeviceName: device?.name ?? null,
-    }),
+    buildThreadRows(
+      buildSessionRows({
+        registry: data.sessions,
+        live: $liveSessions,
+        deviceNameOf: (deviceId) => data.devices.find((d) => d.id === deviceId)?.name ?? null,
+        watchedDeviceName: device?.name ?? null,
+      }),
+    ),
   );
 
   const groups = $derived(groupSessions(rows));

@@ -67,6 +67,41 @@ describe('transcriptEntriesFrom', () => {
     });
     expect(transcriptEntriesFrom(rec)).toEqual([{ kind: 'user', text: 'do it' }]);
   });
+
+  it("carries each record's own timestamp onto its entries (honest terminal-segment times)", () => {
+    const at = '2026-07-05T14:14:00.000Z';
+    const stamped = JSON.stringify({
+      type: 'user',
+      timestamp: at,
+      message: { role: 'user', content: 'fix the bug' },
+    });
+    const stampedTool = JSON.stringify({
+      type: 'assistant',
+      timestamp: at,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'on it' },
+          { type: 'tool_use', name: 'Bash', input: { command: 'ls' } },
+        ],
+      },
+    });
+    const ts = Date.parse(at);
+    expect(transcriptEntriesFrom([stamped, stampedTool].join('\n'))).toEqual([
+      { kind: 'user', text: 'fix the bug', ts },
+      { kind: 'message', text: 'on it', ts },
+      { kind: 'tool', toolName: 'Bash', input: { command: 'ls' }, ts },
+    ]);
+  });
+
+  it('leaves ts absent when a record has no parseable timestamp (unknown, never invented)', () => {
+    const unstamped = JSON.stringify({
+      type: 'user',
+      timestamp: 'not-a-date',
+      message: { role: 'user', content: 'fix the bug' },
+    });
+    expect(transcriptEntriesFrom(unstamped)).toEqual([{ kind: 'user', text: 'fix the bug' }]);
+  });
 });
 
 describe('createTranscriptMirror.sync (incremental tail)', () => {

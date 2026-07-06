@@ -14,6 +14,7 @@
   import SystemBar from '$lib/components/SystemBar.svelte';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildSessionRows, sessionCounts } from '$lib/session-groups';
+  import { buildThreadRows } from '$lib/threads';
   import {
     connectionState,
     ensureConnection,
@@ -39,16 +40,18 @@
 
   const RELAY_URL = env.PUBLIC_TELECODE_RELAY_URL ?? 'ws://127.0.0.1:8080/ws';
   const device = $derived(data.devices[0] ?? null);
-  // The system bar and sidebar badge count the SAME merged rows the dashboard lists (registry overlaid
-  // with live status via the one shared buildSessionRows) — the tallies can never disagree between
-  // surfaces. Counting live-only used to miss persisted awaiting sessions the dashboard showed.
+  // The system bar and sidebar badge count the SAME rows the dashboard lists (registry overlaid with
+  // live status via the one shared buildSessionRows, collapsed into threads — ux Phase 3) — the tallies
+  // can never disagree between surfaces. Counting live-only used to miss persisted awaiting sessions.
   const mergedRows = $derived(
-    buildSessionRows({
-      registry: data.sessions,
-      live: $liveSessions,
-      deviceNameOf: () => null,
-      watchedDeviceName: null,
-    }),
+    buildThreadRows(
+      buildSessionRows({
+        registry: data.sessions,
+        live: $liveSessions,
+        deviceNameOf: () => null,
+        watchedDeviceName: null,
+      }),
+    ),
   );
   const counts = $derived(sessionCounts(mergedRows));
   const sessionTotal = $derived(mergedRows.length);

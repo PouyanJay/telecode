@@ -32,18 +32,30 @@ function textFromContent(content: unknown): string {
     .join('');
 }
 
+/**
+ * The record's own creation time as an epoch-ms `ts` fragment, from the JSONL `timestamp` (ISO 8601).
+ * Spread onto each entry the record yields so mirrored terminal-segment entries carry their REAL times
+ * (Phase 3 lineage). Absent/unparseable → `{}` — an unknown time is left unknown, never invented.
+ */
+function tsFromRecord(record: Record<string, unknown>): { ts?: number } {
+  if (typeof record.timestamp !== 'string') return {};
+  const parsed = Date.parse(record.timestamp);
+  return Number.isFinite(parsed) && parsed >= 0 ? { ts: parsed } : {};
+}
+
 function entriesFromRecord(record: Record<string, unknown>): SessionHistoryEntry[] {
   const message = isObject(record.message) ? record.message : undefined;
   if (!message) return [];
+  const ts = tsFromRecord(record);
 
   if (record.type === 'assistant' && Array.isArray(message.content)) {
     const out: SessionHistoryEntry[] = [];
     for (const block of message.content) {
       if (!isObject(block)) continue;
       if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
-        out.push({ kind: 'message', text: block.text });
+        out.push({ kind: 'message', text: block.text, ...ts });
       } else if (block.type === 'tool_use' && typeof block.name === 'string') {
-        out.push({ kind: 'tool', toolName: block.name, input: asInput(block.input) });
+        out.push({ kind: 'tool', toolName: block.name, input: asInput(block.input), ...ts });
       }
     }
     return out;
@@ -53,7 +65,7 @@ function entriesFromRecord(record: Record<string, unknown>): SessionHistoryEntry
   // was already surfaced from the assistant record).
   if (record.type === 'user' && record.toolUseResult === undefined) {
     const text = textFromContent(message.content);
-    if (text.length > 0) return [{ kind: 'user', text }];
+    if (text.length > 0) return [{ kind: 'user', text, ...ts }];
   }
   return [];
 }

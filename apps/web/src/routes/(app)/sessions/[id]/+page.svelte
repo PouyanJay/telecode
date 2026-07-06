@@ -2,11 +2,17 @@
   import type { QuestionAnswerItem, SessionControlAction } from '@telecode/protocol';
 
   import Composer from '$lib/components/Composer.svelte';
+  import InheritedContext from '$lib/components/InheritedContext.svelte';
+  import LineageStrip from '$lib/components/LineageStrip.svelte';
+  import SegmentDivider from '$lib/components/SegmentDivider.svelte';
   import SessionHeader from '$lib/components/SessionHeader.svelte';
   import SessionNotice from '$lib/components/SessionNotice.svelte';
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, type SessionState } from '$lib/session';
+  import { clockTime } from '$lib/clock-time';
+  import { lineageOf } from '$lib/lineage';
+  import { segmentLabel } from '$lib/threads';
   import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import {
@@ -69,6 +75,23 @@
       null,
   );
 
+  // The conversation's segments root→end (ux Phase 3, B2), from the persisted registry chain. Empty for
+  // an unchained session — the strip and takeover divider render only for real chains.
+  const lineage = $derived(lineageOf(sessionId, data.sessions));
+  const entryCountOf = $derived(
+    (id: string): number | null => $liveSessions.get(id)?.entries.length ?? null,
+  );
+  // The open session's neighbours in the chain: the segment it took over from (its transcript inlines
+  // collapsed above the takeover divider) and the segment that superseded it (the forward pointer that
+  // replaces "this session just ended").
+  const currentIndex = $derived(lineage.findIndex((s) => s.isCurrent));
+  const currentSegment = $derived(currentIndex >= 0 ? lineage[currentIndex] : undefined);
+  const prevSegment = $derived(currentIndex > 0 ? lineage[currentIndex - 1] : undefined);
+  const nextSegment = $derived(currentIndex >= 0 ? lineage[currentIndex + 1] : undefined);
+  const inheritedEntries = $derived(
+    prevSegment ? ($liveSessions.get(prevSegment.sessionId)?.entries ?? []) : [],
+  );
+
   function onControl(action: SessionControlAction): void {
     sendControl(sessionId, action);
   }
@@ -76,10 +99,14 @@
   // Re-attach once the channel is live (and again after any reconnect): the daemon backfills the
   // transcript via session.history, and the relay replays its cached frames either way. Not gated on the
   // resolved device — a session whose device was revoked still deserves the cache replay, and without a
-  // paired device no connection exists in the first place.
+  // paired device no connection exists in the first place. Chained segments subscribe too, so the
+  // lineage strip knows their sizes and the takeover divider can inline the inherited transcript.
   $effect(() => {
     if ($connectionState === 'connected') {
       subscribe(sessionId);
+      for (const segment of lineage) {
+        if (segment.sessionId !== sessionId) subscribe(segment.sessionId);
+      }
     }
   });
 
@@ -108,6 +135,23 @@
   function onHandover(requestId: string, answerText: string): void {
     answerHandover(sessionId, { requestId, answerText });
   }
+
+  // Actions on INHERITED entries route to the segment that owns them, not the open session.
+  function actionsFor(targetSessionId: string) {
+    return {
+      onapprove: (requestId: string) => decide(targetSessionId, { requestId, behavior: 'allow' }),
+      onreject: (requestId: string, message?: string) =>
+        decide(targetSessionId, {
+          requestId,
+          behavior: 'deny',
+          ...(message !== undefined ? { message } : {}),
+        }),
+      onanswer: (requestId: string, answers: QuestionAnswerItem[]) =>
+        answer(targetSessionId, { requestId, answers }),
+      onhandover: (requestId: string, answerText: string) =>
+        answerHandover(targetSessionId, { requestId, answerText }),
+    };
+  }
 </script>
 
 <svelte:head>
@@ -128,9 +172,15 @@
     onend={() => onControl('end')}
   />
 
+  {#if lineage.length > 0}
+    <LineageStrip segments={lineage} {entryCountOf} />
+  {/if}
+
   <div class="body">
     <div class="stream-col">
-      {#if parentSessionId}
+      {#if lineage.length === 0 && parentSessionId}
+        <!-- Fallback when the chain can't render (parent unknown to the registry, e.g. a fresh live
+             fork): keep the plain link back rather than losing the relationship entirely. -->
         <a class="continued-from" href={`/sessions/${parentSessionId}`}>
           ← Continued from an adopted session
         </a>
@@ -172,7 +222,30 @@
           onreject={(requestId, message) => onDecide(requestId, 'deny', message)}
           onanswer={onAnswer}
           onhandover={onHandover}
-        />
+        >
+          {#snippet lead()}
+            {#if prevSegment && currentSegment}
+              {#if inheritedEntries.length > 0}
+                <InheritedContext
+                  entries={inheritedEntries}
+                  segmentName={segmentLabel(prevSegment.origin)}
+                  {...actionsFor(prevSegment.sessionId)}
+                />
+              {/if}
+              <SegmentDivider
+                label={`Taken over in ${segmentLabel(currentSegment.origin)} · ${clockTime(currentSegment.startedAt)}`}
+              />
+            {/if}
+          {/snippet}
+          {#snippet tail()}
+            {#if nextSegment}
+              <SegmentDivider
+                label={`Continued in ${segmentLabel(nextSegment.origin)} → open segment ${currentIndex + 2}`}
+                href={`/sessions/${nextSegment.sessionId}`}
+              />
+            {/if}
+          {/snippet}
+        </Transcript>
       {/if}
 
       {#if known}

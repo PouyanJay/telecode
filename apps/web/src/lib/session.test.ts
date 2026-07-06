@@ -528,3 +528,93 @@ describe('session reducer: relay.error (undelivered action, approval-reliability
     expect(applyEnvelope(state, frame('relay.error', { nope: true }))).toBe(state);
   });
 });
+
+describe('per-entry times (Phase 3 T1): daemon ts preferred, fold clock fallback', () => {
+  const NOW = 1_783_290_000_000;
+  const DAEMON_TS = NOW - 45_000; // the daemon stamped the entry 45s before this client received it
+
+  it('stamps message and tool entries from the wire ts when the daemon sent one', () => {
+    let state = applyEnvelope(startingState(), frame('session.started', {}), NOW);
+    state = applyEnvelope(state, frame('agent.message', { text: 'working', ts: DAEMON_TS }), NOW);
+    state = applyEnvelope(
+      state,
+      frame('agent.tool_use', { toolName: 'Read', input: {}, ts: DAEMON_TS + 1 }),
+      NOW,
+    );
+    expect(state.entries.map((e) => e.at)).toEqual([DAEMON_TS, DAEMON_TS + 1]);
+  });
+
+  it('falls back to the fold clock when an old daemon stamps nothing', () => {
+    let state = applyEnvelope(startingState(), frame('session.started', {}), NOW);
+    state = applyEnvelope(state, frame('agent.message', { text: 'working' }), NOW);
+    expect(state.entries[0]?.at).toBe(NOW);
+  });
+
+  it('prefers the daemon ts for an ask entry — the waiting timer stays honest across reloads', () => {
+    let state = applyEnvelope(startingState(), frame('session.started', {}), NOW);
+    state = applyEnvelope(
+      state,
+      frame('agent.permission_request', {
+        requestId: 'r1',
+        toolName: 'Bash',
+        input: {},
+        ts: DAEMON_TS,
+      }),
+      NOW,
+    );
+    const gate = state.entries.find((e) => e.kind === 'permission');
+    expect(gate?.at).toBe(DAEMON_TS);
+  });
+
+  it('prefers the daemon ts for question and handover asks too (every ask kind, same rule)', () => {
+    let state = applyEnvelope(startingState(), frame('session.started', {}), NOW);
+    state = applyEnvelope(
+      state,
+      frame('agent.question', { requestId: 'q1', questions: [DB_QUESTION], ts: DAEMON_TS }),
+      NOW,
+    );
+    state = applyEnvelope(
+      state,
+      frame('agent.handover', {
+        requestId: 'h1',
+        question: 'Take over?',
+        summary: '',
+        ts: DAEMON_TS + 1,
+      }),
+      NOW,
+    );
+    expect(state.entries.find((e) => e.kind === 'question')?.at).toBe(DAEMON_TS);
+    expect(state.entries.find((e) => e.kind === 'handover')?.at).toBe(DAEMON_TS + 1);
+  });
+
+  it('maps backfilled history ts onto entries and leaves unstamped ones un-stamped', () => {
+    const state = applyEnvelope(
+      startingState(),
+      frame('session.history', {
+        status: 'awaiting_input',
+        entries: [
+          { kind: 'user', text: 'do it', ts: DAEMON_TS },
+          { kind: 'message', text: 'from an old daemon' },
+          {
+            kind: 'permission',
+            requestId: 'r1',
+            toolName: 'Write',
+            input: {},
+            decision: 'pending',
+            ts: DAEMON_TS + 2,
+          },
+        ],
+      }),
+      NOW,
+    );
+    expect(state.entries.map((e) => e.at)).toEqual([DAEMON_TS, undefined, DAEMON_TS + 2]);
+    // A backfilled pending gate now carries its REAL ask time — the inbox waiting pill survives reload.
+    const gate = state.entries.find((e) => e.kind === 'permission');
+    expect(gate?.at).toBe(DAEMON_TS + 2);
+  });
+
+  it('stamps the local echo of the human message with the provided clock', () => {
+    const state = appendUserMessage(startingState(), 'do the thing', NOW);
+    expect(state.entries[0]?.at).toBe(NOW);
+  });
+});

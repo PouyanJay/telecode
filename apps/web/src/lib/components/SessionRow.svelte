@@ -2,19 +2,23 @@
   import { Pill, StatusDot } from '@telecode/ui';
 
   import { SESSION_DISPLAY } from '$lib/session-display';
-  import type { SessionRow } from '$lib/session-groups';
+  import { clockTime } from '$lib/clock-time';
+  import { segmentLabel, type ThreadRow } from '$lib/threads';
   import { relativeTime } from '$lib/time';
 
   /**
-   * One session in the dashboard list (enterprise-ui §7): a full-row `<a href>` to the session, with the
+   * One thread in the dashboard list (enterprise-ui §7): a full-row `<a href>` to the session, with the
    * house status (dot + UPPERCASE-mono label), the title (ellipsis + tooltip for long ones), the device it
    * runs on, and a relative timestamp. An awaiting-input row carries the amber tint + accent edge — the one
-   * "needs you" signal. Only fields we actually persist are shown (no invented repo/branch/diff meta).
+   * "needs you" signal. A chained thread (ux Phase 3) shows a segment crumb under the title — origin and
+   * each hop with its time, the current segment ticked amber — replacing the origin pills; taking a session
+   * over reads as a move, not a death. Only fields we actually persist are shown.
    */
-  let { row }: { row: SessionRow } = $props();
+  let { row }: { row: ThreadRow } = $props();
 
   const display = $derived(SESSION_DISPLAY[row.status]);
   const isAwaiting = $derived(row.status === 'awaiting_input');
+  const isChained = $derived(row.segments.length > 0);
   // Sessions telecode adopted from the user's own Claude Code runs (terminal / IDE) are marked, so the
   // operator can tell them from sessions launched here — they're monitored + gated, not telecode-driven.
   const isAdopted = $derived(row.origin === 'external');
@@ -25,16 +29,32 @@
     <StatusDot tone={display.tone} label={display.label} pulse={display.pulse} />
   </span>
   <span class="titlecell">
-    <!-- At most one origin mark: a session is either adopted from the user's own Claude Code ("on device")
-         or a forked continuation of another (a free-form handover they took over). A continuation is always
-         a launch, so the two never overlap. Marking it here makes a chained session read as chained in the
-         list, not only inside the session view. -->
-    {#if isAdopted}
-      <Pill label="on device" />
-    {:else if row.isContinuation}
-      <Pill label="continuation" />
+    <span class="titleline">
+      <!-- At most one origin mark on an UNCHAINED row: adopted ("on device") or a continuation whose
+           parent is unknown. A chained thread replaces the pills with the segment crumb below — the
+           crumb carries both facts (origin AND the hop) with times. -->
+      {#if !isChained}
+        {#if isAdopted}
+          <Pill label="on device" />
+        {:else if row.isContinuation}
+          <Pill label="continuation" />
+        {/if}
+      {/if}
+      <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
+    </span>
+    {#if isChained}
+      <span class="crumb mono">
+        {#each row.segments as segment, i (segment.sessionId)}
+          {#if i > 0}<span class="sep" aria-hidden="true">→</span>{/if}
+          <span class="seg" class:current={segment.isCurrent}>
+            <span class="dot" aria-hidden="true"></span>
+            {segmentLabel(segment.origin)} · {i > 0 ? 'taken over ' : ''}{clockTime(
+              segment.startedAt,
+            )}
+          </span>
+        {/each}
+      </span>
     {/if}
-    <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
   </span>
   {#if row.deviceName}
     <span class="device mono">{row.deviceName}</span>
@@ -79,6 +99,12 @@
   }
   .titlecell {
     display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .titleline {
+    display: flex;
     align-items: center;
     gap: var(--space-2);
     min-width: 0;
@@ -90,6 +116,41 @@
     white-space: nowrap;
     font-size: var(--text-sm);
     font-weight: 500;
+  }
+  /* The segment crumb (ux Phase 3): origin → each hop with its time, current segment ticked amber.
+     Machine data → mono; one line, ellipsized — a long chain must never wrap the row. */
+  .crumb {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .seg {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--space-1);
+  }
+  .sep {
+    margin: 0 var(--space-2);
+    color: var(--text-muted);
+  }
+  .dot {
+    width: 5px;
+    height: 5px;
+    border-radius: var(--radius-full);
+    background: var(--text-muted);
+    align-self: center;
+    flex: none;
+  }
+  .seg.current .dot {
+    background: var(--accent);
+  }
+  .seg.current {
+    color: var(--text);
   }
   .device {
     min-width: 0;

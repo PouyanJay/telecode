@@ -104,6 +104,11 @@ export interface DaemonOptions {
    */
   readonly gateTimeoutMs?: number;
   /**
+   * Clock used to stamp transcript entries (`ts`, epoch ms) at record time (Phase 3 threads & lineage).
+   * Injected so entry times are deterministic in tests; defaults to `Date.now`.
+   */
+  readonly now?: () => number;
+  /**
    * Cuts a git worktree per session (Phase 2). When provided, a session that resolves a repo runs in its
    * own worktree cwd so parallel agents never clobber each other's files. Omitted falls back to the
    * daemon's own cwd — the Phase-1 behavior.
@@ -175,6 +180,9 @@ export interface Daemon {
 
 export function createDaemon(options: DaemonOptions): Daemon {
   const log = options.logger ?? pino({ name: 'daemon' });
+  // Entry-stamp clock (Phase 3): every transcript entry is stamped ONCE, at record time; the live frame
+  // and the history backfill carry the same instant. Injected for deterministic tests.
+  const now = options.now ?? Date.now;
   const agentAdapter = options.agentAdapter ?? createClaudeAgentAdapter({ logger: log });
   const worktreeManager = options.worktreeManager;
   const repoManager = options.repoManager;
@@ -511,12 +519,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return Promise.resolve({ behavior: 'allow' });
     }
     const requestId = randomUUID();
+    const ts = now();
     record(source.session_id, {
       kind: 'permission',
       requestId,
       toolName: request.toolName,
       input: request.input,
       decision: 'pending',
+      ts,
     });
     setStatus(source.session_id, 'awaiting_input');
     return new Promise<PermissionDecision>((resolve) => {
@@ -554,6 +564,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         requestId,
         toolName: request.toolName,
         input: request.input,
+        ts,
       });
     });
   }
@@ -569,7 +580,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
     questions: AgentQuestionItem[],
   ): Promise<QuestionAnswerItem[] | null> {
     const requestId = randomUUID();
-    record(source.session_id, { kind: 'question', requestId, questions });
+    const ts = now();
+    record(source.session_id, { kind: 'question', requestId, questions, ts });
     setStatus(source.session_id, 'awaiting_input');
     return new Promise<QuestionAnswerItem[] | null>((resolve) => {
       const pending: PendingQuestion = { sessionId: source.session_id, resolve };
@@ -589,7 +601,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         { deviceId: options.deviceId, sessionId: source.session_id, requestId },
         'daemon: question relayed to browser',
       );
-      sendForSession(source, 'agent.question', { requestId, questions });
+      sendForSession(source, 'agent.question', { requestId, questions, ts });
     });
   }
 
@@ -717,14 +729,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
       ...(cwd !== undefined ? { cwd } : {}),
       ...(permissionMode !== undefined ? { permissionMode } : {}),
       onEvent: (event) => {
+        const ts = now();
         if (event.type === 'message') {
-          record(sessionId, { kind: 'message', text: event.text });
-          sendForSession(envelope, 'agent.message', { text: event.text });
+          record(sessionId, { kind: 'message', text: event.text, ts });
+          sendForSession(envelope, 'agent.message', { text: event.text, ts });
         } else {
-          record(sessionId, { kind: 'tool', toolName: event.toolName, input: event.input });
+          record(sessionId, { kind: 'tool', toolName: event.toolName, input: event.input, ts });
           sendForSession(envelope, 'agent.tool_use', {
             toolName: event.toolName,
             input: event.input,
+            ts,
           });
         }
       },
@@ -878,7 +892,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (envelope.session_id !== undefined && launch.data.permissionMode !== undefined) {
       recordFor(envelope.session_id).permissionMode = launch.data.permissionMode;
     }
-    record(envelope.session_id, { kind: 'user', text: launch.data.prompt });
+    record(envelope.session_id, { kind: 'user', text: launch.data.prompt, ts: now() });
     setStatus(envelope.session_id, 'running');
     // Echo the launch's correlation id so the launching browser can pair the relay-minted session id.
     sendForSession(
@@ -914,7 +928,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return;
     }
     log.info({ deviceId: options.deviceId, sessionId }, 'daemon: follow-up received');
-    record(sessionId, { kind: 'user', text: message.data.text });
+    record(sessionId, { kind: 'user', text: message.data.text, ts: now() });
     setStatus(sessionId, 'running');
     // Reuse the session's worktree cwd (set on launch) so the follow-up turn runs in the same place.
     const cwd = sessionId !== undefined ? sessionCwds.get(sessionId) : undefined;
@@ -1572,7 +1586,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // content key when it subscribes, exactly like an adopted session). Cleartext only on a pre-E2E daemon.
     if (cipher.enabled) cipher.establish(childId);
     recordFor(childId).permissionMode = 'default';
-    record(childId, { kind: 'user', text: answerText });
+    record(childId, { kind: 'user', text: answerText, ts: now() });
     setStatus(childId, 'running');
     sendForSession(childSource, 'session.started', {});
     // Migrate the conversation: the parent adopted row is handed off (terminal, read-only) — the child now
@@ -1696,9 +1710,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       question,
       summary,
     });
-    record(knownId, { kind: 'handover', requestId, question, summary });
+    const ts = now();
+    record(knownId, { kind: 'handover', requestId, question, summary, ts });
     setStatus(knownId, 'awaiting_input');
-    sendForSession(adoptedSource(knownId), 'agent.handover', { requestId, question, summary });
+    sendForSession(adoptedSource(knownId), 'agent.handover', { requestId, question, summary, ts });
     log.info(
       { deviceId: options.deviceId, sessionId: knownId, requestId },
       'daemon: free-form handover offered',
