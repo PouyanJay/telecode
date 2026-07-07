@@ -213,6 +213,46 @@ export const repoBranchesStatePayloadSchema = z.object({
 });
 export type RepoBranchesStatePayload = z.infer<typeof repoBranchesStatePayloadSchema>;
 
+/**
+ * Payload for `workspace.reap` (web → daemon, branch-actions T3): the delete flow's explicit opt-in
+ * to remove a launched session's worktree + branch on its device. Box-sealed device-scoped like
+ * `adopt.config`. The id must be a real UUID — it is matched against the daemon's records, never
+ * used as a path, but the boundary stays strict anyway.
+ */
+export const workspaceReapRequestPayloadSchema = z.object({
+  sessionId: z.string().uuid(),
+});
+export type WorkspaceReapRequestPayload = z.infer<typeof workspaceReapRequestPayloadSchema>;
+
+/**
+ * Why a reap was refused: the daemon doesn't know the session (`unknown-session`), it isn't a
+ * reapable one (`not-reapable` — adopted, still running, or holding no worktree), the tree has
+ * uncommitted work (`dirty` — never silently discarded), or git failed (`failed` — the generic
+ * story; git stderr can carry local paths, so it never travels).
+ */
+export const WORKSPACE_REAP_FAILURE_CODES = [
+  'unknown-session',
+  'not-reapable',
+  'dirty',
+  'failed',
+] as const;
+export const workspaceReapFailureCodeSchema = z.enum(WORKSPACE_REAP_FAILURE_CODES);
+export type WorkspaceReapFailureCode = z.infer<typeof workspaceReapFailureCodeSchema>;
+
+/**
+ * Payload for `workspace.reap.state` (daemon → web, sealed to the requester): success carries no
+ * code; a refusal always carries one, so the UI never has to invent a story.
+ */
+export const workspaceReapStatePayloadSchema = z.union([
+  z.object({ sessionId: z.string().uuid(), ok: z.literal(true) }),
+  z.object({
+    sessionId: z.string().uuid(),
+    ok: z.literal(false),
+    code: workspaceReapFailureCodeSchema,
+  }),
+]);
+export type WorkspaceReapStatePayload = z.infer<typeof workspaceReapStatePayloadSchema>;
+
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
   'starting',

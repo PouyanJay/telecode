@@ -44,6 +44,8 @@ import {
   type RepoBranchesStatePayload,
   type SessionOrigin,
   type SessionStatusName,
+  workspaceReapRequestPayloadSchema,
+  type WorkspaceReapStatePayload,
 } from '@telecode/protocol';
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
@@ -69,6 +71,7 @@ import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcrip
 import { type BranchReader } from './adopt/git-branch';
 import { type BranchLister } from './sessions/branch-list';
 import { type WorkspaceChangesReader } from './sessions/workspace-changes';
+import { type WorkspaceReaper } from './sessions/workspace-reaper';
 import {
   type AgentAdapter,
   type AgentRunOptions,
@@ -219,6 +222,12 @@ export interface DaemonOptions {
    * omitted → the Changes panel simply never populates (tests, minimal setups).
    */
   readonly readWorkspaceChanges?: WorkspaceChangesReader;
+  /**
+   * Removes a reaped session's worktree + branch (`workspace.reap`, branch-actions T3). Injected at
+   * the composition root (real `createGitWorkspaceReaper`, sharing the worktree manager's root);
+   * omitted → every reap answers `not-reapable`.
+   */
+  readonly reapWorkspace?: WorkspaceReaper;
   readonly logger?: Logger;
 }
 
@@ -1688,6 +1697,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
         await handleRepoBranches(envelope);
         return;
       }
+      case 'workspace.reap': {
+        await handleWorkspaceReap(envelope);
+        return;
+      }
       case 'viewer.presence': {
         // Relay tells us whether any browser is watching this channel (the mirror of device.presence). We
         // hold it so the adopted-session gate only blocks for a remote approval while an operator is present.
@@ -2053,6 +2066,80 @@ export function createDaemon(options: DaemonOptions): Daemon {
         }),
       );
     });
+  }
+
+  /**
+   * Answer `workspace.reap` (branch-actions T3): the delete flow's explicit opt-in to remove a
+   * launched session's worktree + branch. Sealed to the requesting browser like adopt.state.
+   * Guards (AD-5): the session must be one this daemon holds, launched-origin, settled (terminal,
+   * no run in flight), and carry a worktree + repo + branch; the injected reaper adds dirty-tree
+   * refusal and worktreesRoot containment. On success the daemon also forgets the session — its
+   * registry row is being deleted, so keeping a record would only resurrect a ghost.
+   */
+  async function handleWorkspaceReap(envelope: Envelope): Promise<void> {
+    const browserPublicKey = envelope.sender_public_key;
+    let sessionId: string;
+    try {
+      const raw = cipher.enabled ? await cipher.openFromBrowser(envelope) : envelope.payload;
+      sessionId = workspaceReapRequestPayloadSchema.parse(raw).sessionId;
+    } catch (err) {
+      log.warn({ err, deviceId: options.deviceId }, 'daemon: dropped invalid workspace.reap');
+      return;
+    }
+    const state = await reapOutcome(sessionId);
+    // Never log the branch/paths — only the outcome code (workspace content stays sealed).
+    log.info(
+      {
+        deviceId: options.deviceId,
+        sessionId,
+        ok: state.ok,
+        ...(state.ok ? {} : { code: state.code }),
+      },
+      'daemon: workspace reap answered',
+    );
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        cipher.enabled && browserPublicKey !== undefined
+          ? await cipher.sealToBrowser(browserPublicKey, state)
+          : { payload: state, nonce: '' };
+      return JSON.stringify(
+        makeEnvelope({
+          type: 'workspace.reap.state',
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
+  /** The reap decision for one session — every refusal is a coded, retellable story. */
+  async function reapOutcome(sessionId: string): Promise<WorkspaceReapStatePayload> {
+    const rec = sessionRecords.get(sessionId);
+    if (rec === undefined) return { sessionId, ok: false, code: 'unknown-session' };
+    const cwd = sessionCwds.get(sessionId) ?? rec.cwd;
+    const branch = rec.meta?.branch;
+    if (
+      options.reapWorkspace === undefined ||
+      rec.origin === 'external' || // adopted checkouts are the user's own — never telecode's to delete
+      !isSessionEndStatus(rec.status) ||
+      activeRuns.has(sessionId) ||
+      cwd === undefined ||
+      rec.repoPath === undefined ||
+      branch === undefined
+    ) {
+      return { sessionId, ok: false, code: 'not-reapable' };
+    }
+    const result = await options.reapWorkspace({ cwd, repoPath: rec.repoPath, branch });
+    if (!result.ok) return { sessionId, ok: false, code: result.code };
+    // Forget the session everywhere the daemon holds it — the browser deletes the registry row
+    // right after this, and a leftover record/file would re-announce a ghost on the next restart.
+    sessionRecords.delete(sessionId);
+    sessionCwds.delete(sessionId);
+    sdkSessions.delete(sessionId);
+    await sessionStore?.remove(sessionId);
+    return { sessionId, ok: true };
   }
 
   const adoptedSessions: AdoptedSessionManager | undefined = options.adopt

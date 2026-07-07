@@ -57,6 +57,12 @@ export const MESSAGE_TYPES = [
   // (daemon -> web) answers the requesting browser — branch names are content, sealed only.
   'repo.branches',
   'repo.branches.state',
+  // Worktree/branch hygiene (branch-actions Phase C), session-less + box-sealed like adopt.*:
+  // `workspace.reap` (web -> daemon) asks — as the delete flow's explicit opt-in — to remove a
+  // launched session's worktree and branch; `workspace.reap.state` (daemon -> web) answers the
+  // requesting browser with ok or a coded refusal. Workspace paths/branch names stay sealed.
+  'workspace.reap',
+  'workspace.reap.state',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).

@@ -53,6 +53,7 @@ function makePool() {
       sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
       sendAdoptConfig: () => undefined,
       sendRepoBranchesRequest: () => undefined,
+      sendWorkspaceReap: () => undefined,
       close: () => {
         rec.closed = true;
       },

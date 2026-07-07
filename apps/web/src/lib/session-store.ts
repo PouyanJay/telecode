@@ -1,5 +1,6 @@
 import {
   devicePresencePayloadSchema,
+  relayErrorPayloadSchema,
   sessionChainedPayloadSchema,
   sessionStartedPayloadSchema,
   type AdoptSettings,
@@ -12,6 +13,7 @@ import {
   type SessionControlAction,
   type SessionLaunchPayload,
   type SessionRenameBody,
+  type WorkspaceReapFailureCode,
 } from '@telecode/protocol';
 import { derived, get, writable, type Readable } from 'svelte/store';
 
@@ -246,6 +248,15 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
     sessionChangesMap.update((map) => applyChangesFrame(map, envelope));
     return;
   }
+  if (envelope.type === 'relay.error' && envelope.session_id !== undefined) {
+    // A reap that reached an offline device (Phase C T3): settle the waiting delete flow honestly
+    // instead of letting it time out. Every other relay.error keeps flowing into the session fold.
+    const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
+    if (parsed.success && parsed.data.regarding === 'workspace.reap') {
+      settleReap(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+      return;
+    }
+  }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
   resolvePendingLaunch(envelope);
 }
@@ -377,6 +388,8 @@ function dialDeviceChannel(
       adoptStatesMap.update((states) => new Map(states).set(device.id, state)),
     onRepoBranches: (state) =>
       repoBranchesMap.update((states) => new Map(states).set(device.id, state)),
+    onWorkspaceReap: (state) =>
+      settleReap(state.sessionId, state.ok ? { ok: true } : { ok: false, reason: state.code }),
   });
   connections.set(device.id, connection);
 }
@@ -827,6 +840,48 @@ function forgetSession(sessionId: string): void {
   sessionChangesMap.update(drop);
   sessionTitleOverrideMap.update(drop);
   sessionDeviceMap.update(drop);
+}
+
+/** How a worktree-reap request settled (branch-actions T3) — every failure is a retellable reason. */
+export type WorkspaceReapOutcome =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: WorkspaceReapFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
+    };
+
+// One reap can be in flight per session (the delete dialog is modal); settled by the daemon's
+// sealed workspace.reap.state, the relay's honest device-offline error, or the local timeout.
+const REAP_TIMEOUT_MS = 15_000;
+const pendingReaps = new Map<
+  string,
+  { resolve: (outcome: WorkspaceReapOutcome) => void; timer: ReturnType<typeof setTimeout> }
+>();
+
+function settleReap(sessionId: string, outcome: WorkspaceReapOutcome): void {
+  const pending = pendingReaps.get(sessionId);
+  if (!pending) return;
+  pendingReaps.delete(sessionId);
+  clearTimeout(pending.timer);
+  pending.resolve(outcome);
+}
+
+/**
+ * Ask the session's device to remove its worktree + branch (the delete dialog's explicit opt-in,
+ * branch-actions T3). Resolves with the daemon's own verdict — the caller decides whether the
+ * delete proceeds; this never deletes anything registry-side itself.
+ */
+export function reapWorkspace(sessionId: string): Promise<WorkspaceReapOutcome> {
+  const connection = connectionFor(sessionId);
+  if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
+  return new Promise((resolve) => {
+    const timer = setTimeout(
+      () => settleReap(sessionId, { ok: false, reason: 'timeout' }),
+      REAP_TIMEOUT_MS,
+    );
+    pendingReaps.set(sessionId, { resolve, timer });
+    connection.sendWorkspaceReap(sessionId);
+  });
 }
 
 /**

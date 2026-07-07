@@ -4,7 +4,7 @@
     type QuestionAnswerItem,
     type SessionControlAction,
   } from '@telecode/protocol';
-  import { ConfirmDialog } from '@telecode/ui';
+  import { ConfirmDialog, Switch } from '@telecode/ui';
 
   import { goto } from '$app/navigation';
 
@@ -34,6 +34,7 @@
     connectionState,
     decide,
     deleteSessionForever,
+    reapWorkspace,
     deviceChannels,
     renameSession,
     resetSessionTitle,
@@ -143,6 +144,25 @@
       'are not touched.',
   );
 
+  // Worktree reaping (branch-actions T3): deleting a LAUNCHED session can also remove its worktree
+  // + branch — but only its own daemon can do that, so the offer exists only while it's reachable.
+  // Adopted sessions never get the offer: their checkout is the user's own, not telecode's.
+  const canOfferReap = $derived(
+    canHousekeep && (registryRow?.origin ?? 'launched') === 'launched' && sessionDeviceOnline,
+  );
+  let reapChecked = $state(false);
+  const REAP_STORIES: Record<string, string> = {
+    dirty:
+      'Its worktree has uncommitted changes, so nothing was removed and the session was kept. ' +
+      'Commit or discard them on the device, or delete without removing the worktree.',
+    'unknown-session': 'The daemon no longer knows this session, so its worktree was not touched.',
+    'not-reapable': 'This session has no worktree its daemon can remove.',
+    failed: 'The device could not remove the worktree. The session was kept.',
+    'daemon-offline': 'The device went offline before it could remove the worktree. Session kept.',
+    timeout: 'The device did not answer in time, so nothing was deleted.',
+    'no-connection': 'No connection to the session’s device, so nothing was deleted.',
+  };
+
   async function onArchive(): Promise<void> {
     houseError = null;
     archiveBusy = true;
@@ -159,6 +179,18 @@
   async function onDeleteConfirm(): Promise<void> {
     houseError = null;
     deleteBusy = true;
+    // The opted-in reap runs FIRST, and a refusal aborts the delete: the registry row is the only
+    // handle pointing at that worktree — deleting it while the worktree survives would strand the
+    // leftover invisibly forever. The daemon's coded story (dirty, offline, …) is shown instead.
+    if (canOfferReap && reapChecked) {
+      const reaped = await reapWorkspace(sessionId);
+      if (!reaped.ok) {
+        deleteBusy = false;
+        confirmDeleteOpen = false;
+        houseError = REAP_STORIES[reaped.reason] ?? REAP_STORIES.failed ?? null;
+        return;
+      }
+    }
     const result = await deleteSessionForever(sessionId);
     deleteBusy = false;
     confirmDeleteOpen = false;
@@ -466,7 +498,26 @@
   confirmTone="danger"
   busy={deleteBusy}
   onconfirm={onDeleteConfirm}
-/>
+>
+  {#snippet details()}
+    {#if canOfferReap}
+      <div class="reap-opt">
+        <Switch
+          label="Also remove its worktree and branch"
+          checked={reapChecked}
+          disabled={deleteBusy}
+          onclick={() => (reapChecked = !reapChecked)}
+        />
+        <div class="reap-copy">
+          <span class="reap-title">Also remove its worktree and branch{device?.name ? ` on ${device.name}` : ''}</span>
+          <span class="reap-hint mono"
+            >Work not merged or pushed is lost. Uncommitted files cancel the delete instead.</span
+          >
+        </div>
+      </div>
+    {/if}
+  {/snippet}
+</ConfirmDialog>
 
 <style>
   .view {
@@ -474,6 +525,30 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  /* The delete dialog's reap opt-in (Phase C T3): switch + consequence copy on one calm row. */
+  .reap-opt {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-muted);
+  }
+  .reap-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .reap-title {
+    font-size: var(--text-sm);
+    color: var(--text);
+  }
+  .reap-hint {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   .body {
     flex: 1;

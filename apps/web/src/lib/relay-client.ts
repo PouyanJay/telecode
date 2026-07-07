@@ -2,6 +2,8 @@ import {
   adoptStatePayloadSchema,
   repoBranchesStatePayloadSchema,
   type RepoBranchesStatePayload,
+  workspaceReapStatePayloadSchema,
+  type WorkspaceReapStatePayload,
   makeEnvelope,
   parseEnvelope,
   type AdoptSettings,
@@ -60,6 +62,8 @@ export interface RelayConnectionOptions {
   readonly onAdoptState?: (state: AdoptStatePayload) => void;
   /** The daemon's default-repo branches (sealed `repo.branches.state`) for the launch drawer (Phase B). */
   readonly onRepoBranches?: (state: RepoBranchesStatePayload) => void;
+  /** The daemon's answer to a `workspace.reap` (sealed `workspace.reap.state`, branch-actions T3). */
+  readonly onWorkspaceReap?: (state: WorkspaceReapStatePayload) => void;
   /**
    * Seam for building the underlying socket. Production uses a real browser `WebSocket`; tests inject a
    * controllable fake (the web Vitest runs in node, where there is no DOM `WebSocket`).
@@ -105,6 +109,13 @@ export interface RelayConnection {
   sendAdoptConfig(set?: AdoptSettings): void;
   /** Ask the daemon for its default repo's branches; the sealed reply lands on `onRepoBranches`. */
   sendRepoBranchesRequest(): void;
+  /**
+   * Ask the daemon to remove a launched session's worktree + branch (the delete flow's opt-in,
+   * branch-actions T3). Box-sealed like `adopt.config`; the envelope carries the session id as
+   * routing metadata so an offline device answers with an honest `relay.error`. The sealed reply
+   * lands on `onWorkspaceReap`.
+   */
+  sendWorkspaceReap(sessionId: string): void;
   close(): void;
 }
 
@@ -321,6 +332,17 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       }
       return;
     }
+    if (envelope.type === 'workspace.reap.state') {
+      // Device-scoped and sealed to THIS browser like repo.branches.state; unopenable channel
+      // copies and version-skew shapes are ignored the same way.
+      try {
+        const raw = cipher.enabled ? await cipher.openFromDaemon(envelope) : envelope.payload;
+        options.onWorkspaceReap?.(workspaceReapStatePayloadSchema.parse(raw));
+      } catch {
+        // see adopt.state below
+      }
+      return;
+    }
     if (envelope.type === 'adopt.state') {
       // Device-scoped, sealed to THIS browser (Journey 3) — opened with the device key, not a session key.
       try {
@@ -429,6 +451,21 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
           });
         }
         return buildFrame('repo.branches', { payload: {} });
+      });
+    },
+    sendWorkspaceReap(sessionId: string): void {
+      enqueueSend(async () => {
+        const payload = { sessionId };
+        if (cipher.enabled) {
+          const sealed = await cipher.sealToDaemon(payload);
+          return buildFrame('workspace.reap', {
+            sessionId,
+            payload: sealed.payload,
+            nonce: sealed.nonce,
+            senderPublicKey: sealed.senderPublicKey,
+          });
+        }
+        return buildFrame('workspace.reap', { sessionId, payload });
       });
     },
     sendAdoptConfig(set?: AdoptSettings): void {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -61,6 +61,8 @@ export interface SessionStore {
   loadAll(): Promise<Map<string, PersistedSession>>;
   /** Persist a session's record. Coalesced + async (never blocks the daemon's hot path). */
   save(sessionId: string, record: PersistedSession): void;
+  /** Forget a session's file (reap, branch-actions T3). Already-absent is fine — the goal state. */
+  remove(sessionId: string): Promise<void>;
 }
 
 /** A session id is the file name; require a real UUID so a crafted id can't escape the store directory. */
@@ -127,6 +129,21 @@ export function createSessionStore(options: { dir: string; logger?: Logger }): S
       if (!SESSION_ID_RE.test(sessionId)) return;
       latest.set(sessionId, JSON.stringify(record));
       if (!writing.has(sessionId)) void flush(sessionId);
+    },
+
+    async remove(sessionId: string): Promise<void> {
+      if (!SESSION_ID_RE.test(sessionId)) return;
+      // Drop any queued snapshot so a coalesced write can't resurrect the file. (Reaped sessions
+      // are terminal, so no NEW save races this; an already-in-flight write is a benign leftover
+      // that the next daemon start ignores once the record is gone from memory.)
+      latest.delete(sessionId);
+      try {
+        await unlink(join(dir, `${sessionId}.json`));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          logger?.warn({ err, sessionId }, 'session-store: failed to remove session file');
+        }
+      }
     },
   };
 }

@@ -15,6 +15,7 @@ import {
   sessionControlPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionResumeNewPayloadSchema,
+  workspaceReapRequestPayloadSchema,
   type Envelope,
   type MessageType,
   type SessionHistoryEntry,
@@ -80,6 +81,8 @@ const TURN_LIMIT_PROMPT = 'hit the turn limit';
 // Magic prompt: the daemon "loses" the conversation (ux Phase 6 T8) — ends `needs_restart`, so the
 // session view offers resume-as-new and the spec can drive the forked continuation.
 const LOSE_SESSION_PROMPT = 'lose this session';
+// Reap behavior (Phase C T3): a session launched with this prompt answers `dirty` to workspace.reap.
+const DIRTY_WORKTREE_PROMPT = 'leave the worktree dirty';
 const CHAIN_PARENT_REF = 'chain-parent';
 const CHAIN_CHILD_REF = 'chain-child';
 // Overridable so the spec can use a per-run unique title — earlier runs' chains persist in the
@@ -224,6 +227,28 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       branches: ['main', 'develop', 'feat/existing'],
       defaultBranch: 'main',
     });
+    return;
+  }
+
+  // Worktree reaping (Phase C T3): answer like the real daemon — ok for a session this fake holds,
+  // `dirty` when its launch prompt used the magic marker, `unknown-session` otherwise.
+  if (envelope.type === 'workspace.reap') {
+    const request = workspaceReapRequestPayloadSchema.safeParse(envelope.payload);
+    if (!request.success) return;
+    const targetId = request.data.sessionId;
+    const target = records.get(targetId);
+    const dirty =
+      target?.transcript.some(
+        (entry) => entry.kind === 'user' && entry.text.startsWith(DIRTY_WORKTREE_PROMPT),
+      ) ?? false;
+    send(
+      'workspace.reap.state',
+      target === undefined
+        ? { sessionId: targetId, ok: false, code: 'unknown-session' }
+        : dirty
+          ? { sessionId: targetId, ok: false, code: 'dirty' }
+          : { sessionId: targetId, ok: true },
+    );
     return;
   }
 

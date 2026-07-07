@@ -186,6 +186,9 @@ const UNDELIVERABLE_REPLY_TYPES: ReadonlySet<string> = new Set([
   'user.message',
   'session.control',
   'session.subscribe',
+  // The delete flow's worktree reap (Phase C T3): box-sealed payload, but the envelope names the
+  // session as routing metadata, so a reap that reached an offline device un-spins honestly.
+  'workspace.reap',
 ]);
 
 /**

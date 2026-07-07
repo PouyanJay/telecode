@@ -1,4 +1,9 @@
-import { makeEnvelope, type AdoptStatePayload, type Envelope } from '@telecode/protocol';
+import {
+  makeEnvelope,
+  type AdoptStatePayload,
+  type Envelope,
+  type WorkspaceReapStatePayload,
+} from '@telecode/protocol';
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,6 +17,7 @@ import {
   disconnect,
   ensureConnections,
   launch,
+  reapWorkspace,
   requestAdoptConfig,
   seedSessionDevices,
   sendUserMessage,
@@ -39,9 +45,11 @@ interface FakeConn {
   readonly messages: { sessionId: string; text: string }[];
   readonly launched: unknown[];
   readonly adoptConfigs: unknown[];
+  readonly reaps: string[];
   closed: boolean;
   emit(envelope: Envelope): void;
   emitAdoptState(state: AdoptStatePayload): void;
+  emitWorkspaceReap(state: WorkspaceReapStatePayload): void;
   setStatus(status: 'connecting' | 'connected' | 'error'): void;
   reconnect(): void;
 }
@@ -57,9 +65,11 @@ function makeFakePool() {
       messages: [],
       launched: [],
       adoptConfigs: [],
+      reaps: [],
       closed: false,
       emit: (envelope) => options.onEvent(envelope),
       emitAdoptState: (state) => options.onAdoptState?.(state),
+      emitWorkspaceReap: (state) => options.onWorkspaceReap?.(state),
       setStatus: (status) => options.onStatus(status),
       reconnect: () => options.onReconnect?.(),
     };
@@ -76,6 +86,7 @@ function makeFakePool() {
       resumeNew: () => undefined,
       sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
       sendRepoBranchesRequest: () => undefined,
+      sendWorkspaceReap: (sessionId) => conn.reaps.push(sessionId),
       sendAdoptConfig: (set) => conn.adoptConfigs.push(set),
       close: () => {
         conn.closed = true;
@@ -372,5 +383,80 @@ describe('multi-device connection pool (ux Phase 5 T1)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
 
     vi.unstubAllGlobals();
+  });
+});
+
+/**
+ * Worktree reaping (branch-actions T3): the delete dialog's opt-in rides the session's OWN device
+ * channel and resolves with the daemon's sealed verdict — or the honest failure story (device
+ * offline via relay.error, local timeout, no routed connection). Never optimistic.
+ */
+describe('reapWorkspace (branch-actions T3)', () => {
+  it('sends the reap on the session own device and resolves the daemon ok verdict', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    seedSessionDevices([{ id: 'sess-reap', deviceId: 'device-b' }]);
+
+    const outcome = reapWorkspace('sess-reap');
+    const connB = pool.byDevice.get('device-b')!;
+    expect(connB.reaps).toEqual(['sess-reap']);
+    expect(pool.byDevice.get('device-a')!.reaps).toEqual([]);
+
+    connB.emitWorkspaceReap({ sessionId: 'sess-reap', ok: true });
+    await expect(outcome).resolves.toEqual({ ok: true });
+  });
+
+  it('resolves the daemon coded refusal as-is', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-dirty', deviceId: 'device-a' }]);
+
+    const outcome = reapWorkspace('sess-dirty');
+    pool.byDevice.get('device-a')!.emitWorkspaceReap({
+      sessionId: 'sess-dirty',
+      ok: false,
+      code: 'dirty',
+    });
+    await expect(outcome).resolves.toEqual({ ok: false, reason: 'dirty' });
+  });
+
+  it('resolves daemon-offline from the relay honest error, and ignores unrelated sessions', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-offline', deviceId: 'device-a' }]);
+
+    const outcome = reapWorkspace('sess-offline');
+    const connA = pool.byDevice.get('device-a')!;
+    // A reap verdict for a DIFFERENT session must not settle this one.
+    connA.emitWorkspaceReap({ sessionId: 'sess-other', ok: true });
+    connA.emit(
+      makeEnvelope({
+        type: 'relay.error',
+        userId,
+        deviceId: 'device-a',
+        sessionId: 'sess-offline',
+        payload: { code: 'device_offline', regarding: 'workspace.reap' },
+      }),
+    );
+    await expect(outcome).resolves.toEqual({ ok: false, reason: 'daemon-offline' });
+  });
+
+  it('resolves no-connection for an unrouted session in a multi-device pool (no guessing)', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    await expect(reapWorkspace('sess-unrouted')).resolves.toEqual({
+      ok: false,
+      reason: 'no-connection',
+    });
+  });
+
+  it('times out into an honest failure when nothing ever answers', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-silent', deviceId: 'device-a' }]);
+
+    const outcome = reapWorkspace('sess-silent');
+    vi.advanceTimersByTime(15_000);
+    await expect(outcome).resolves.toEqual({ ok: false, reason: 'timeout' });
   });
 });
