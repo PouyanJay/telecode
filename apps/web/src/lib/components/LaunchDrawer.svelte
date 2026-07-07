@@ -85,21 +85,23 @@
       if (selectedDeviceId) requestRepoBranches(selectedDeviceId);
       return;
     }
-    let stale = false;
+    const aborter = new AbortController();
     githubFetch = { state: 'loading', branches: [] };
     void fetch(
       `/api/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/branches`,
+      { signal: aborter.signal },
     )
       .then(async (res) => {
         if (!res.ok) throw new Error('branch listing failed');
         const body = (await res.json()) as { branches: string[] };
-        if (!stale) githubFetch = { state: 'loaded', branches: body.branches };
+        githubFetch = { state: 'loaded', branches: body.branches };
       })
       .catch(() => {
-        if (!stale) githubFetch = { state: 'error', branches: [] };
+        // An abort means the selection moved on — the next effect run owns the state.
+        if (!aborter.signal.aborted) githubFetch = { state: 'error', branches: [] };
       });
     return () => {
-      stale = true;
+      aborter.abort();
     };
   });
 

@@ -22,7 +22,7 @@ import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
 import { type OAuthTokenStore } from './auth/oauth-token-store';
 import { createGithubClient, type GithubClient } from './github/github-client';
-import { registerRepoBranchesRoute, registerRepoListRoute } from './github/repo-routes';
+import { registerRepoRoutes } from './github/repo-routes';
 import { registerPushRoutes } from './push/push-routes';
 import { type PushSender } from './push/push-sender';
 import { type PushSubscriptionStore } from './push/push-subscription-store';
@@ -955,10 +955,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
     // The launch picker lists the user's GitHub repos (only when a token store is configured).
     if (oauthTokenStore) {
-      const github = options.githubClient ?? createGithubClient();
-      registerRepoListRoute(app, options.auth.service, oauthTokenStore, github);
-      // The drawer's base-branch picker (branch-launch Phase B).
-      registerRepoBranchesRoute(app, options.auth.service, oauthTokenStore, github);
+      registerRepoRoutes(
+        app,
+        options.auth.service,
+        oauthTokenStore,
+        options.githubClient ?? createGithubClient(),
+      );
     }
     // Web push: register/remove subscriptions (the relay sends on awaiting_input).
     if (push) {

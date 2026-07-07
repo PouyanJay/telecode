@@ -13,7 +13,7 @@ import { type GithubClient } from './github-client';
  * table), and calls GitHub on their behalf. The token itself never leaves the relay — only repo metadata
  * is returned. `connected: false` (with no GitHub call) means the user hasn't linked a GitHub token yet.
  */
-export function registerRepoListRoute(
+export function registerRepoRoutes(
   app: FastifyInstance,
   auth: AuthService,
   tokenStore: OAuthTokenStore,
@@ -48,6 +48,8 @@ export function registerRepoListRoute(
       return reply.code(502).send({ error: 'github_unavailable' });
     }
   });
+
+  registerRepoBranchesRoute(app, auth, tokenStore, github);
 }
 
 /**
@@ -64,7 +66,7 @@ const repoParamsSchema = z.object({
  * Same trust path as /me/repos — the user's stored token is decrypted relay-side and never returned;
  * `connected: false` means no linked GitHub token (the drawer falls back to the default branch only).
  */
-export function registerRepoBranchesRoute(
+function registerRepoBranchesRoute(
   app: FastifyInstance,
   auth: AuthService,
   tokenStore: OAuthTokenStore,

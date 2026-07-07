@@ -41,17 +41,24 @@ export function buildBranchPickerModel(input: {
     return {
       status: 'ready',
       branches: input.github.branches,
-      // GitHub's list is unordered for our purposes; the repo row already knows its default.
-      defaultBranch: input.repo.defaultBranch,
+      // The repo row knows its default — but the picker may only hold the first API page, so a
+      // default beyond it must not pre-select an option that isn't rendered.
+      defaultBranch: input.github.branches.includes(input.repo.defaultBranch)
+        ? input.repo.defaultBranch
+        : null,
     };
   }
   // No repo selected: the device's default workspace. No reply yet → quiet (the request is in
   // flight or the daemon predates the RPC); unavailable/empty → hidden — never a dead-end spinner.
   if (input.local === undefined) return { status: 'hidden' };
   if (!input.local.available || input.local.branches.length === 0) return { status: 'hidden' };
+  const localDefault = input.local.defaultBranch;
   return {
     status: 'ready',
     branches: input.local.branches,
-    defaultBranch: input.local.defaultBranch ?? null,
+    defaultBranch:
+      localDefault !== undefined && input.local.branches.includes(localDefault)
+        ? localDefault
+        : null,
   };
 }

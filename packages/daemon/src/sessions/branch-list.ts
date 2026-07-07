@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 
-import { MAX_REPO_BRANCHES } from '@telecode/protocol';
+import { MAX_BRANCH_NAME_CHARS, MAX_REPO_BRANCHES } from '@telecode/protocol';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -32,7 +32,8 @@ export function createGitBranchLister(): BranchLister {
     const branches = heads.stdout
       .split('\n')
       .map((line) => line.trim())
-      .filter((line) => line !== '')
+      // An over-long NAME would sink the whole sealed list at every receiver — drop just that one.
+      .filter((line) => line !== '' && line.length <= MAX_BRANCH_NAME_CHARS)
       .slice(0, MAX_REPO_BRANCHES);
     let defaultBranch: string | undefined;
     try {

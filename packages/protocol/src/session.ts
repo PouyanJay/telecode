@@ -49,6 +49,13 @@ export const sessionRepoSchema = z.object({
 });
 export type SessionRepo = z.infer<typeof sessionRepoSchema>;
 
+/** The most branches one `repo.branches.state` carries — shared so the daemon's cap and the wire
+ * bound can never drift. */
+export const MAX_REPO_BRANCHES = 500;
+
+/** The longest branch name any wire field accepts — shared for the same no-drift reason. */
+export const MAX_BRANCH_NAME_CHARS = 256;
+
 /**
  * A wire-provided git branch name (branch-launch Phase B). A conservative ref-name subset validated at
  * the trust boundary — these reach `git` argv on the daemon (always via execFile array-args; this is
@@ -58,7 +65,7 @@ export type SessionRepo = z.infer<typeof sessionRepoSchema>;
 const gitBranchNameSchema = z
   .string()
   .min(1)
-  .max(256)
+  .max(MAX_BRANCH_NAME_CHARS)
   .refine(
     (name) =>
       // eslint-disable-next-line no-control-regex -- excluding control chars IS the point here
@@ -199,13 +206,9 @@ export type RepoBranchesRequestPayload = z.infer<typeof repoBranchesRequestPaylo
  * default repo configured (the drawer then offers no local base choice). Bounded like the launch's
  * branch fields; the daemon caps the list before sealing.
  */
-/** The most branches one `repo.branches.state` carries — shared so the daemon's cap and the wire
- * bound can never drift. */
-export const MAX_REPO_BRANCHES = 500;
-
 export const repoBranchesStatePayloadSchema = z.object({
   available: z.boolean(),
-  branches: z.array(z.string().min(1).max(256)).max(MAX_REPO_BRANCHES),
+  branches: z.array(z.string().min(1).max(MAX_BRANCH_NAME_CHARS)).max(MAX_REPO_BRANCHES),
   defaultBranch: z.string().min(1).max(256).optional(),
 });
 export type RepoBranchesStatePayload = z.infer<typeof repoBranchesStatePayloadSchema>;
@@ -369,7 +372,7 @@ export const sessionMetaPayloadSchema = z.object({
    * cwd's current branch for an adopted one (live-refreshed). Workspace content: sealed-only, like
    * everything here. Additive optional: old peers simply never see it.
    */
-  branch: z.string().min(1).max(256).optional(),
+  branch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS).optional(),
   model: z.string().min(1).max(128).optional(),
   permissionMode: permissionModeSchema.optional(),
   ts: entryTimestampSchema.optional(),

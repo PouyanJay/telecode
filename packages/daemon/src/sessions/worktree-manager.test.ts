@@ -152,6 +152,20 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
     expect(await exists(join(worktree.path, 'develop-only.txt'))).toBe(true);
   });
 
+  it('reuse reports the branch the worktree is ACTUALLY on — later options never win', async () => {
+    const repo = await makeRepo();
+    const root = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot: root });
+    const sessionId = randomUUID();
+
+    const first = await manager.ensureWorktree(sessionId, repo, { branchName: 'feat/original' });
+    expect(first.branch).toBe('feat/original');
+    // A relaunch with DIFFERENT options must not lie about (or move) the existing checkout.
+    const second = await manager.ensureWorktree(sessionId, repo, { branchName: 'feat/other' });
+    expect(second.branch).toBe('feat/original');
+    expect(second.path).toBe(first.path);
+  });
+
   it('a colliding branch name fails with a coded, human-readable error (branch-launch T3)', async () => {
     const repo = await makeRepo();
     await run('git', ['-C', repo, 'branch', 'taken']);

@@ -73,6 +73,7 @@ export {
   repoPathSegmentSchema,
   sessionRepoSchema,
   MAX_REPO_BRANCHES,
+  MAX_BRANCH_NAME_CHARS,
   sessionLaunchPayloadSchema,
   diffStatSchema,
   sessionResumeNewPayloadSchema,

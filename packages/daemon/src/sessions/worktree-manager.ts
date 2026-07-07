@@ -146,6 +146,13 @@ export function createGitWorktreeManager(options: GitWorktreeManagerOptions): Wo
         // checked out at `path`. execFile (not a shell) with an args array — no string interpolation.
         await run('git', ['-C', repo, 'worktree', 'add', '-b', branch, path, base]);
       } catch (cause) {
+        // A creator racing the precheck still deserves the friendly story git buries in stderr.
+        if (cause instanceof Error && /already exists/i.test(cause.message)) {
+          throw new WorktreeError(`branch already exists: ${branch}`, {
+            cause,
+            code: 'branch-exists',
+          });
+        }
         throw new WorktreeError(`failed to create git worktree for session ${sessionId}`, {
           cause,
         });

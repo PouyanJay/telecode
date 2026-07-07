@@ -69,6 +69,16 @@ describe('buildBranchPickerModel', () => {
     ).toEqual({ status: 'hidden' });
   });
 
+  it('a default beyond the listed page yields null — never a pre-selection with no option', () => {
+    expect(
+      buildBranchPickerModel({
+        repo: { ...REPO, defaultBranch: 'trunk-not-on-page-1' },
+        github: { state: 'loaded', branches: ['main', 'develop'] },
+        local: undefined,
+      }),
+    ).toEqual({ status: 'ready', branches: ['main', 'develop'], defaultBranch: null });
+  });
+
   it('a detached local default yields null (the picker just pre-selects nothing)', () => {
     expect(
       buildBranchPickerModel({

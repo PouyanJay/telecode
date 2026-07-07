@@ -39,6 +39,8 @@ import {
   type SessionHistoryPayload,
   type SessionLaunchPayload,
   type SessionMetaPayload,
+  MAX_BRANCH_NAME_CHARS,
+  repoBranchesRequestPayloadSchema,
   type RepoBranchesStatePayload,
   type SessionOrigin,
   type SessionStatusName,
@@ -1940,6 +1942,14 @@ export function createDaemon(options: DaemonOptions): Daemon {
    */
   async function handleRepoBranches(envelope: Envelope): Promise<void> {
     const browserPublicKey = envelope.sender_public_key;
+    // Same boundary discipline as adopt.config: open + validate the (trivial) request before answering.
+    try {
+      const raw = cipher.enabled ? await cipher.openFromBrowser(envelope) : envelope.payload;
+      repoBranchesRequestPayloadSchema.parse(raw);
+    } catch (err) {
+      log.warn({ err, deviceId: options.deviceId }, 'daemon: dropped invalid repo.branches');
+      return;
+    }
     let state: RepoBranchesStatePayload = { available: false, branches: [] };
     if (defaultRepoPath !== undefined && options.listRepoBranches !== undefined) {
       try {
@@ -2037,8 +2047,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * change (including a change to unknown: a stale name is worse than none); the branch is content —
    * sealed on the wire, never logged. No reader injected → adopted sessions carry no branch.
    */
-  // Mirrors sessionMetaPayloadSchema's branch bound — the daemon must never emit what receivers reject.
-  const MAX_BRANCH_CHARS = 256;
 
   async function refreshAdoptedBranch(telecodeSessionId: string): Promise<void> {
     if (options.readGitBranch === undefined) return;
@@ -2059,7 +2067,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     // Guard the wire bound HERE, against any injected reader: a name the schema would reject must
     // degrade to unknown — an invalid field would sink the whole merged snapshot at every receiver.
-    if (branch !== undefined && branch.length > MAX_BRANCH_CHARS) branch = undefined;
+    if (branch !== undefined && branch.length > MAX_BRANCH_NAME_CHARS) branch = undefined;
     if (branch === rec.meta?.branch) return;
     emitSessionMeta(adoptedSource(telecodeSessionId), { branch });
     persistSession(telecodeSessionId, rec);
