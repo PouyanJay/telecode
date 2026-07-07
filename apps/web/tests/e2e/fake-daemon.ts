@@ -204,6 +204,17 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     return;
   }
 
+  // The sealed local-branch round-trip (Phase B) — cleartext in this fake's default mode, exactly
+  // like its other frames; the sealed path is proven by the daemon package's own crypto tests.
+  if (envelope.type === 'repo.branches') {
+    send('repo.branches.state', {
+      available: true,
+      branches: ['main', 'develop', 'feat/existing'],
+      defaultBranch: 'main',
+    });
+    return;
+  }
+
   const sid = envelope.session_id;
   if (sid === undefined) return;
 
@@ -312,7 +323,12 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       // Branch mirrors the real daemon's worktree naming so specs can assert the header/rail rows.
       send(
         'session.meta',
-        { title: launch.data.prompt, titleSource: 'derived', branch: `telecode/${sid}` },
+        {
+          title: launch.data.prompt,
+          titleSource: 'derived',
+          // Mirrors the real daemon: a chosen name wins, else the worktree auto-name.
+          branch: launch.data.branchName ?? `telecode/${sid}`,
+        },
         sid,
       );
     }

@@ -22,7 +22,7 @@ import { type AuthService } from './auth/auth-service';
 import { registerAuthRoutes } from './auth/auth-routes';
 import { type OAuthTokenStore } from './auth/oauth-token-store';
 import { createGithubClient, type GithubClient } from './github/github-client';
-import { registerRepoListRoute } from './github/repo-routes';
+import { registerRepoRoutes } from './github/repo-routes';
 import { registerPushRoutes } from './push/push-routes';
 import { type PushSender } from './push/push-sender';
 import { type PushSubscriptionStore } from './push/push-subscription-store';
@@ -955,7 +955,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     }
     // The launch picker lists the user's GitHub repos (only when a token store is configured).
     if (oauthTokenStore) {
-      registerRepoListRoute(
+      registerRepoRoutes(
         app,
         options.auth.service,
         oauthTokenStore,

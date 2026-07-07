@@ -52,6 +52,11 @@ export const MESSAGE_TYPES = [
   // (daemon -> web) reports the current policy back to the requesting browser.
   'adopt.config',
   'adopt.state',
+  // local-repo branch listing (branch-launch Phase B), session-less + box-sealed like adopt.*:
+  // `repo.branches` (web -> daemon) asks for the DEFAULT repo's branches; `repo.branches.state`
+  // (daemon -> web) answers the requesting browser — branch names are content, sealed only.
+  'repo.branches',
+  'repo.branches.state',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).

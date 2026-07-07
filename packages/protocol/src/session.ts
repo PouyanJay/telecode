@@ -28,7 +28,7 @@ export type PermissionModeName = z.infer<typeof permissionModeSchema>;
  * (`~/.telecode/repos/<owner>/<name>`), so it is constrained to GitHub-valid characters and may not be a
  * traversal segment (`.`/`..`) — validated at the wire boundary so a crafted launch can't escape the cache.
  */
-const repoPathSegmentSchema = z
+export const repoPathSegmentSchema = z
   .string()
   .min(1)
   .max(100)
@@ -49,11 +49,52 @@ export const sessionRepoSchema = z.object({
 });
 export type SessionRepo = z.infer<typeof sessionRepoSchema>;
 
+/** The most branches one `repo.branches.state` carries — shared so the daemon's cap and the wire
+ * bound can never drift. */
+export const MAX_REPO_BRANCHES = 500;
+
+/** The longest branch name any wire field accepts — shared for the same no-drift reason. */
+export const MAX_BRANCH_NAME_CHARS = 256;
+
+/**
+ * A wire-provided git branch name (branch-launch Phase B). A conservative ref-name subset validated at
+ * the trust boundary — these reach `git` argv on the daemon (always via execFile array-args; this is
+ * defense on top): no whitespace/control chars, no `..`, none of git's forbidden ref characters, no
+ * leading `-` (option injection) or `/`, no trailing `/`, `.` or `.lock`.
+ */
+const gitBranchNameSchema = z
+  .string()
+  .min(1)
+  .max(MAX_BRANCH_NAME_CHARS)
+  .refine(
+    (name) =>
+      // eslint-disable-next-line no-control-regex -- excluding control chars IS the point here
+      !/[\s~^:?*[\\\x00-\x1f\x7f]/.test(name) &&
+      !name.includes('..') &&
+      !name.includes('@{') &&
+      !name.startsWith('-') &&
+      !name.startsWith('/') &&
+      !name.endsWith('/') &&
+      !name.endsWith('.') &&
+      !name.endsWith('.lock'),
+    { message: 'not a valid git branch name' },
+  );
+
+/** Whether a string is launch-safe as a git branch name — the drawer's inline validation shares the
+ * exact wire rule so the two can never disagree. */
+export function isValidGitBranchName(name: string): boolean {
+  return gitBranchNameSchema.safeParse(name).success;
+}
+
 /** Payload for `session.launch` (web → daemon): parameters to start one new agent session. */
 export const sessionLaunchPayloadSchema = z.object({
   prompt: z.string().min(1),
   /** GitHub repo to clone-on-demand and run in; omitted runs in the daemon's configured/default cwd. */
   repo: sessionRepoSchema.optional(),
+  /** Existing branch to cut the session branch FROM (Phase B); omitted → the repo's HEAD. */
+  baseBranch: gitBranchNameSchema.optional(),
+  /** The new session branch's name (Phase B); omitted → the telecode auto-name. */
+  branchName: gitBranchNameSchema.optional(),
   /** Working directory for the session (single cwd in Phase 1; git worktrees in Phase 2). */
   cwd: z.string().min(1).optional(),
   permissionMode: permissionModeSchema.optional(),
@@ -154,6 +195,23 @@ export const adoptStatePayloadSchema = adoptSettingsSchema.extend({
   events: z.array(z.string().min(1).max(64)).max(20).default([]),
 });
 export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
+
+/** Payload for `repo.branches` (web → daemon): ask for the default repo's branches (Phase B). */
+export const repoBranchesRequestPayloadSchema = z.object({});
+export type RepoBranchesRequestPayload = z.infer<typeof repoBranchesRequestPayloadSchema>;
+
+/**
+ * Payload for `repo.branches.state` (daemon → web, sealed to the requester): the DEFAULT repo's
+ * local branches for the launch drawer's base picker. `available: false` = this daemon has no
+ * default repo configured (the drawer then offers no local base choice). Bounded like the launch's
+ * branch fields; the daemon caps the list before sealing.
+ */
+export const repoBranchesStatePayloadSchema = z.object({
+  available: z.boolean(),
+  branches: z.array(z.string().min(1).max(MAX_BRANCH_NAME_CHARS)).max(MAX_REPO_BRANCHES),
+  defaultBranch: z.string().min(1).max(256).optional(),
+});
+export type RepoBranchesStatePayload = z.infer<typeof repoBranchesStatePayloadSchema>;
 
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
@@ -314,7 +372,7 @@ export const sessionMetaPayloadSchema = z.object({
    * cwd's current branch for an adopted one (live-refreshed). Workspace content: sealed-only, like
    * everything here. Additive optional: old peers simply never see it.
    */
-  branch: z.string().min(1).max(256).optional(),
+  branch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS).optional(),
   model: z.string().min(1).max(128).optional(),
   permissionMode: permissionModeSchema.optional(),
   ts: entryTimestampSchema.optional(),

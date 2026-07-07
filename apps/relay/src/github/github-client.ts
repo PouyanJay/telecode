@@ -20,7 +20,12 @@ export interface GithubRepo {
 export interface GithubClient {
   /** List repos the access token can see. Throws on a GitHub error (e.g. a revoked token). */
   listRepos(accessToken: string): Promise<GithubRepo[]>;
+  /** List a repo's branch names (first page, launch-picker scale). Throws on a GitHub error. */
+  listBranches(accessToken: string, owner: string, name: string): Promise<string[]>;
 }
+
+/** The one field we read from GitHub's branch listing — validated at this trust boundary. */
+const githubApiBranchesSchema = z.array(z.object({ name: z.string() }));
 
 /** The fields we read from GitHub's `GET /user/repos` response — validated at this trust boundary. */
 const githubApiReposSchema = z.array(
@@ -80,6 +85,26 @@ export function createGithubClient(): GithubClient {
         defaultBranch: repo.default_branch,
         cloneUrl: repo.clone_url,
       }));
+    },
+
+    async listBranches(accessToken: string, owner: string, name: string): Promise<string[]> {
+      // Owner/name are boundary-validated by the route; encode anyway so they can never re-shape the URL.
+      const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/branches?per_page=100`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'telecode',
+        },
+      });
+      if (!res.ok) {
+        throw new GithubApiError(`GitHub branch listing failed: ${res.status}`, res.status);
+      }
+      const parsed = githubApiBranchesSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        throw new GithubApiError('unexpected GitHub branch-listing response shape', 502);
+      }
+      return parsed.data.map((branch) => branch.name);
     },
   };
 }

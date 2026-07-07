@@ -75,6 +75,7 @@ function makeFakePool() {
       control: () => undefined,
       resumeNew: () => undefined,
       sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
+      sendRepoBranchesRequest: () => undefined,
       sendAdoptConfig: (set) => conn.adoptConfigs.push(set),
       close: () => {
         conn.closed = true;

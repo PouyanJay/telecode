@@ -39,6 +39,9 @@ import {
   type SessionHistoryPayload,
   type SessionLaunchPayload,
   type SessionMetaPayload,
+  MAX_BRANCH_NAME_CHARS,
+  repoBranchesRequestPayloadSchema,
+  type RepoBranchesStatePayload,
   type SessionOrigin,
   type SessionStatusName,
 } from '@telecode/protocol';
@@ -46,6 +49,7 @@ import {
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
 import { deriveSessionTitle, derivedMetaPatch, resolveLaunchTitle } from './derive-title';
+import { deriveBranchName } from './derive-branch-name';
 import { diffStatForTool } from './diff-stat';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { adoptedGateDecision } from './adopt/adopted-gate-decision';
@@ -63,6 +67,7 @@ import { buildQuestionDenyReason } from './adopt/question-deny-reason';
 import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import { type BranchReader } from './adopt/git-branch';
+import { type BranchLister } from './sessions/branch-list';
 import {
   type AgentAdapter,
   type AgentRunOptions,
@@ -75,7 +80,7 @@ import { classifyTool } from './permission-policy';
 import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
 import { type PersistedSession, type SessionStore } from './sessions/session-store';
-import { type WorktreeManager } from './sessions/worktree-manager';
+import { WorktreeError, type WorktreeManager } from './sessions/worktree-manager';
 
 /** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
 const HANDOVER_TITLE_PREVIEW_CHARS = 60;
@@ -202,6 +207,11 @@ export interface DaemonOptions {
    * minimal setups). Launched sessions get theirs from the worktree manager instead.
    */
   readonly readGitBranch?: BranchReader;
+  /**
+   * Lists the DEFAULT repo's branches for the launch drawer's base picker (`repo.branches`, Phase B).
+   * Injected at the composition root; omitted → the daemon answers unavailable.
+   */
+  readonly listRepoBranches?: BranchLister;
   readonly logger?: Logger;
 }
 
@@ -1074,7 +1084,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     try {
       const resolved = await resolveSessionRepo(launch);
       if (resolved === undefined) return {};
-      const worktree = await worktreeManager.ensureWorktree(sessionId, resolved.path);
+      // Launch-chosen branch control (Phase B) — validated at the wire boundary by the launch schema.
+      // Unnamed launches get a readable prompt-slug name instead of the old bare short-uuid label.
+      const worktree = await worktreeManager.ensureWorktree(sessionId, resolved.path, {
+        ...(launch.baseBranch !== undefined ? { baseBranch: launch.baseBranch } : {}),
+        branchName: launch.branchName ?? deriveBranchName(launch.prompt, sessionId),
+      });
       sessionCwds.set(sessionId, worktree.path);
       recordFor(sessionId).cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
       // Log owner/name + branch only — never the clone URL or local paths (kept out of log sinks).
@@ -1094,10 +1109,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
         'daemon: failed to prepare workspace',
       );
       setStatus(sessionId, 'error');
-      sendForSession(envelope, 'session.ended', {
-        status: 'error',
-        error: 'failed to prepare session workspace',
-      });
+      // A CODED worktree error is user-fixable and its message is safe verbatim ("branch already
+      // exists: X"); anything else stays generic — git's own stderr may carry local paths.
+      const userMessage =
+        err instanceof WorktreeError && err.code !== undefined
+          ? err.message
+          : 'failed to prepare session workspace';
+      sendForSession(envelope, 'session.ended', { status: 'error', error: userMessage });
       return FAILED;
     }
   }
@@ -1594,6 +1612,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
         await handleAdoptConfig(envelope);
         return;
       }
+      case 'repo.branches': {
+        await handleRepoBranches(envelope);
+        return;
+      }
       case 'viewer.presence': {
         // Relay tells us whether any browser is watching this channel (the mirror of device.presence). We
         // hold it so the adopted-session gate only blocks for a remote approval while an operator is present.
@@ -1912,6 +1934,55 @@ export function createDaemon(options: DaemonOptions): Daemon {
     });
   }
 
+  /**
+   * Answer `repo.branches` (branch-launch Phase B): the DEFAULT repo's local branches for the base
+   * picker, sealed to the requesting browser exactly like adopt.state — branch names are workspace
+   * content and never reach the relay in the clear. No default repo / listing failure → unavailable
+   * (fail-soft; the drawer simply offers no local base choice). Names are never logged.
+   */
+  async function handleRepoBranches(envelope: Envelope): Promise<void> {
+    const browserPublicKey = envelope.sender_public_key;
+    // Same boundary discipline as adopt.config: open + validate the (trivial) request before answering.
+    try {
+      const raw = cipher.enabled ? await cipher.openFromBrowser(envelope) : envelope.payload;
+      repoBranchesRequestPayloadSchema.parse(raw);
+    } catch (err) {
+      log.warn({ err, deviceId: options.deviceId }, 'daemon: dropped invalid repo.branches');
+      return;
+    }
+    let state: RepoBranchesStatePayload = { available: false, branches: [] };
+    if (defaultRepoPath !== undefined && options.listRepoBranches !== undefined) {
+      try {
+        const listed = await options.listRepoBranches(defaultRepoPath);
+        state = {
+          available: true,
+          branches: listed.branches,
+          ...(listed.defaultBranch !== undefined ? { defaultBranch: listed.defaultBranch } : {}),
+        };
+      } catch (err) {
+        log.warn(
+          { err, deviceId: options.deviceId },
+          'daemon: could not list default repo branches',
+        );
+      }
+    }
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        cipher.enabled && browserPublicKey !== undefined
+          ? await cipher.sealToBrowser(browserPublicKey, state)
+          : { payload: state, nonce: '' };
+      return JSON.stringify(
+        makeEnvelope({
+          type: 'repo.branches.state',
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
   const adoptedSessions: AdoptedSessionManager | undefined = options.adopt
     ? createAdoptedSessionManager({
         announce: announceAdopted,
@@ -1976,8 +2047,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * change (including a change to unknown: a stale name is worse than none); the branch is content —
    * sealed on the wire, never logged. No reader injected → adopted sessions carry no branch.
    */
-  // Mirrors sessionMetaPayloadSchema's branch bound — the daemon must never emit what receivers reject.
-  const MAX_BRANCH_CHARS = 256;
 
   async function refreshAdoptedBranch(telecodeSessionId: string): Promise<void> {
     if (options.readGitBranch === undefined) return;
@@ -1998,7 +2067,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     // Guard the wire bound HERE, against any injected reader: a name the schema would reject must
     // degrade to unknown — an invalid field would sink the whole merged snapshot at every receiver.
-    if (branch !== undefined && branch.length > MAX_BRANCH_CHARS) branch = undefined;
+    if (branch !== undefined && branch.length > MAX_BRANCH_NAME_CHARS) branch = undefined;
     if (branch === rec.meta?.branch) return;
     emitSessionMeta(adoptedSource(telecodeSessionId), { branch });
     persistSession(telecodeSessionId, rec);

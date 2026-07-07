@@ -141,6 +141,76 @@ describe('daemon session.meta on launch (session-identity T1)', () => {
     expect(meta.branch).toBe(`telecode/${ids.sessionId}`);
   });
 
+  it('a launch-chosen base + branch name ride the worktree cut and the sealed identity (Phase B)', async () => {
+    const ids = mkE2eIds();
+    const daemonKp = await generateKeyPair();
+    const browserKp = await generateKeyPair();
+    const cuts: { baseBranch?: string; branchName?: string }[] = [];
+    const worktreeManager: WorktreeManager = {
+      ensureWorktree: (sessionId, _repoPath, options) => {
+        cuts.push({ ...options });
+        return Promise.resolve({
+          path: `/worktrees/${sessionId}`,
+          branch: options?.branchName ?? `telecode/${sessionId.slice(0, 8)}`,
+        });
+      },
+    };
+    const relay = await startDaemon(
+      ids,
+      daemonKp,
+      createFakeAgentAdapter([], { sessionId: 'sdk-branch-pick' }),
+      { worktreeManager, defaultRepoPath: '/repos/app' },
+    );
+
+    await sendSealedLaunch(relay, ids, daemonKp, browserKp, {
+      prompt: 'work on the login form',
+      baseBranch: 'develop',
+      branchName: 'feat/login-form',
+    });
+
+    const keyFrame = await relay.waitForFrame(ofType('session.key', ids.sessionId));
+    const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
+    const meta = await openMeta(
+      await relay.waitForFrame(ofType('session.meta', ids.sessionId)),
+      contentKey,
+    );
+
+    // The wire choice reached the cut AND the sealed identity reports the chosen name.
+    expect(cuts).toEqual([{ baseBranch: 'develop', branchName: 'feat/login-form' }]);
+    expect(meta.branch).toBe('feat/login-form');
+  });
+
+  it('an unnamed launch gets a readable auto-slug branch, not a bare uuid (Phase B)', async () => {
+    const ids = mkE2eIds();
+    const daemonKp = await generateKeyPair();
+    const browserKp = await generateKeyPair();
+    const worktreeManager: WorktreeManager = {
+      ensureWorktree: (sessionId, _repoPath, options) =>
+        Promise.resolve({
+          path: `/worktrees/${sessionId}`,
+          branch: options?.branchName ?? `telecode/${sessionId.slice(0, 8)}`,
+        }),
+    };
+    const relay = await startDaemon(
+      ids,
+      daemonKp,
+      createFakeAgentAdapter([], { sessionId: 'sdk-slug' }),
+      { worktreeManager, defaultRepoPath: '/repos/app' },
+    );
+
+    await sendSealedLaunch(relay, ids, daemonKp, browserKp, {
+      prompt: 'Build the login form!',
+    });
+
+    const keyFrame = await relay.waitForFrame(ofType('session.key', ids.sessionId));
+    const contentKey = await unwrapContentKey(keyFrame, daemonKp.publicKey, browserKp.privateKey);
+    const meta = await openMeta(
+      await relay.waitForFrame(ofType('session.meta', ids.sessionId)),
+      contentKey,
+    );
+    expect(meta.branch).toBe(`telecode/build-the-login-form-${ids.sessionId.slice(0, 8)}`);
+  });
+
   it('carries owner/name as the repo identity for a cloned launch repo', async () => {
     const ids = mkE2eIds();
     const daemonKp = await generateKeyPair();
