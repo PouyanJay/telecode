@@ -109,6 +109,36 @@ describe('relay ciphertext cache (Phase 4 Task 8)', () => {
     expect(got.find((e) => e.type === 'agent.message')?.payload).toBe('CIPHER_MSG');
   });
 
+  it('replays only the LATEST session.changes on reopen (latest-wins, outside the stream ring)', async () => {
+    const url = await startRelay({ maxFramesPerSession: 2 });
+    const sid = 'sess-changes';
+    const daemon = await connectDaemon(url, userId, deviceId);
+    sockets.push(daemon);
+
+    const watcher = await connectBrowser(url, userId, deviceId);
+    sockets.push(watcher);
+    subscribe(watcher, sid);
+    await awaitSubscribeForwarded(daemon);
+    // A stale summary, a newer one, then enough stream frames to overflow a 2-slot ring — proving
+    // the changes slot neither rotates out nor eats ring capacity (like session.meta).
+    daemonSend(daemon, 'session.changes', sid, 'CIPHER_CHANGES_STALE');
+    daemonSend(daemon, 'session.changes', sid, 'CIPHER_CHANGES_FRESH');
+    daemonSend(daemon, 'agent.message', sid, 'CIPHER_MSG_1');
+    daemonSend(daemon, 'agent.message', sid, 'CIPHER_MSG_2');
+    await waitForEnvelope(watcher, (e) => e.payload === 'CIPHER_MSG_2'); // received live ⇒ cached
+
+    const browser = await connectBrowser(url, userId, deviceId);
+    sockets.push(browser);
+    const got = collect(browser);
+    subscribe(browser, sid);
+    await waitForEnvelope(browser, (e) => e.payload === 'CIPHER_MSG_2'); // replay is done
+
+    const changes = got.filter((e) => e.type === 'session.changes');
+    expect(changes.map((e) => e.payload)).toEqual(['CIPHER_CHANGES_FRESH']);
+    // The ring kept both stream frames — the changes frames never consumed its slots.
+    expect(got.filter((e) => e.type === 'agent.message')).toHaveLength(2);
+  });
+
   it('bounds the cache to the most recent frames per session (ring buffer)', async () => {
     const url = await startRelay({ maxFramesPerSession: 3 });
     const sid = 'sess-bounded';

@@ -1,8 +1,9 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { createConnection } from 'node:net';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 import {
   encodeKey,
@@ -24,26 +25,15 @@ import {
   startE2eDaemon,
   unwrapContentKey,
 } from './e2e-harness';
+import { hookRpc } from './hook-rpc';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
+import { createGitWorktreeManager } from './sessions/worktree-manager';
 
-/** One bridge round-trip over the hook socket: write the event, half-close, read the decision JSON. */
-function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath);
-    let out = '';
-    client.on('connect', () => client.end(JSON.stringify(event)));
-    client.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf8');
-    });
-    client.on('end', () => {
-      try {
-        resolve(out === '' ? {} : JSON.parse(out));
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error('hook response parse failed'));
-      }
-    });
-    client.on('error', reject);
-  });
+const execFileAsync = promisify(execFile);
+
+/** Run one git command in `cwd`, returning stdout (test-only convenience). */
+async function runGitCmd(cwd: string, args: string[]): Promise<string> {
+  return (await execFileAsync('git', ['-C', cwd, ...args])).stdout;
 }
 
 /**
@@ -120,7 +110,7 @@ function sendResumeNew(
   relay: FakeRelay,
   ids: { userId: string; deviceId: string },
   parentId: string,
-  payload: { prompt: string; clientRef?: string },
+  payload: { prompt: string; clientRef?: string; baseBranch?: string; branchName?: string },
 ): void {
   relay.send(
     makeEnvelope({
@@ -538,5 +528,155 @@ describe('resume-as-new variants: every terminal parent status is continuable (T
       resume: `sdk-${endedAs}`,
       forkSession: true,
     });
+  });
+});
+
+/**
+ * Fork onto a chosen branch (branch-actions T5): either branch field on the resume_new payload
+ * gives the child its OWN worktree — cut from the chosen base (default: the parent's branch, so
+ * the fork continues its code state) with the chosen name (default: the auto slug) — instead of
+ * inheriting the parent's. Real git repos + the real worktree manager; only the agent is fake.
+ */
+describe('daemon resume-as-new onto a chosen branch (branch-actions T5)', () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  async function tempDir(prefix: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  async function makeRepo(): Promise<string> {
+    const dir = await tempDir('telecode-fork-repo-');
+    await runGitCmd(dir, ['init', '-q', '-b', 'main']);
+    await runGitCmd(dir, ['config', 'user.email', 'test@telecode.local']);
+    await runGitCmd(dir, ['config', 'user.name', 'telecode-test']);
+    await writeFile(join(dir, 'README.md'), '# repo\n');
+    await runGitCmd(dir, ['add', '.']);
+    await runGitCmd(dir, ['commit', '-qm', 'init']);
+    // A diverged base a fork can choose: feat/base carries a file main does not.
+    await runGitCmd(dir, ['checkout', '-qb', 'feat/base']);
+    await writeFile(join(dir, 'base-only.txt'), 'on feat/base\n');
+    await runGitCmd(dir, ['add', '.']);
+    await runGitCmd(dir, ['commit', '-qm', 'base work']);
+    await runGitCmd(dir, ['checkout', '-q', 'main']);
+    return dir;
+  }
+
+  interface ForkHarness {
+    relay: FakeRelay;
+    ids: { userId: string; deviceId: string };
+    repoPath: string;
+    worktreesRoot: string;
+    runCalls: RunCall[];
+  }
+
+  async function startForkHarness(): Promise<ForkHarness> {
+    const repoPath = await makeRepo();
+    const worktreesRoot = await tempDir('telecode-fork-worktrees-');
+    const runCalls: RunCall[] = [];
+    const adapter: AgentAdapter = {
+      async run(prompt, opts) {
+        runCalls.push({
+          prompt,
+          ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+          ...(opts.forkSession !== undefined ? { forkSession: opts.forkSession } : {}),
+          ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        });
+        opts.onEvent({ type: 'message', text: 'done' });
+        return { intercepted: [], allowed: [], denied: [], sessionId: `sdk-${runCalls.length}` };
+      },
+    };
+    const ids = await startDaemon(adapter, {
+      worktreeManager: createGitWorktreeManager({ worktreesRoot, logger: silent }),
+      defaultRepoPath: repoPath,
+    });
+    return { relay: ids.relay, ids, repoPath, worktreesRoot, runCalls };
+  }
+
+  it('cuts the child a fresh worktree from the CHOSEN base with the chosen name', async () => {
+    const h = await startForkHarness();
+    const parentId = randomUUID();
+    await launchToEnd(h.relay, h.ids, parentId, 'parent work');
+
+    const childId = randomUUID();
+    sendResumeNew(h.relay, h.ids, parentId, {
+      prompt: 'continue over there',
+      baseBranch: 'feat/base',
+      branchName: 'feat/continued',
+    });
+    await ackChained(h.relay, h.ids, childId);
+    await h.relay.waitForFrame(ofType('session.ended', childId));
+
+    // The child ran in its OWN worktree — not the parent's.
+    const childCwd = join(h.worktreesRoot, childId);
+    expect(h.runCalls.at(-1)?.cwd).toBe(childCwd);
+    expect(h.runCalls.at(-1)?.forkSession).toBe(true);
+    // Cut from feat/base (its file is present) onto the chosen name.
+    await access(join(childCwd, 'base-only.txt'));
+    const head = await runGitCmd(childCwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    expect(head.trim()).toBe('feat/continued');
+    // The parent's worktree survives untouched.
+    await access(join(h.worktreesRoot, parentId));
+    // The child's sealed identity reports ITS branch and cwd (never the parent's).
+    const childMeta = sessionMetaPayloadSchema.parse(
+      (
+        await h.relay.waitForFrame((e) => {
+          if (e.type !== 'session.meta' || e.session_id !== childId) return false;
+          const parsed = sessionMetaPayloadSchema.safeParse(e.payload);
+          return parsed.success && parsed.data.branch === 'feat/continued';
+        })
+      ).payload,
+    );
+    expect(childMeta.cwd).toBe(childCwd);
+  });
+
+  it('defaults the base to the PARENT branch — the fork continues its code state', async () => {
+    const h = await startForkHarness();
+    const parentId = randomUUID();
+    await launchToEnd(h.relay, h.ids, parentId, 'parent work');
+    // Work committed on the parent's branch after its run — the fork must start from it.
+    const parentCwd = join(h.worktreesRoot, parentId);
+    await writeFile(join(parentCwd, 'parent-work.txt'), 'committed on the parent branch\n');
+    await runGitCmd(parentCwd, ['add', '.']);
+    await runGitCmd(parentCwd, ['commit', '-qm', 'parent work']);
+
+    const childId = randomUUID();
+    sendResumeNew(h.relay, h.ids, parentId, {
+      prompt: 'continue on a named branch',
+      branchName: 'feat/from-parent',
+    });
+    await ackChained(h.relay, h.ids, childId);
+    await h.relay.waitForFrame(ofType('session.ended', childId));
+
+    const childCwd = join(h.worktreesRoot, childId);
+    await access(join(childCwd, 'parent-work.txt')); // the parent's committed state came along
+    const head = await runGitCmd(childCwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    expect(head.trim()).toBe('feat/from-parent');
+  });
+
+  it('fails the child cleanly (coded, verbatim) when the chosen name already exists', async () => {
+    const h = await startForkHarness();
+    await runGitCmd(h.repoPath, ['branch', 'taken']);
+    const parentId = randomUUID();
+    await launchToEnd(h.relay, h.ids, parentId, 'parent work');
+
+    const childId = randomUUID();
+    sendResumeNew(h.relay, h.ids, parentId, {
+      prompt: 'continue onto a taken name',
+      branchName: 'taken',
+    });
+    await ackChained(h.relay, h.ids, childId);
+    const ended = await h.relay.waitForFrame(ofType('session.ended', childId));
+    expect(ended.payload).toMatchObject({
+      status: 'error',
+      error: 'branch already exists: taken',
+    });
+    // No half-made workspace for the failed child.
+    await expect(access(join(h.worktreesRoot, childId))).rejects.toThrow();
   });
 });

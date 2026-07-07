@@ -13,8 +13,11 @@ import {
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
+  repoBranchesRequestPayloadSchema,
+  sessionBranchSwitchPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionResumeNewPayloadSchema,
+  workspaceReapRequestPayloadSchema,
   type Envelope,
   type MessageType,
   type SessionHistoryEntry,
@@ -55,6 +58,18 @@ const ADOPT_ANNOUNCE_REF = 'auto-adopt';
 const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
 // The gate's rough ±lines (mockup §01-4), mirrored like the real daemon computes for Write/Edit.
 const DEFAULT_DIFF_STAT = { added: 1, removed: 0 };
+// The branch-diff summary (Phase C) every launched/subscribed session reports: one counted file and
+// one binary (null counts → the rail's honest "—"), so specs can assert both renderings.
+const SESSION_CHANGES_SUMMARY = {
+  baseBranch: 'main',
+  files: [
+    { path: 'README.md', additions: 2, deletions: 0 },
+    { path: 'assets/logo.png', additions: null, deletions: null },
+  ],
+  totalAdditions: 2,
+  totalDeletions: 0,
+  truncated: false,
+};
 
 /**
  * Launch prompt that triggers the chained-thread dance (ux Phase 3): the daemon ends the trigger
@@ -68,6 +83,13 @@ const TURN_LIMIT_PROMPT = 'hit the turn limit';
 // Magic prompt: the daemon "loses" the conversation (ux Phase 6 T8) — ends `needs_restart`, so the
 // session view offers resume-as-new and the spec can drive the forked continuation.
 const LOSE_SESSION_PROMPT = 'lose this session';
+// Reap behavior (Phase C T3): a session launched with this prompt answers `dirty` to workspace.reap.
+const DIRTY_WORKTREE_PROMPT = 'leave the worktree dirty';
+// Switch behavior (Phase C T4): a session launched with this prompt refuses every branch switch
+// with `checked-out-elsewhere` — the refusal an e2e spec can drive into the rail's inline story.
+const HELD_BRANCH_PROMPT = 'hold the branch elsewhere';
+// Push behavior (Phase C T6): a session launched with this prompt answers `rejected` to session.push.
+const REJECT_PUSH_PROMPT = 'reject the push';
 const CHAIN_PARENT_REF = 'chain-parent';
 const CHAIN_CHILD_REF = 'chain-child';
 // Overridable so the spec can use a per-run unique title — earlier runs' chains persist in the
@@ -151,7 +173,12 @@ interface SessionRecord {
 }
 const records = new Map<string, SessionRecord>();
 // Resume-as-new continuations awaiting their relay `session.chained` ACK, by announce clientRef (T8).
-const pendingResumes = new Map<string, { prompt: string; browserRef?: string }>();
+// `branchName`/`baseBranch` (branch-actions T5) mirror the real daemon's fork-onto-branch: the child's
+// meta reports the cut branch (chosen name, else a slug from the base) instead of inheriting.
+const pendingResumes = new Map<
+  string,
+  { prompt: string; browserRef?: string; baseBranch?: string; branchName?: string }
+>();
 
 function recordFor(sessionId: string): SessionRecord {
   let record = records.get(sessionId);
@@ -204,14 +231,41 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     return;
   }
 
-  // The sealed local-branch round-trip (Phase B) — cleartext in this fake's default mode, exactly
-  // like its other frames; the sealed path is proven by the daemon package's own crypto tests.
+  // The sealed local-branch round-trip (Phase B; sessionId echo = the T4 session-scoped variant) —
+  // cleartext in this fake's default mode, exactly like its other frames; the sealed path is
+  // proven by the daemon package's own crypto tests.
   if (envelope.type === 'repo.branches') {
+    const ask = repoBranchesRequestPayloadSchema.safeParse(envelope.payload);
+    const echo =
+      ask.success && ask.data.sessionId !== undefined ? { sessionId: ask.data.sessionId } : {};
     send('repo.branches.state', {
       available: true,
       branches: ['main', 'develop', 'feat/existing'],
       defaultBranch: 'main',
+      ...echo,
     });
+    return;
+  }
+
+  // Worktree reaping (Phase C T3): answer like the real daemon — ok for a session this fake holds,
+  // `dirty` when its launch prompt used the magic marker, `unknown-session` otherwise.
+  if (envelope.type === 'workspace.reap') {
+    const request = workspaceReapRequestPayloadSchema.safeParse(envelope.payload);
+    if (!request.success) return;
+    const targetId = request.data.sessionId;
+    const target = records.get(targetId);
+    const dirty =
+      target?.transcript.some(
+        (entry) => entry.kind === 'user' && entry.text.startsWith(DIRTY_WORKTREE_PROMPT),
+      ) ?? false;
+    send(
+      'workspace.reap.state',
+      target === undefined
+        ? { sessionId: targetId, ok: false, code: 'unknown-session' }
+        : dirty
+          ? { sessionId: targetId, ok: false, code: 'dirty' }
+          : { sessionId: targetId, ok: true },
+    );
     return;
   }
 
@@ -283,7 +337,22 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
         pendingResume.browserRef !== undefined ? { clientRef: pendingResume.browserRef } : {},
         sid,
       );
-      send('session.meta', { title: pendingResume.prompt, titleSource: 'derived' }, sid);
+      // Fork onto a chosen branch (T5): the child's identity reports ITS cut branch, mirroring
+      // the real daemon (chosen name wins; a bare base gets the deterministic fake slug).
+      const forkBranch =
+        pendingResume.branchName ??
+        (pendingResume.baseBranch !== undefined
+          ? `telecode/fork-of-${pendingResume.baseBranch}`
+          : undefined);
+      send(
+        'session.meta',
+        {
+          title: pendingResume.prompt,
+          titleSource: 'derived',
+          ...(forkBranch !== undefined ? { branch: forkBranch } : {}),
+        },
+        sid,
+      );
       rec.transcript.push({ kind: 'message', text: 'Picking up where we left off' });
       send('agent.message', { text: 'Picking up where we left off' }, sid);
       rec.status = 'done';
@@ -331,6 +400,13 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
         },
         sid,
       );
+    }
+
+    // Branch-diff summary (Phase C): the real daemon computes this from the worktree and re-emits it
+    // between turns; this fake compresses time and reports the "agent work" up front — cleartext in
+    // the default mode, like every frame here (the sealed path is the daemon package's crypto tests).
+    if (launch.success) {
+      send('session.changes', SESSION_CHANGES_SUMMARY, sid);
     }
 
     if (launch.success && launch.data.prompt.startsWith(TURN_LIMIT_PROMPT)) {
@@ -391,6 +467,8 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     pendingResumes.set(ref, {
       prompt: resume.data.prompt,
       ...(resume.data.clientRef !== undefined ? { browserRef: resume.data.clientRef } : {}),
+      ...(resume.data.baseBranch !== undefined ? { baseBranch: resume.data.baseBranch } : {}),
+      ...(resume.data.branchName !== undefined ? { branchName: resume.data.branchName } : {}),
     });
     send('session.chained', { clientRef: ref, parentSessionId: sid });
     return;
@@ -440,6 +518,52 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     return;
   }
 
+  // Open-PR push leg (Phase C T6): answer like the real daemon against a github.com origin —
+  // the pushed branch + base + owner/name the browser builds the PR link from. The magic-prompt
+  // session answers `rejected` so specs can drive a refusal into the panel.
+  if (envelope.type === 'session.push') {
+    const target = records.get(sid);
+    if (target === undefined) {
+      send('session.push.state', { ok: false, code: 'not-launched' }, sid);
+      return;
+    }
+    const rejected = target.transcript.some(
+      (entry) => entry.kind === 'user' && entry.text.startsWith(REJECT_PUSH_PROMPT),
+    );
+    send(
+      'session.push.state',
+      rejected
+        ? { ok: false, code: 'rejected' }
+        : { ok: true, branch: `telecode/${sid}`, base: 'main', githubRepo: 'acme/app' },
+      sid,
+    );
+    return;
+  }
+
+  // Between-turns branch switch (Phase C T4): settle the ask, then re-announce like the real
+  // daemon — fresh meta with the new branch and a recomputed changes summary. The magic-prompt
+  // session refuses instead, so specs can drive a coded refusal into the UI.
+  if (envelope.type === 'session.branch.switch') {
+    const ask = sessionBranchSwitchPayloadSchema.safeParse(envelope.payload);
+    if (!ask.success) return;
+    const target = records.get(sid);
+    if (target === undefined) {
+      send('session.branch.state', { ok: false, code: 'not-launched' }, sid);
+      return;
+    }
+    const held = target.transcript.some(
+      (entry) => entry.kind === 'user' && entry.text.startsWith(HELD_BRANCH_PROMPT),
+    );
+    if (held) {
+      send('session.branch.state', { ok: false, code: 'checked-out-elsewhere' }, sid);
+      return;
+    }
+    send('session.branch.state', { ok: true, branch: ask.data.branch }, sid);
+    send('session.meta', { branch: ask.data.branch }, sid);
+    send('session.changes', SESSION_CHANGES_SUMMARY, sid);
+    return;
+  }
+
   if (envelope.type === 'session.subscribe') {
     // Reopen = reconnect: backfill the recorded transcript so a reloaded browser restores its view.
     // E2E: re-deliver the content key to the announcing browser first (idempotent, same key).
@@ -454,6 +578,8 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
         : { status: 'offline_paused', entries: [] },
       sid,
     );
+    // Reopen freshness (Phase C): the real daemon recomputes the branch diff on subscribe.
+    if (rec !== undefined) send('session.changes', SESSION_CHANGES_SUMMARY, sid);
   }
 }
 

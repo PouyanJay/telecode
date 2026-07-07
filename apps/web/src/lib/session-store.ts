@@ -1,5 +1,6 @@
 import {
   devicePresencePayloadSchema,
+  relayErrorPayloadSchema,
   sessionChainedPayloadSchema,
   sessionStartedPayloadSchema,
   type AdoptSettings,
@@ -9,9 +10,14 @@ import {
   type HandoverAnswerPayload,
   type PermissionDecisionPayload,
   type QuestionAnswerPayload,
+  sessionBranchStatePayloadSchema,
+  sessionPushStatePayloadSchema,
+  type BranchSwitchFailureCode,
+  type PushFailureCode,
   type SessionControlAction,
   type SessionLaunchPayload,
   type SessionRenameBody,
+  type WorkspaceReapFailureCode,
 } from '@telecode/protocol';
 import { derived, get, writable, type Readable } from 'svelte/store';
 
@@ -36,6 +42,7 @@ import {
   type SealedMetaDecryptor,
   type SessionMetaMap,
 } from './session-meta';
+import { applyChangesFrame, type SessionChangesMap } from './session-changes';
 import {
   applyTitleFrame,
   overlayMissingTitles,
@@ -101,9 +108,15 @@ const sessionDeviceMap = writable<ReadonlyMap<string, string>>(new Map());
 // Settings page requests its policy (or its daemon replies).
 const adoptStatesMap = writable<ReadonlyMap<string, AdoptStatePayload>>(new Map());
 const repoBranchesMap = writable<ReadonlyMap<string, RepoBranchesStatePayload>>(new Map());
+// Session-scoped branch listings (branch-actions T4), keyed by session id: the rail's Switch
+// picker and the fork drawer ask per session; the sealed reply echoes the id.
+const sessionBranchesMap = writable<ReadonlyMap<string, RepoBranchesStatePayload>>(new Map());
 // Decrypted session metadata (ux Phase 6), keyed by session id: live `session.meta` frames merged
 // over the registry's persisted blobs (seeded on load). Titles here beat every other title source.
 const sessionMetaMap = writable<SessionMetaMap>(new Map());
+// Decrypted branch-diff summaries (branch-actions Phase C), keyed by session id: latest-wins
+// `session.changes` snapshots feeding the rail's CHANGES panel.
+const sessionChangesMap = writable<SessionChangesMap>(new Map());
 // The user's rename overrides (ux Phase 6 T6), keyed by session id: live `session.title` frames over
 // the registry's persisted `sealed_title` blobs. Kept SEPARATE from the meta map so the override always
 // wins on display — a later derived title from the daemon can never clobber a rename.
@@ -127,6 +140,10 @@ export const sessionDevices: Readable<ReadonlyMap<string, string>> = {
 };
 /** Decrypted session metadata (ux Phase 6) for titles and session-view context. */
 export const sessionMetas: Readable<SessionMetaMap> = { subscribe: sessionMetaMap.subscribe };
+/** Decrypted branch-diff summaries (Phase C) for the session rail's CHANGES panel. */
+export const sessionChanges: Readable<SessionChangesMap> = {
+  subscribe: sessionChangesMap.subscribe,
+};
 /** The user's rename overrides (ux Phase 6 T6) — the highest-precedence title source (override-wins). */
 export const sessionTitleOverrides: Readable<SessionTitleMap> = {
   subscribe: sessionTitleOverrideMap.subscribe,
@@ -156,6 +173,11 @@ export const adoptStates: Readable<ReadonlyMap<string, AdoptStatePayload>> = {
 /** Per-device default-repo branches (sealed `repo.branches.state`) for the launch drawer (Phase B). */
 export const repoBranches: Readable<ReadonlyMap<string, RepoBranchesStatePayload>> = {
   subscribe: repoBranchesMap.subscribe,
+};
+
+/** Per-session repo branches (T4) for the rail's Switch picker and the fork drawer's base list. */
+export const sessionBranches: Readable<ReadonlyMap<string, RepoBranchesStatePayload>> = {
+  subscribe: sessionBranchesMap.subscribe,
 };
 
 function updateChannel(deviceId: string, patch: Partial<DeviceChannelState>): void {
@@ -233,8 +255,71 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
     sessionTitleOverrideMap.update((map) => applyTitleFrame(map, envelope));
     return;
   }
+  if (envelope.type === 'session.changes') {
+    // Branch-diff summary (Phase C): its own map, not transcript — the rail reads it directly.
+    sessionChangesMap.update((map) => applyChangesFrame(map, envelope));
+    return;
+  }
+  if (envelope.type === 'session.branch.state') {
+    // The switch verdict (T4): settles the asking control; the branch ROW follows the daemon's
+    // session.meta re-emit, never this frame.
+    settleVerdictFrame(envelope, sessionBranchStatePayloadSchema, switchAsks, (data) =>
+      data.ok ? { ok: true, branch: data.branch } : { ok: false, reason: data.code },
+    );
+    return;
+  }
+  if (envelope.type === 'session.push.state') {
+    settleVerdictFrame(envelope, sessionPushStatePayloadSchema, pushAsks, (data) =>
+      data.ok ? data : { ok: false, reason: data.code },
+    );
+    return;
+  }
+  if (envelope.type === 'relay.error' && settleOfflineDeviceAsk(envelope)) {
+    return;
+  }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
   resolvePendingLaunch(envelope);
+}
+
+/**
+ * Settle a session-scoped verdict frame into its ask ledger — the one shape every coded RPC reply
+ * shares (switch T4, push T6, and whatever Phase C grows next): guard the id, parse at the trust
+ * boundary, map the daemon's wire verdict onto the caller-facing outcome.
+ */
+function settleVerdictFrame<TWire, TOutcome extends { ok: boolean }>(
+  envelope: Envelope,
+  schema: { safeParse: (data: unknown) => { success: true; data: TWire } | { success: false } },
+  asks: { settle: (sessionId: string, outcome: TOutcome) => void },
+  toOutcome: (data: TWire) => TOutcome,
+): void {
+  if (envelope.session_id === undefined) return;
+  const parsed = schema.safeParse(envelope.payload);
+  if (!parsed.success) return;
+  asks.settle(envelope.session_id, toOutcome(parsed.data));
+}
+
+/**
+ * A device-ask that reached an offline device (Phase C): settle the waiting flow honestly instead
+ * of letting it time out. Returns whether the error was consumed — every other `relay.error`
+ * keeps flowing into the session fold (gate un-spin).
+ */
+function settleOfflineDeviceAsk(envelope: Envelope): boolean {
+  if (envelope.session_id === undefined) return false;
+  const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
+  if (!parsed.success) return false;
+  if (parsed.data.regarding === 'workspace.reap') {
+    reapAsks.settle(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+    return true;
+  }
+  if (parsed.data.regarding === 'session.branch.switch') {
+    switchAsks.settle(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+    return true;
+  }
+  if (parsed.data.regarding === 'session.push') {
+    pushAsks.settle(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -362,8 +447,17 @@ function dialDeviceChannel(
     onReconnect: () => reattachSessions(device.id),
     onAdoptState: (state) =>
       adoptStatesMap.update((states) => new Map(states).set(device.id, state)),
-    onRepoBranches: (state) =>
-      repoBranchesMap.update((states) => new Map(states).set(device.id, state)),
+    onRepoBranches: (state) => {
+      // A session-scoped answer (echoed id, T4) keys by session; the Phase B default form by device.
+      if (state.sessionId !== undefined) {
+        const sessionId = state.sessionId;
+        sessionBranchesMap.update((states) => new Map(states).set(sessionId, state));
+      } else {
+        repoBranchesMap.update((states) => new Map(states).set(device.id, state));
+      }
+    },
+    onWorkspaceReap: (state) =>
+      reapAsks.settle(state.sessionId, state.ok ? { ok: true } : { ok: false, reason: state.code }),
   });
   connections.set(device.id, connection);
 }
@@ -633,8 +727,14 @@ export function launch(payload: SessionLaunchPayload, deviceId?: string): Promis
  * Continue a TERMINAL session as a NEW linked one (ux Phase 6 T8): sends `session.resume_new` on the
  * PARENT's channel; the daemon forks (or fresh-launches) a `session.chained` child whose
  * `session.started` echoes our clientRef — resolves with the child id so the caller can navigate.
+ * With a branch choice (branch-actions T5) the child gets its OWN worktree, cut from `baseBranch`
+ * (default: the parent's branch) with `branchName` (default: the auto slug).
  */
-export function resumeAsNew(parentSessionId: string, prompt: string): Promise<string> {
+export function resumeAsNew(
+  parentSessionId: string,
+  prompt: string,
+  branch?: { baseBranch?: string; branchName?: string },
+): Promise<string> {
   const deviceId = routedDeviceId(parentSessionId);
   const conn = deviceId !== undefined ? connections.get(deviceId) : undefined;
   if (deviceId === undefined || !conn) {
@@ -646,7 +746,12 @@ export function resumeAsNew(parentSessionId: string, prompt: string): Promise<st
     deviceId,
     'Resume timed out — is the device online?',
   );
-  conn.resumeNew(parentSessionId, { prompt, clientRef });
+  conn.resumeNew(parentSessionId, {
+    prompt,
+    clientRef,
+    ...(branch?.baseBranch !== undefined ? { baseBranch: branch.baseBranch } : {}),
+    ...(branch?.branchName !== undefined ? { branchName: branch.branchName } : {}),
+  });
   return started;
 }
 
@@ -811,8 +916,136 @@ function forgetSession(sessionId: string): void {
   };
   sessionMap.update(drop);
   sessionMetaMap.update(drop);
+  sessionChangesMap.update(drop);
+  sessionBranchesMap.update(drop);
   sessionTitleOverrideMap.update(drop);
   sessionDeviceMap.update(drop);
+}
+
+/** How a worktree-reap request settled (branch-actions T3) — every failure is a retellable reason. */
+export type WorkspaceReapOutcome =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: WorkspaceReapFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
+    };
+
+/** How a branch-switch request settled (branch-actions T4) — every failure is a retellable reason. */
+export type BranchSwitchOutcome =
+  | { ok: true; branch: string }
+  | {
+      ok: false;
+      reason: BranchSwitchFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
+    };
+
+/** Every session-keyed ask (reap, switch, …) settles this way when it can't (or can no longer) run. */
+type UnstartableOutcome = { ok: false; reason: 'no-connection' };
+
+const DEVICE_RPC_TIMEOUT_MS = 15_000;
+// A push crosses the network (the daemon's own git timeout is 30s) — give it headroom on top.
+const PUSH_RPC_TIMEOUT_MS = 45_000;
+
+/**
+ * One in-flight ask per session, settled by exactly one of: the daemon's sealed verdict, the
+ * relay's honest device-offline error, the local timeout, or teardown — the shape every
+ * session-keyed device RPC shares (reap T3, switch T4, and whatever Phase C adds next). A second
+ * ask for the same session SUPERSEDES the first (settled `no-connection`, timer cleared) so a
+ * stale timeout can never fire into the new ask's slot.
+ */
+function createPendingAsks<TOutcome extends { ok: boolean }>(
+  timeoutOutcome: TOutcome,
+  timeoutMs: number = DEVICE_RPC_TIMEOUT_MS,
+) {
+  const pending = new Map<
+    string,
+    {
+      resolve: (outcome: TOutcome | UnstartableOutcome) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  function settle(sessionId: string, outcome: TOutcome | UnstartableOutcome): void {
+    const entry = pending.get(sessionId);
+    if (!entry) return;
+    pending.delete(sessionId);
+    clearTimeout(entry.timer);
+    entry.resolve(outcome);
+  }
+
+  function start(sessionId: string, send: () => void): Promise<TOutcome | UnstartableOutcome> {
+    settle(sessionId, { ok: false, reason: 'no-connection' }); // supersede any stale ask
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => settle(sessionId, timeoutOutcome), timeoutMs);
+      pending.set(sessionId, { resolve, timer });
+      send();
+    });
+  }
+
+  /** Teardown (sign-out): nothing stale survives — every waiter settles now, honestly. */
+  function drain(): void {
+    for (const sessionId of [...pending.keys()]) {
+      settle(sessionId, { ok: false, reason: 'no-connection' });
+    }
+  }
+
+  return { settle, start, drain };
+}
+
+const reapAsks = createPendingAsks<WorkspaceReapOutcome>({ ok: false, reason: 'timeout' });
+const switchAsks = createPendingAsks<BranchSwitchOutcome>({ ok: false, reason: 'timeout' });
+
+/**
+ * Ask the session's device to remove its worktree + branch (the delete dialog's explicit opt-in,
+ * branch-actions T3). Resolves with the daemon's own verdict — the caller decides whether the
+ * delete proceeds; this never deletes anything registry-side itself.
+ */
+export function reapWorkspace(sessionId: string): Promise<WorkspaceReapOutcome> {
+  const connection = connectionFor(sessionId);
+  if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
+  return reapAsks.start(sessionId, () => connection.sendWorkspaceReap(sessionId));
+}
+
+/**
+ * Ask the session's device to move its worktree onto another existing branch (the rail's Switch
+ * control, branch-actions T4). Resolves with the daemon's own verdict — the branch row updates via
+ * the daemon's `session.meta` re-emit, never optimistically.
+ */
+export function switchSessionBranch(
+  sessionId: string,
+  branch: string,
+): Promise<BranchSwitchOutcome> {
+  const connection = connectionFor(sessionId);
+  if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
+  return switchAsks.start(sessionId, () => connection.switchBranch(sessionId, branch));
+}
+
+/** How a push request settled (branch-actions T6) — every failure is a retellable reason. */
+export type SessionPushOutcome =
+  | { ok: true; branch: string; base?: string; githubRepo?: string }
+  | {
+      ok: false;
+      reason: PushFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
+    };
+
+const pushAsks = createPendingAsks<SessionPushOutcome>(
+  { ok: false, reason: 'timeout' },
+  PUSH_RPC_TIMEOUT_MS,
+);
+
+/**
+ * Ask the session's device to push its branch to origin (the Open-PR flow's push leg,
+ * branch-actions T6). The push runs with the LAPTOP'S own git credentials; the resolved outcome
+ * carries what the browser needs to build the PR link itself.
+ */
+export function pushSessionBranch(sessionId: string): Promise<SessionPushOutcome> {
+  const connection = connectionFor(sessionId);
+  if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
+  return pushAsks.start(sessionId, () => connection.pushBranch(sessionId));
+}
+
+/** Ask the session's device for its repo's branch list (T4); lands in {@link sessionBranches}. */
+export function requestSessionBranches(sessionId: string): void {
+  connectionFor(sessionId)?.sendRepoBranchesRequest(sessionId);
 }
 
 /**
@@ -905,6 +1138,10 @@ export function disconnect(): void {
   for (const pending of pendingLaunches.splice(0)) {
     pending.reject(new Error('Disconnected.'));
   }
+  // Session-keyed device asks settle now (no-connection) — nothing waits into the signed-out void.
+  reapAsks.drain();
+  switchAsks.drain();
+  pushAsks.drain();
   for (const connection of connections.values()) connection.close();
   connections.clear();
   deviceChannelMap.set(new Map());
@@ -914,6 +1151,8 @@ export function disconnect(): void {
   sessionMap.set(new Map());
   adoptStatesMap.set(new Map());
   repoBranchesMap.set(new Map());
+  sessionBranchesMap.set(new Map());
   sessionMetaMap.set(new Map());
   sessionTitleOverrideMap.set(new Map());
+  sessionChangesMap.set(new Map());
 }

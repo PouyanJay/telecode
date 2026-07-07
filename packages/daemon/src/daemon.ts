@@ -44,6 +44,12 @@ import {
   type RepoBranchesStatePayload,
   type SessionOrigin,
   type SessionStatusName,
+  workspaceReapRequestPayloadSchema,
+  type WorkspaceReapStatePayload,
+  sessionBranchSwitchPayloadSchema,
+  type SessionBranchStatePayload,
+  sessionPushRequestPayloadSchema,
+  type SessionPushStatePayload,
 } from '@telecode/protocol';
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
@@ -68,6 +74,11 @@ import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import { type BranchReader } from './adopt/git-branch';
 import { type BranchLister } from './sessions/branch-list';
+import { type BranchPusher } from './sessions/branch-push';
+import { parseGithubRemote } from './sessions/parse-github-remote';
+import { type BranchSwitcher } from './sessions/branch-switcher';
+import { type WorkspaceChangesReader } from './sessions/workspace-changes';
+import { type WorkspaceReaper } from './sessions/workspace-reaper';
 import {
   type AgentAdapter,
   type AgentRunOptions,
@@ -80,7 +91,11 @@ import { classifyTool } from './permission-policy';
 import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
 import { type PersistedSession, type SessionStore } from './sessions/session-store';
-import { WorktreeError, type WorktreeManager } from './sessions/worktree-manager';
+import {
+  WorktreeError,
+  type SessionWorktree,
+  type WorktreeManager,
+} from './sessions/worktree-manager';
 
 /** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
 const HANDOVER_TITLE_PREVIEW_CHARS = 60;
@@ -212,6 +227,30 @@ export interface DaemonOptions {
    * Injected at the composition root; omitted → the daemon answers unavailable.
    */
   readonly listRepoBranches?: BranchLister;
+  /**
+   * Computes a launched session's branch-diff summary vs its base for the sealed `session.changes`
+   * frame (branch-actions, Phase C). Injected at the composition root (real `createGitChangesReader`);
+   * omitted → the Changes panel simply never populates (tests, minimal setups).
+   */
+  readonly readWorkspaceChanges?: WorkspaceChangesReader;
+  /**
+   * Removes a reaped session's worktree + branch (`workspace.reap`, branch-actions T3). Injected at
+   * the composition root (real `createGitWorkspaceReaper`, sharing the worktree manager's root);
+   * omitted → every reap answers `not-reapable`.
+   */
+  readonly reapWorkspace?: WorkspaceReaper;
+  /**
+   * Moves a launched session's worktree onto another existing branch between turns
+   * (`session.branch.switch`, branch-actions T4). Injected at the composition root (real
+   * `createGitBranchSwitcher`); omitted → every switch answers `not-launched`.
+   */
+  readonly switchBranch?: BranchSwitcher;
+  /**
+   * Pushes a launched session's branch to origin with the laptop's own git credentials
+   * (`session.push`, branch-actions T6). Injected at the composition root (real
+   * `createGitBranchPusher`); omitted → every push answers `not-launched`.
+   */
+  readonly pushBranch?: BranchPusher;
   readonly logger?: Logger;
 }
 
@@ -350,6 +389,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
     claudeSessionId?: string;
     /** The worktree/working directory the session runs in — persisted so a restored follow-up reuses it. */
     cwd?: string;
+    /**
+     * The RESOLVED ref this launched session's branch was cut from (branch-actions, Phase C) — what
+     * `session.changes` diffs against. Workspace content like `meta.branch`: sealed-only, never logged.
+     */
+    baseBranch?: string;
+    /**
+     * The parent repo the worktree was cut from (Phase C) — where reaping removes the worktree/branch
+     * and where a PR push resolves its remote. A local path: sealed-only territory, never logged.
+     */
+    repoPath?: string;
   }
   const sessionRecords = new Map<string, SessionRecord>();
 
@@ -412,6 +461,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
           origin: rec.origin,
           claudeSessionId: rec.claudeSessionId,
           cwd: rec.cwd,
+          baseBranch: rec.baseBranch,
+          repoPath: rec.repoPath,
         }),
       });
     })().catch((err: unknown) => {
@@ -453,6 +504,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
             origin: persisted.origin,
             claudeSessionId: persisted.claudeSessionId,
             cwd: persisted.cwd,
+            baseBranch: persisted.baseBranch,
+            repoPath: persisted.repoPath,
           }),
         });
         // Restore the session's content key (ux Phase 6 T3) so a subscribe re-delivers the SAME key and
@@ -570,6 +623,42 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const rec = recordFor(sessionId);
     rec.meta = { ...rec.meta, ...patch };
     sendForSession(source, 'session.meta', { ...rec.meta, ts: now() });
+  }
+
+  /**
+   * Compute and emit the session's branch-diff summary as a sealed `session.changes` frame
+   * (branch-actions, Phase C). Fire-and-forget like the adopted-branch refresh: it needs a launched
+   * session's worktree + recorded base and an injected reader — anything missing (adopted session,
+   * daemon-cwd session, reader failure) just means the panel doesn't update. Never fails a session.
+   */
+  function emitSessionChanges(source: Envelope): void {
+    const sessionId = source.session_id;
+    const reader = options.readWorkspaceChanges;
+    if (sessionId === undefined || reader === undefined) return;
+    const rec = sessionRecords.get(sessionId);
+    // Live map first, persisted record second — the same pair follow-up turns trust for their cwd.
+    const cwd = sessionCwds.get(sessionId) ?? rec?.cwd;
+    const base = rec?.baseBranch;
+    if (rec === undefined || cwd === undefined || base === undefined) return;
+    void (async () => {
+      try {
+        const summary = await reader(cwd, base);
+        if (summary === undefined) return;
+        sendForSession(source, 'session.changes', { baseBranch: base, ...summary, ts: now() });
+      } catch (err) {
+        // A throwing reader must never take a session down with it. Never log the error object —
+        // a git/exec failure embeds its command line (worktree path, branch names) in the message,
+        // and those are sealed-only workspace content.
+        log.warn(
+          {
+            deviceId: options.deviceId,
+            sessionId,
+            errName: err instanceof Error ? err.name : 'unknown',
+          },
+          'daemon: changes read failed',
+        );
+      }
+    })();
   }
 
   /** Emit an updated `session.meta` the first time a turn reveals the model (ux Phase 6 T5) — only on change. */
@@ -1042,6 +1131,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
         activeRuns.delete(sessionId);
         sessionAborts.delete(sessionId);
       }
+      // Between-turns freshness (Phase C): the turn's agent work just changed the branch's drift —
+      // recompute the Changes summary on EVERY way out (done/turn_limit/error/interrupt alike; the
+      // helper no-ops for sessions without a worktree+base). Fire-and-forget, after the lifecycle
+      // frame above is already queued.
+      emitSessionChanges(envelope);
     }
   }
 
@@ -1091,7 +1185,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
         branchName: launch.branchName ?? deriveBranchName(launch.prompt, sessionId),
       });
       sessionCwds.set(sessionId, worktree.path);
-      recordFor(sessionId).cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
+      const rec = recordFor(sessionId);
+      rec.cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
+      rec.repoPath = resolved.path; // where reap/push run later (Phase C)
+      // The cut point, kept for the Changes panel's diff (Phase C). A reused worktree reports no
+      // base (unknowable from git); the record keeps whatever the original cut stored.
+      if (worktree.baseBranch !== undefined) rec.baseBranch = worktree.baseBranch;
       // Log owner/name + branch only — never the clone URL or local paths (kept out of log sinks).
       log.info(
         {
@@ -1184,6 +1283,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
         ...(workspace.branch !== undefined ? { branch: workspace.branch } : {}),
         permissionMode: recordFor(envelope.session_id).permissionMode,
       });
+      // Seed the Changes panel (Phase C): an honest "nothing yet" beats a skeleton that never fills.
+      emitSessionChanges(envelope);
     }
     await runTurn(envelope, launch.data.prompt, { ...(cwd !== undefined ? { cwd } : {}) });
   }
@@ -1254,9 +1355,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * logged). Sealed like a launch (box-sealed to the daemon) — never under the parent's content key,
    * which a needs_restart parent may no longer have anywhere (AD-17).
    */
-  async function unsealResumeNewRequest(
-    envelope: Envelope,
-  ): Promise<{ parentId: string; prompt: string; clientRef?: string } | undefined> {
+  async function unsealResumeNewRequest(envelope: Envelope): Promise<
+    | {
+        parentId: string;
+        prompt: string;
+        clientRef?: string;
+        baseBranch?: string;
+        branchName?: string;
+      }
+    | undefined
+  > {
     let rawPayload: unknown = envelope.payload;
     if (cipher.enabled && envelope.sender_public_key !== undefined) {
       try {
@@ -1281,6 +1389,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
       parentId: envelope.session_id,
       prompt: parsed.data.prompt,
       ...(parsed.data.clientRef !== undefined ? { clientRef: parsed.data.clientRef } : {}),
+      ...(parsed.data.baseBranch !== undefined ? { baseBranch: parsed.data.baseBranch } : {}),
+      ...(parsed.data.branchName !== undefined ? { branchName: parsed.data.branchName } : {}),
     };
   }
 
@@ -1369,24 +1479,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
       return;
     }
-    const permissionMode = parent?.permissionMode ?? 'default';
-    const cwd = sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd;
-    // The child runs where the parent ran, so it also IS the parent's repo and branch — a worktree
-    // cwd alone can't say so (it ends in the parent's session id, not the repo or branch name).
-    const repo = parent?.meta?.repo;
-    const branch = parent?.meta?.branch;
+    // Fork onto a chosen branch (branch-actions T5): either field means the child gets its OWN
+    // worktree instead of inheriting the parent's.
+    const wantsOwnWorktree = request.baseBranch !== undefined || request.branchName !== undefined;
+    const inherited = resolveChildInheritance(parentId, parent, wantsOwnWorktree);
     const minted = await mintChainedChild({
       parentSessionId: parentId,
-      permissionMode,
-      metaPatch: {
-        ...resolveLaunchTitle(undefined, prompt),
-        ...(cwd !== undefined ? { cwd } : {}),
-        ...(repo !== undefined ? { repo } : {}),
-        ...(branch !== undefined ? { branch } : {}),
-        permissionMode,
-      },
+      permissionMode: inherited.permissionMode,
+      metaPatch: { ...resolveLaunchTitle(undefined, prompt), ...inherited.metaPatch },
       firstTurnText: prompt,
-      ...(cwd !== undefined ? { cwd } : {}),
+      ...(inherited.cwd !== undefined ? { cwd: inherited.cwd } : {}),
       ...(request.clientRef !== undefined ? { startedClientRef: request.clientRef } : {}),
       // The acting browser must decrypt the started frame's clientRef to pair + navigate — deliver
       // the child's key to the pubkey the (sealed) request announced.
@@ -1395,9 +1497,62 @@ export function createDaemon(options: DaemonOptions): Daemon {
         : {}),
     });
     if (!minted) return;
+    let cwd = inherited.cwd;
+    if (wantsOwnWorktree) {
+      const forkCwd = await prepareForkWorkspace({
+        childId: minted.childId,
+        source: minted.source,
+        repoPath: parent?.repoPath,
+        // The default base is the parent's OWN branch — the fork continues its code state.
+        baseBranch: request.baseBranch ?? parent?.meta?.branch,
+        branchName: request.branchName,
+        prompt,
+      });
+      if (forkCwd === undefined) return; // the child already failed cleanly
+      cwd = forkCwd;
+    }
+    await runResumedTurn(minted, parentId, prompt, cwd);
+  }
+
+  /**
+   * What a resume-as-new child takes from its parent. With its own worktree coming (T5), cwd and
+   * branch are deliberately absent — they belong to the cut, and a wrong value must never flash on
+   * the wire first. The repo tag always carries over: the child IS in the parent's repo either way
+   * (a worktree cwd alone can never name it — it ends in a session id).
+   */
+  function resolveChildInheritance(
+    parentId: string,
+    parent: SessionRecord | undefined,
+    wantsOwnWorktree: boolean,
+  ): { permissionMode: PermissionModeName; cwd?: string; metaPatch: Partial<SessionMetaPayload> } {
+    const cwd = wantsOwnWorktree
+      ? undefined
+      : (sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd);
+    const branch = wantsOwnWorktree ? undefined : parent?.meta?.branch;
+    const repo = parent?.meta?.repo;
+    const permissionMode = parent?.permissionMode ?? 'default';
+    return {
+      permissionMode,
+      ...(cwd !== undefined ? { cwd } : {}),
+      metaPatch: {
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(repo !== undefined ? { repo } : {}),
+        ...(branch !== undefined ? { branch } : {}),
+        permissionMode,
+      },
+    };
+  }
+
+  /** The resume-as-new tail: fork-resume when the parent conversation survives, fresh run otherwise. */
+  async function runResumedTurn(
+    minted: { childId: string; source: Envelope },
+    parentId: string,
+    prompt: string,
+    cwd: string | undefined,
+  ): Promise<void> {
     // The resume id survives on the record for launched AND adopted parents (T4); fall back to the
     // in-memory map. Absent → fresh launch, still linked.
-    const resume = parent?.claudeSessionId ?? sdkSessions.get(parentId);
+    const resume = sessionRecords.get(parentId)?.claudeSessionId ?? sdkSessions.get(parentId);
     log.info(
       {
         deviceId: options.deviceId,
@@ -1412,6 +1567,71 @@ export function createDaemon(options: DaemonOptions): Daemon {
       // A fork that can't actually resume falls back to a fresh run seeded with the same prompt.
       ...(resume !== undefined ? { resume, forkSession: true, resumeFallbackPrompt: prompt } : {}),
     });
+  }
+
+  /**
+   * Cut a resume-as-new child its OWN worktree (branch-actions T5): from the requested base
+   * (default: the parent's branch), with the requested name (default: the auto slug). Returns the
+   * child's cwd, or `undefined` after failing the child cleanly — a minted child must never sit
+   * at `running` with a workspace it doesn't have (same contract as a launch's prepareWorkspace).
+   */
+  async function prepareForkWorkspace(params: {
+    childId: string;
+    source: Envelope;
+    repoPath: string | undefined;
+    baseBranch: string | undefined;
+    branchName: string | undefined;
+    prompt: string;
+  }): Promise<string | undefined> {
+    const failChild = (message: string): undefined => {
+      setStatus(params.childId, 'error');
+      sendForSession(params.source, 'session.ended', { status: 'error', error: message });
+      return undefined;
+    };
+    if (!worktreeManager || params.repoPath === undefined) {
+      // No repo to cut from (a parent this daemon only half-remembers, or no worktree manager).
+      return failChild('cannot fork onto a branch: the original repo is not available here');
+    }
+    try {
+      const worktree = await worktreeManager.ensureWorktree(params.childId, params.repoPath, {
+        ...(params.baseBranch !== undefined ? { baseBranch: params.baseBranch } : {}),
+        branchName: params.branchName ?? deriveBranchName(params.prompt, params.childId),
+      });
+      return recordForkWorktree(params.childId, params.source, params.repoPath, worktree);
+    } catch (err) {
+      // Coded worktree errors are user-fixable and safe verbatim; anything else stays generic
+      // (git stderr can carry local paths). Log the shape only, never the branch names.
+      log.warn(
+        {
+          deviceId: options.deviceId,
+          sessionId: params.childId,
+          errName: err instanceof Error ? err.name : 'unknown',
+        },
+        'daemon: failed to prepare fork workspace',
+      );
+      return failChild(
+        err instanceof WorktreeError && err.code !== undefined
+          ? err.message
+          : 'failed to prepare session workspace',
+      );
+    }
+  }
+
+  /** Book the fork's fresh worktree onto the child record and announce it (identity + changes). */
+  function recordForkWorktree(
+    childId: string,
+    source: Envelope,
+    repoPath: string,
+    worktree: SessionWorktree,
+  ): string {
+    const rec = recordFor(childId);
+    sessionCwds.set(childId, worktree.path);
+    rec.cwd = worktree.path;
+    rec.repoPath = repoPath;
+    if (worktree.baseBranch !== undefined) rec.baseBranch = worktree.baseBranch;
+    emitSessionMeta(source, { cwd: worktree.path, branch: worktree.branch });
+    emitSessionChanges(source);
+    return worktree.path;
   }
 
   async function handleFrame(raw: Buffer, onReady: () => void): Promise<void> {
@@ -1511,6 +1731,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
           sendForSession(envelope, 'session.meta', { ...rec.meta, ts: now() });
         }
         sendForSession(envelope, 'session.history', historyPayloadFor(sessionId));
+        // Reopen freshness (Phase C): recompute the branch-diff summary so the Changes panel shows
+        // the branch's CURRENT drift, not whatever was last broadcast before the tab went away.
+        emitSessionChanges(envelope);
         return;
       }
       case 'permission.decision': {
@@ -1614,6 +1837,18 @@ export function createDaemon(options: DaemonOptions): Daemon {
       }
       case 'repo.branches': {
         await handleRepoBranches(envelope);
+        return;
+      }
+      case 'workspace.reap': {
+        await handleWorkspaceReap(envelope);
+        return;
+      }
+      case 'session.branch.switch': {
+        await handleBranchSwitch(envelope);
+        return;
+      }
+      case 'session.push': {
+        await handleSessionPush(envelope);
         return;
       }
       case 'viewer.presence': {
@@ -1882,6 +2117,38 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * relay only ever sees ciphertext, so the denylist's repo paths never leave the machine in the clear
    * (invariant #5). Cleartext on a pre-E2E daemon (no keypair).
    */
+  /**
+   * Send a device-scoped RPC reply, box-sealed to the requesting browser when E2E is on (adopt.state,
+   * repo.branches.state, workspace.reap.state, …). The relay broadcasts it channel-wide; only the
+   * asker can open it. The counterpart of {@link sendForSession} for session-less request/reply.
+   */
+  function replyToBrowser(
+    browserPublicKey: string | undefined,
+    type: MessageType,
+    state: unknown,
+  ): void {
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        cipher.enabled && browserPublicKey !== undefined
+          ? await cipher.sealToBrowser(browserPublicKey, state)
+          : { payload: state, nonce: '' };
+      return JSON.stringify(
+        makeEnvelope({
+          type,
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
+  /** Adopted sessions are the user's own checkout — telecode never lists, moves, or deletes them. */
+  function isAdoptedSession(rec: SessionRecord): boolean {
+    return rec.origin === 'external';
+  }
+
   async function handleAdoptConfig(envelope: Envelope): Promise<void> {
     let payload: unknown;
     try {
@@ -1915,23 +2182,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
     }
     // Reply the current policy + setup status, sealed to the requesting browser so repo paths never reach the relay.
-    const browserPublicKey = envelope.sender_public_key;
-    const state = await buildAdoptState();
-    enqueueSend(async () => {
-      const fields: { payload: unknown; nonce: string } =
-        cipher.enabled && browserPublicKey !== undefined
-          ? await cipher.sealToBrowser(browserPublicKey, state)
-          : { payload: state, nonce: '' };
-      return JSON.stringify(
-        makeEnvelope({
-          type: 'adopt.state',
-          userId: options.userId,
-          deviceId: options.deviceId,
-          payload: fields.payload,
-          nonce: fields.nonce,
-        }),
-      );
-    });
+    replyToBrowser(envelope.sender_public_key, 'adopt.state', await buildAdoptState());
   }
 
   /**
@@ -1942,45 +2193,245 @@ export function createDaemon(options: DaemonOptions): Daemon {
    */
   async function handleRepoBranches(envelope: Envelope): Promise<void> {
     const browserPublicKey = envelope.sender_public_key;
-    // Same boundary discipline as adopt.config: open + validate the (trivial) request before answering.
+    // Same boundary discipline as adopt.config: open + validate the request before answering.
+    let askedSessionId: string | undefined;
     try {
       const raw = cipher.enabled ? await cipher.openFromBrowser(envelope) : envelope.payload;
-      repoBranchesRequestPayloadSchema.parse(raw);
+      askedSessionId = repoBranchesRequestPayloadSchema.parse(raw).sessionId;
     } catch (err) {
       log.warn({ err, deviceId: options.deviceId }, 'daemon: dropped invalid repo.branches');
       return;
     }
-    let state: RepoBranchesStatePayload = { available: false, branches: [] };
-    if (defaultRepoPath !== undefined && options.listRepoBranches !== undefined) {
+    let state: RepoBranchesStatePayload = {
+      available: false,
+      branches: [],
+      ...(askedSessionId !== undefined ? { sessionId: askedSessionId } : {}),
+    };
+    const repoToList = resolveRepoToList(askedSessionId);
+    if (repoToList !== undefined && options.listRepoBranches !== undefined) {
       try {
-        const listed = await options.listRepoBranches(defaultRepoPath);
+        const listed = await options.listRepoBranches(repoToList);
         state = {
+          ...state,
           available: true,
           branches: listed.branches,
           ...(listed.defaultBranch !== undefined ? { defaultBranch: listed.defaultBranch } : {}),
         };
       } catch (err) {
-        log.warn(
-          { err, deviceId: options.deviceId },
-          'daemon: could not list default repo branches',
-        );
+        log.warn({ err, deviceId: options.deviceId }, 'daemon: could not list repo branches');
       }
     }
-    enqueueSend(async () => {
-      const fields: { payload: unknown; nonce: string } =
-        cipher.enabled && browserPublicKey !== undefined
-          ? await cipher.sealToBrowser(browserPublicKey, state)
-          : { payload: state, nonce: '' };
-      return JSON.stringify(
-        makeEnvelope({
-          type: 'repo.branches.state',
-          userId: options.userId,
-          deviceId: options.deviceId,
-          payload: fields.payload,
-          nonce: fields.nonce,
-        }),
+    replyToBrowser(browserPublicKey, 'repo.branches.state', state);
+  }
+
+  /**
+   * Which repo a `repo.branches` ask names: the daemon's default repo (Phase B), or — session-scoped
+   * ask (T4) — that LAUNCHED session's own repo. An unknown, adopted, or repo-less session resolves
+   * to nothing (answers unavailable); adopted checkouts are never listed.
+   */
+  function resolveRepoToList(askedSessionId: string | undefined): string | undefined {
+    if (askedSessionId === undefined) return defaultRepoPath;
+    const rec = sessionRecords.get(askedSessionId);
+    if (rec === undefined || isAdoptedSession(rec)) return undefined;
+    return rec.repoPath;
+  }
+
+  /**
+   * Answer `session.branch.switch` (branch-actions T4): move a LAUNCHED session's worktree onto
+   * another existing branch, strictly BETWEEN turns. On success the switch is announced twice
+   * over: the sealed `session.branch.state` settles the asking control, and fresh `session.meta`
+   * + `session.changes` update every watcher (the branch row and the panel follow the checkout).
+   * The base ref deliberately stays the LAUNCH base (AD-6) — the panel labels "vs <base>".
+   */
+  async function handleBranchSwitch(envelope: Envelope): Promise<void> {
+    const sessionId = envelope.session_id;
+    if (sessionId === undefined) return;
+    const parsed = sessionBranchSwitchPayloadSchema.safeParse(await readSessionPayload(envelope));
+    if (!parsed.success) {
+      log.warn(
+        { deviceId: options.deviceId, sessionId },
+        'daemon: dropped invalid session.branch.switch',
       );
-    });
+      return;
+    }
+    const state = await branchSwitchOutcome(sessionId, parsed.data.branch);
+    // Outcome code only — branch names are sealed workspace content, never logged.
+    log.info(
+      {
+        deviceId: options.deviceId,
+        sessionId,
+        ok: state.ok,
+        ...(state.ok ? {} : { code: state.code }),
+      },
+      'daemon: branch switch answered',
+    );
+    sendForSession(envelope, 'session.branch.state', state);
+    if (state.ok) {
+      emitSessionMeta(envelope, { branch: state.branch });
+      emitSessionChanges(envelope);
+    }
+  }
+
+  /** The switch decision for one session — every refusal is a coded, retellable story. */
+  async function branchSwitchOutcome(
+    sessionId: string,
+    branch: string,
+  ): Promise<SessionBranchStatePayload> {
+    const rec = sessionRecords.get(sessionId);
+    const cwd = sessionCwds.get(sessionId) ?? rec?.cwd;
+    if (
+      rec === undefined ||
+      isAdoptedSession(rec) ||
+      options.switchBranch === undefined ||
+      cwd === undefined ||
+      rec.repoPath === undefined // a daemon-cwd session runs in the user's own dir — never moved
+    ) {
+      return { ok: false, code: 'not-launched' };
+    }
+    if (activeRuns.has(sessionId)) return { ok: false, code: 'mid-turn' };
+    // Between turns = a settled run a follow-up would continue (done / turn_limit). error and
+    // needs_restart can't take follow-ups, so moving their tree serves nothing; awaiting_input
+    // holds a live gate mid-run (also covered by activeRuns above).
+    if (rec.status === 'error' || rec.status === 'needs_restart') {
+      return { ok: false, code: 'ended' };
+    }
+    if (rec.status !== 'done' && rec.status !== 'turn_limit') {
+      return { ok: false, code: 'mid-turn' };
+    }
+    const result = await options.switchBranch(cwd, branch);
+    // On success `rec.baseBranch` is deliberately untouched (AD-6): the launch base stays the
+    // Changes panel's diff anchor, and the panel's "vs <base>" label keeps that honest.
+    return result.ok ? { ok: true, branch } : result;
+  }
+
+  /**
+   * Answer `session.push` (branch-actions T6): push the session branch to origin with the
+   * LAPTOP'S OWN git credentials — telecode adds none, and the relay's GitHub token never
+   * travels. The sealed reply carries what the BROWSER needs to open the PR page itself
+   * (branch, compare-base name, owner/name for a github.com origin).
+   */
+  async function handleSessionPush(envelope: Envelope): Promise<void> {
+    const sessionId = envelope.session_id;
+    if (sessionId === undefined) return;
+    const parsed = sessionPushRequestPayloadSchema.safeParse(await readSessionPayload(envelope));
+    if (!parsed.success) {
+      log.warn({ deviceId: options.deviceId, sessionId }, 'daemon: dropped invalid session.push');
+      return;
+    }
+    const state = await pushOutcome(sessionId);
+    // Outcome code only — branch names and remote URLs are sealed workspace content, never logged.
+    log.info(
+      {
+        deviceId: options.deviceId,
+        sessionId,
+        ok: state.ok,
+        ...(state.ok ? {} : { code: state.code }),
+      },
+      'daemon: session push answered',
+    );
+    sendForSession(envelope, 'session.push.state', state);
+  }
+
+  /** The push decision for one session — every refusal is a coded, retellable story. */
+  async function pushOutcome(sessionId: string): Promise<SessionPushStatePayload> {
+    const rec = sessionRecords.get(sessionId);
+    const cwd = sessionCwds.get(sessionId) ?? rec?.cwd;
+    const branch = rec?.meta?.branch;
+    if (
+      rec === undefined ||
+      isAdoptedSession(rec) || // adopted checkouts publish on the user's own terms, never telecode's
+      options.pushBranch === undefined ||
+      cwd === undefined ||
+      rec.repoPath === undefined ||
+      branch === undefined
+    ) {
+      return { ok: false, code: 'not-launched' };
+    }
+    // Never publish a state the agent is mid-way through writing.
+    if (activeRuns.has(sessionId)) return { ok: false, code: 'mid-turn' };
+    const result = await options.pushBranch(cwd, branch);
+    if (!result.ok) return result;
+    const githubRepo = parseGithubRemote(result.remoteUrl);
+    const base = compareBaseName(rec.baseBranch);
+    return {
+      ok: true,
+      branch,
+      ...(base !== undefined ? { base } : {}),
+      ...(githubRepo !== undefined ? { githubRepo } : {}),
+    };
+  }
+
+  /**
+   * The base NAME a compare URL wants: the recorded cut ref with any remote prefix stripped —
+   * and nothing at all when the base is a bare commit id (a detached-HEAD cut has no name a
+   * compare page could use; the browser then links the plain new-PR page instead).
+   */
+  function compareBaseName(baseRef: string | undefined): string | undefined {
+    if (baseRef === undefined) return undefined;
+    const name = baseRef.replace(/^origin\//, '');
+    // Heuristic: a branch literally NAMED like a hex id (e.g. `deadbeef`) is misread as a commit
+    // and dropped — the PR link then falls back to the default-base page. Accepted trade-off.
+    return /^[0-9a-f]{7,40}$/i.test(name) ? undefined : name;
+  }
+
+  /**
+   * Answer `workspace.reap` (branch-actions T3): the delete flow's explicit opt-in to remove a
+   * launched session's worktree + branch. Sealed to the requesting browser like adopt.state.
+   * Guards (AD-5): the session must be one this daemon holds, launched-origin, settled (terminal,
+   * no run in flight), and carry a worktree + repo + branch; the injected reaper adds dirty-tree
+   * refusal and worktreesRoot containment. On success the daemon also forgets the session — its
+   * registry row is being deleted, so keeping a record would only resurrect a ghost.
+   */
+  async function handleWorkspaceReap(envelope: Envelope): Promise<void> {
+    const browserPublicKey = envelope.sender_public_key;
+    let sessionId: string;
+    try {
+      const raw = cipher.enabled ? await cipher.openFromBrowser(envelope) : envelope.payload;
+      sessionId = workspaceReapRequestPayloadSchema.parse(raw).sessionId;
+    } catch (err) {
+      log.warn({ err, deviceId: options.deviceId }, 'daemon: dropped invalid workspace.reap');
+      return;
+    }
+    const state = await reapOutcome(sessionId);
+    // Never log the branch/paths — only the outcome code (workspace content stays sealed).
+    log.info(
+      {
+        deviceId: options.deviceId,
+        sessionId,
+        ok: state.ok,
+        ...(state.ok ? {} : { code: state.code }),
+      },
+      'daemon: workspace reap answered',
+    );
+    replyToBrowser(browserPublicKey, 'workspace.reap.state', state);
+  }
+
+  /** The reap decision for one session — every refusal is a coded, retellable story. */
+  async function reapOutcome(sessionId: string): Promise<WorkspaceReapStatePayload> {
+    const rec = sessionRecords.get(sessionId);
+    if (rec === undefined) return { sessionId, ok: false, code: 'unknown-session' };
+    const cwd = sessionCwds.get(sessionId) ?? rec.cwd;
+    const branch = rec.meta?.branch;
+    if (
+      options.reapWorkspace === undefined ||
+      isAdoptedSession(rec) ||
+      !isSessionEndStatus(rec.status) ||
+      activeRuns.has(sessionId) ||
+      cwd === undefined ||
+      rec.repoPath === undefined ||
+      branch === undefined
+    ) {
+      return { sessionId, ok: false, code: 'not-reapable' };
+    }
+    const result = await options.reapWorkspace({ cwd, repoPath: rec.repoPath, branch });
+    if (!result.ok) return { sessionId, ok: false, code: result.code };
+    // Forget the session everywhere the daemon holds it — the browser deletes the registry row
+    // right after this, and a leftover record/file would re-announce a ghost on the next restart.
+    sessionRecords.delete(sessionId);
+    sessionCwds.delete(sessionId);
+    sdkSessions.delete(sessionId);
+    await sessionStore?.remove(sessionId);
+    return { sessionId, ok: true };
   }
 
   const adoptedSessions: AdoptedSessionManager | undefined = options.adopt

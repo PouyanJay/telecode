@@ -80,6 +80,14 @@ test('launch from the dashboard, stream on the session view, approve the gated t
   await expect(rail.getByText('Branch', { exact: true })).toBeVisible();
   await expect(rail.getByText(/^telecode\/[0-9a-f-]{36}$/)).toBeVisible();
   await expect(page.locator('header.shead').getByText(/telecode\/[0-9a-f-]{6}/)).toBeVisible();
+
+  // Changes panel (Phase C): the daemon's sealed branch-diff summary renders real rows — a counted
+  // file with its ± stats, a binary file's honest "—" (never a fake 0) — labeled with its base.
+  await expect(rail.getByText('vs main')).toBeVisible();
+  await expect(rail.getByText('README.md')).toBeVisible();
+  await expect(rail.getByText('+2').first()).toBeVisible();
+  await expect(rail.getByText('assets/logo.png')).toBeVisible();
+  await expect(rail.getByText('—').first()).toBeVisible();
 });
 
 test('launch cuts a named branch from a picked base (branch-launch Phase B)', async ({ page }) => {
@@ -113,6 +121,75 @@ test('launch cuts a named branch from a picked base (branch-launch Phase B)', as
   // assert exactly ONE needs-you card for their own launch).
   await page.getByRole('button', { name: 'Approve' }).click();
   await expect(page.getByText('Finished')).toBeVisible();
+});
+
+test('switch the session branch between turns from the rail (branch-actions T4)', async ({
+  page,
+}) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Prepare the branch switch');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  // Between turns (done) on a launched session with its daemon online → the rail offers the switch.
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Switch branch' }).click();
+  await rail.getByLabel('Switch to').selectOption('develop');
+  await rail.getByRole('button', { name: 'Switch', exact: true }).click();
+
+  // The Branch row follows the daemon's session.meta re-emit — never an optimistic flip.
+  await expect(rail.getByText('develop', { exact: true })).toBeVisible();
+  // The picker closed back to the quiet affordance.
+  await expect(rail.getByRole('button', { name: 'Switch branch' })).toBeVisible();
+});
+
+test('a refused switch tells its coded story inline and changes nothing (T4)', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'hold the branch elsewhere please');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Switch branch' }).click();
+  await rail.getByLabel('Switch to').selectOption('develop');
+  await rail.getByRole('button', { name: 'Switch', exact: true }).click();
+
+  // The daemon refused: the inline story appears, the picker stays open, the branch row is
+  // untouched (still the launch-time worktree branch, never an optimistic 'develop').
+  await expect(rail.getByText('That branch is checked out in another worktree.')).toBeVisible();
+  await expect(rail.getByText(/^telecode\/[0-9a-f-]{36}$/)).toBeVisible();
+});
+
+test('push for a PR: the rail pushes, then links the GitHub compare page (T6)', async ({
+  page,
+}) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Prepare the pull request');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Push branch for a PR' }).click();
+
+  // The (fake) daemon pushed and named the github repo — the panel renders a REAL link the user
+  // opens in their own signed-in browser (no token anywhere outside it).
+  const link = rail.getByRole('link', { name: /Open a pull request on GitHub/ });
+  await expect(link).toBeVisible();
+  const href = await link.getAttribute('href');
+  expect(href).toMatch(/^https:\/\/github\.com\/acme\/app\/compare\/main\.\.\.telecode\//);
+  expect(href).toContain('quick_pull=1');
+});
+
+test('a refused push tells its coded story and publishes nothing (T6)', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'reject the push please');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Push branch for a PR' }).click();
+  await expect(rail.getByText(/The remote refused the branch/)).toBeVisible();
+  await expect(rail.getByRole('link', { name: /Open a pull request/ })).toHaveCount(0);
 });
 
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {

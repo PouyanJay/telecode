@@ -159,6 +159,56 @@ test('delete straight from the session view header (confirm → board, row gone)
   await expect(page.getByRole('listitem').filter({ hasText: TITLE })).toHaveCount(0);
 });
 
+test('delete can also reap the worktree + branch (Phase C T3 opt-in)', async ({ page }) => {
+  const TITLE = `Reap on delete ${Date.now()}`;
+  await signIn(page);
+  await launchToCompletion(page, TITLE);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Finished')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole('button', { name: 'Delete' }).click();
+  const dialog = page.getByRole('alertdialog', { name: 'Delete this session?' });
+  await expect(dialog).toBeVisible();
+  // The opt-in exists for this launched session (its daemon is online) and defaults OFF.
+  const reapSwitch = dialog.getByRole('switch', { name: 'Also remove its worktree and branch' });
+  await expect(reapSwitch).toHaveAttribute('aria-checked', 'false');
+  await reapSwitch.click();
+  await dialog.getByRole('button', { name: 'Delete session' }).click();
+
+  // The (fake) daemon reaped, then the delete completed — board, no row, no error notice.
+  await expect(page).toHaveURL(/\/$/, { timeout: 10_000 });
+  await expect(page.getByRole('main').getByRole('link', { name: new RegExp(TITLE) })).toHaveCount(
+    0,
+  );
+});
+
+test('a dirty worktree cancels the delete with the honest story (session kept)', async ({
+  page,
+}) => {
+  const TITLE = `leave the worktree dirty ${Date.now()}`;
+  await signIn(page);
+  await launchToCompletion(page, TITLE);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('Finished')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole('button', { name: 'Delete' }).click();
+  const dialog = page.getByRole('alertdialog', { name: 'Delete this session?' });
+  await dialog.getByRole('switch', { name: 'Also remove its worktree and branch' }).click();
+  await dialog.getByRole('button', { name: 'Delete session' }).click();
+
+  // The daemon refused (dirty): the dialog closes, the session SURVIVES, and the story is told.
+  await expect(dialog).not.toBeVisible();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/);
+  await expect(page.getByText(/uncommitted changes/)).toBeVisible({ timeout: 10_000 });
+  await page.goto('/');
+  await expect(page.getByRole('main').getByRole('link', { name: new RegExp(TITLE) })).toHaveCount(
+    1,
+    { timeout: 10_000 },
+  );
+});
+
 test('"Load more" pages the ended group beyond the first page', async ({ page }) => {
   await seedEndedRows('Paged session', SEEDED, false);
   const oldestSeeded = `Paged session ${SEEDED - 1} ${RUN_ID}`;

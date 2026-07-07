@@ -39,6 +39,8 @@ describe('relay: relay.error for frames sent while the daemon is offline', () =>
     ['handover.answer', { requestId: 'r3', answerText: 'go on' }],
     ['user.message', { text: 'continue' }],
     ['session.control', { action: 'interrupt' }],
+    ['session.branch.switch', { branch: 'feat/other' }],
+    ['session.push', {}],
   ] as const)('answers a %s to an offline daemon with device_offline', async (type, payload) => {
     const deviceId = `device-offline-${type}`;
     const browser = await connectBrowser(relayUrl, userId, deviceId);
@@ -49,6 +51,31 @@ describe('relay: relay.error for frames sent while the daemon is offline', () =>
     const envelope = await errorFrame;
     const parsed = relayErrorPayloadSchema.parse(envelope.payload);
     expect(parsed).toEqual({ code: 'device_offline', regarding: type });
+    browser.close();
+  });
+
+  it('answers a workspace.reap to an offline daemon with device_offline (Phase C T3)', async () => {
+    // Box-sealed device-scoped payload, but the envelope carries the target session id as routing
+    // metadata precisely so this honesty path can name the action that went nowhere.
+    const deviceId = 'device-offline-workspace.reap';
+    const browser = await connectBrowser(relayUrl, userId, deviceId);
+    const sessionId = 'sess-reap-offline';
+
+    const errorFrame = waitForEnvelope(browser, relayError(sessionId));
+    browser.send(
+      JSON.stringify(
+        makeEnvelope({
+          type: 'workspace.reap',
+          userId,
+          deviceId,
+          sessionId,
+          payload: 'OPAQUE_CIPHERTEXT',
+          nonce: 'nonce',
+        }),
+      ),
+    );
+    const parsed = relayErrorPayloadSchema.parse((await errorFrame).payload);
+    expect(parsed).toEqual({ code: 'device_offline', regarding: 'workspace.reap' });
     browser.close();
   });
 

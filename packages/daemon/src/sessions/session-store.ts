@@ -1,8 +1,9 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
   base64KeySchema,
+  MAX_BRANCH_NAME_CHARS,
   permissionModeSchema,
   sessionHistoryEntrySchema,
   sessionMetaPayloadSchema,
@@ -44,6 +45,12 @@ const persistedSessionSchema = z.object({
   claudeSessionId: z.string().min(1).max(256).optional(),
   // The session's working directory — persisted so a restored follow-up runs in the same worktree.
   cwd: z.string().min(1).max(1024).optional(),
+  // The RESOLVED ref the session branch was cut from (branch-actions Phase C) — persisted so the
+  // Changes panel still diffs against the true base after a daemon restart. A ref name or commit id.
+  baseBranch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS).optional(),
+  // The parent repo the worktree was cut from (Phase C) — worktree removal and branch deletion run
+  // here at reap time, and the PR push resolves its remote. Bounded like `cwd`.
+  repoPath: z.string().min(1).max(1024).optional(),
 });
 
 /** Derived from the schema so a new persisted field is declared once (the schema is the source of truth). */
@@ -54,6 +61,8 @@ export interface SessionStore {
   loadAll(): Promise<Map<string, PersistedSession>>;
   /** Persist a session's record. Coalesced + async (never blocks the daemon's hot path). */
   save(sessionId: string, record: PersistedSession): void;
+  /** Forget a session's file (reap, branch-actions T3). Already-absent is fine — the goal state. */
+  remove(sessionId: string): Promise<void>;
 }
 
 /** A session id is the file name; require a real UUID so a crafted id can't escape the store directory. */
@@ -120,6 +129,22 @@ export function createSessionStore(options: { dir: string; logger?: Logger }): S
       if (!SESSION_ID_RE.test(sessionId)) return;
       latest.set(sessionId, JSON.stringify(record));
       if (!writing.has(sessionId)) void flush(sessionId);
+    },
+
+    async remove(sessionId: string): Promise<void> {
+      if (!SESSION_ID_RE.test(sessionId)) return;
+      // Drop any queued snapshot so a coalesced write can't resurrect the file. (Reaped sessions
+      // are terminal, so no NEW save races this; an already-in-flight write is a benign leftover
+      // that the next daemon start ignores once the record is gone from memory.)
+      latest.delete(sessionId);
+      try {
+        await unlink(join(dir, `${sessionId}.json`));
+      } catch (err) {
+        const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+        if (code !== 'ENOENT') {
+          logger?.warn({ err, sessionId }, 'session-store: failed to remove session file');
+        }
+      }
     },
   };
 }

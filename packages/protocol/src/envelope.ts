@@ -57,6 +57,29 @@ export const MESSAGE_TYPES = [
   // (daemon -> web) answers the requesting browser — branch names are content, sealed only.
   'repo.branches',
   'repo.branches.state',
+  // Worktree/branch hygiene (branch-actions Phase C), a device-scoped box-sealed RPC like adopt.*:
+  // `workspace.reap` (web -> daemon) asks — as the delete flow's explicit opt-in — to remove a
+  // launched session's worktree and branch; `workspace.reap.state` (daemon -> web) answers the
+  // requesting browser with ok or a coded refusal. The PAYLOAD is sealed (paths/branch names never
+  // reach the relay); unlike adopt.*, the ENVELOPE deliberately carries the session id — cleartext
+  // routing metadata (as on every session frame) so the relay's offline-honesty path can name the
+  // action that went nowhere. The daemon authorizes from the SEALED id only.
+  'workspace.reap',
+  'workspace.reap.state',
+  // Between-turns branch switch for LAUNCHED sessions (branch-actions T4), session-scoped and
+  // sealed under the session content key: `session.branch.switch` (web -> daemon) asks to check
+  // out an existing branch in the session's worktree; `session.branch.state` (daemon -> web)
+  // settles the ask (ok + the branch, or a coded refusal — mid-turn, dirty, …).
+  'session.branch.switch',
+  'session.branch.state',
+  // Open PR, push leg (branch-actions T6), session-scoped and sealed like the switch: the daemon
+  // pushes the session branch to origin WITH THE LAPTOP'S OWN GIT CREDENTIALS (the relay's GitHub
+  // token never travels, per the plan) and answers `session.push.state` — ok with the pushed
+  // branch/base (+ owner/name when origin is a github.com remote, so the BROWSER can open the PR
+  // page under the user's own signed-in account), or a coded refusal. No GitHub API call happens
+  // anywhere outside the user's browser.
+  'session.push',
+  'session.push.state',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).
@@ -83,6 +106,12 @@ export const MESSAGE_TYPES = [
   // forwards/replays it; only browsers holding the session key can read it (invariant #5 — the registry
   // never sees plaintext metadata for a sealed session).
   'session.meta',
+  // sealed branch-diff summary (daemon -> relay -> web, branch-workflow Phase C): the launched
+  // session's working-tree diff vs its base branch (files, ±N), encrypted under the per-session
+  // content key exactly like `session.meta`. The daemon emits it after workspace prep, on subscribe,
+  // and between turns; the relay only ever forwards/replays the opaque blob (invariant #5 — file
+  // paths and counts are workspace content the relay must never see).
+  'session.changes',
   // session rename override (relay -> web, ux Phase 6 T6): the user's title override, broadcast after a
   // `PATCH /me/sessions/:id`. Kept SEPARATE from `session.meta` (the daemon-owned identity) so the two
   // never race — the browser merges override-wins. A SET carries the sealed `{ title }` ciphertext; a

@@ -91,3 +91,42 @@ test('a lost session continues as a NEW linked session from its composer', async
     page.getByRole('main').getByRole('link', { name: /pick the work back up/ }),
   ).toHaveCount(0);
 });
+
+test('the fork can start on a NEW branch cut from a picked base (branch-actions T5)', async ({
+  page,
+}) => {
+  const PROMPT = `lose this session for the fork ${Date.now()}`;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Continue as developer' }).click();
+  await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
+
+  await page.getByRole('button', { name: 'Launch session' }).first().click();
+  await page.getByLabel('First instruction').fill(PROMPT);
+  await page.getByRole('button', { name: /Launch on/ }).click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
+  const parentUrl = page.url();
+  await expect(page.getByText(/can’t continue here/)).toBeVisible();
+
+  // The dock's branch control: off by default; on → base picker (parent first) + name field.
+  await page.getByRole('switch', { name: 'Start the new session on a new branch' }).click();
+  const base = page.getByLabel('From base');
+  await expect(base).toBeVisible();
+  await base.selectOption('develop');
+  // Scoped to the dock — the launch drawer holds an identically-labeled field elsewhere in the DOM.
+  const name = page.locator('.dock').getByLabel(/New branch name/);
+  await page.getByLabel('Prompt').fill('continue on the new branch');
+  // An invalid name DISABLES the whole composer (the typed message is preserved, never swallowed)…
+  await name.fill('bad name');
+  await expect(page.getByText('Not a valid git branch name.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Resume as new' })).toBeDisabled();
+  await expect(page.getByLabel('Prompt')).toHaveValue('continue on the new branch');
+  // …a valid one re-arms it and rides the fork.
+  await name.fill('feat/forked-e2e');
+  await page.getByRole('button', { name: 'Resume as new' }).click();
+  await expect(page).not.toHaveURL(parentUrl, { timeout: 10_000 });
+
+  // The CHILD's sealed identity reports the chosen branch — payload → daemon → meta → rail.
+  await expect(page.getByLabel('Session details').getByText('feat/forked-e2e')).toBeVisible({
+    timeout: 10_000,
+  });
+});

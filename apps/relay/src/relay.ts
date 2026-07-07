@@ -161,7 +161,18 @@ const CACHEABLE_TYPES = new Set<string>([
   // Sealed session metadata (ux Phase 6): latest-wins identity for the session — cached (like the key,
   // outside the stream ring) so a reopening browser can label the session immediately.
   'session.meta',
+  // Sealed branch-diff summary (branch-actions Phase C): latest-wins like `session.meta` — only the
+  // freshest summary means anything, and replaying stale ones would flash wrong counts on reopen.
+  'session.changes',
 ]);
+
+/**
+ * The largest `session.changes` FRAME (whole envelope JSON, ciphertext included) the reopen cache
+ * keeps. The plaintext worst case is bounded by the protocol (MAX_CHANGED_FILES × path cap ≈ 110 KiB);
+ * doubled for seal/base64/envelope overhead. Oversized frames still FORWARD live (the relay never
+ * drops daemon traffic on size alone here) — they just don't occupy the cache slot.
+ */
+const MAX_CACHED_CHANGES_FRAME_CHARS = 256 * 1024;
 
 /**
  * Session-scoped browser actions that get an honest `relay.error` reply when the daemon is offline —
@@ -175,6 +186,13 @@ const UNDELIVERABLE_REPLY_TYPES: ReadonlySet<string> = new Set([
   'user.message',
   'session.control',
   'session.subscribe',
+  // The delete flow's worktree reap (Phase C T3): box-sealed payload, but the envelope names the
+  // session as routing metadata, so a reap that reached an offline device un-spins honestly.
+  'workspace.reap',
+  // The between-turns branch switch (Phase C T4): session-scoped like session.control.
+  'session.branch.switch',
+  // The Open-PR push leg (Phase C T6): a push clicked into an offline device un-spins honestly.
+  'session.push',
 ]);
 
 /**
@@ -239,7 +257,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // its existence/size must not cross the channel boundary).
   const ciphertextCache = new Map<
     string,
-    { channel: string; key?: string; meta?: string; stream: string[] }
+    { channel: string; key?: string; meta?: string; changes?: string; stream: string[] }
   >();
 
   /** Record a forwarded daemon→browser frame for later replay (ciphertext string, never read). */
@@ -258,6 +276,11 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       entry.key = frame; // keep only the latest key frame
     } else if (type === 'session.meta') {
       entry.meta = frame; // latest-wins identity metadata (ux Phase 6) — never fills the stream ring
+    } else if (type === 'session.changes') {
+      // Latest-wins branch-diff summary (Phase C) — same story as the meta, plus a size bound:
+      // this slot lives outside the ring and is never persisted, so one hostile/buggy daemon
+      // frame could otherwise pin an arbitrarily large blob in memory indefinitely.
+      if (frame.length <= MAX_CACHED_CHANGES_FRAME_CHARS) entry.changes = frame;
     } else {
       entry.stream.push(frame);
       if (entry.stream.length > cacheMaxFrames) entry.stream.shift();
@@ -275,6 +298,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     try {
       if (entry.key !== undefined) browser.send(entry.key);
       if (entry.meta !== undefined) browser.send(entry.meta);
+      if (entry.changes !== undefined) browser.send(entry.changes);
       for (const frame of entry.stream) browser.send(frame);
     } catch (err) {
       log.warn({ err, sessionId }, 'relay: failed to replay cached frames');

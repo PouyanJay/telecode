@@ -119,6 +119,14 @@ export type SessionLaunchPayload = z.infer<typeof sessionLaunchPayloadSchema>;
 export const sessionResumeNewPayloadSchema = z.object({
   prompt: z.string().min(1),
   clientRef: z.string().min(1).optional(),
+  /**
+   * Fork onto a chosen branch (branch-actions T5): cut the CHILD a fresh worktree from this base
+   * (default: the parent's own branch, so the fork continues from the parent's code state) with
+   * this name (default: the telecode auto-name). Omitting BOTH keeps the pre-T5 behavior — the
+   * child inherits the parent's worktree. Validated like the launch's fields (they reach git argv).
+   */
+  baseBranch: gitBranchNameSchema.optional(),
+  branchName: gitBranchNameSchema.optional(),
 });
 export type SessionResumeNewPayload = z.infer<typeof sessionResumeNewPayloadSchema>;
 
@@ -196,22 +204,159 @@ export const adoptStatePayloadSchema = adoptSettingsSchema.extend({
 });
 export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
 
-/** Payload for `repo.branches` (web → daemon): ask for the default repo's branches (Phase B). */
-export const repoBranchesRequestPayloadSchema = z.object({});
+/**
+ * Payload for `repo.branches` (web → daemon): ask for the default repo's branches (Phase B), or —
+ * with `sessionId` (branch-actions T4) — for the branches of THAT launched session's own repo (the
+ * rail's Switch picker and the fork drawer's base list). Additive optional: old peers only ever ask
+ * the default form.
+ */
+export const repoBranchesRequestPayloadSchema = z.object({
+  sessionId: z.string().uuid().optional(),
+});
 export type RepoBranchesRequestPayload = z.infer<typeof repoBranchesRequestPayloadSchema>;
 
 /**
- * Payload for `repo.branches.state` (daemon → web, sealed to the requester): the DEFAULT repo's
- * local branches for the launch drawer's base picker. `available: false` = this daemon has no
- * default repo configured (the drawer then offers no local base choice). Bounded like the launch's
- * branch fields; the daemon caps the list before sealing.
+ * Payload for `repo.branches.state` (daemon → web, sealed to the requester): the asked repo's
+ * local branches. `available: false` = nothing to list (no default repo configured, or an unknown/
+ * repo-less session). `sessionId` echoes a session-scoped ask so the browser can key the answer to
+ * the asking surface; absent on the Phase B default-repo form. Bounded like the launch's branch
+ * fields; the daemon caps the list before sealing.
  */
 export const repoBranchesStatePayloadSchema = z.object({
   available: z.boolean(),
   branches: z.array(z.string().min(1).max(MAX_BRANCH_NAME_CHARS)).max(MAX_REPO_BRANCHES),
   defaultBranch: z.string().min(1).max(256).optional(),
+  sessionId: z.string().uuid().optional(),
 });
 export type RepoBranchesStatePayload = z.infer<typeof repoBranchesStatePayloadSchema>;
+
+/**
+ * Payload for `workspace.reap` (web → daemon, branch-actions T3): the delete flow's explicit opt-in
+ * to remove a launched session's worktree + branch on its device. Box-sealed device-scoped like
+ * `adopt.config`. The id must be a real UUID — it is matched against the daemon's records, never
+ * used as a path, but the boundary stays strict anyway.
+ */
+export const workspaceReapRequestPayloadSchema = z.object({
+  sessionId: z.string().uuid(),
+});
+export type WorkspaceReapRequestPayload = z.infer<typeof workspaceReapRequestPayloadSchema>;
+
+/**
+ * Why a reap was refused: the daemon doesn't know the session (`unknown-session`), it isn't a
+ * reapable one (`not-reapable` — adopted, still running, or holding no worktree), the tree has
+ * uncommitted work (`dirty` — never silently discarded), or git failed (`failed` — the generic
+ * story; git stderr can carry local paths, so it never travels).
+ */
+export const WORKSPACE_REAP_FAILURE_CODES = [
+  'unknown-session',
+  'not-reapable',
+  'dirty',
+  'failed',
+] as const;
+export const workspaceReapFailureCodeSchema = z.enum(WORKSPACE_REAP_FAILURE_CODES);
+export type WorkspaceReapFailureCode = z.infer<typeof workspaceReapFailureCodeSchema>;
+
+/**
+ * Payload for `workspace.reap.state` (daemon → web, sealed to the requester): success carries no
+ * code; a refusal always carries one, so the UI never has to invent a story.
+ */
+export const workspaceReapStatePayloadSchema = z.union([
+  z.object({ sessionId: z.string().uuid(), ok: z.literal(true) }),
+  z.object({
+    sessionId: z.string().uuid(),
+    ok: z.literal(false),
+    code: workspaceReapFailureCodeSchema,
+  }),
+]);
+export type WorkspaceReapStatePayload = z.infer<typeof workspaceReapStatePayloadSchema>;
+
+/**
+ * Payload for `session.branch.switch` (web → daemon, branch-actions T4): move a LAUNCHED session's
+ * worktree onto another EXISTING branch between turns. Sealed under the session content key like
+ * every session-scoped command; the branch name is validated at the boundary (it reaches git argv).
+ */
+export const sessionBranchSwitchPayloadSchema = z.object({
+  branch: gitBranchNameSchema,
+});
+export type SessionBranchSwitchPayload = z.infer<typeof sessionBranchSwitchPayloadSchema>;
+
+/**
+ * Why a switch was refused: a turn is in flight (`mid-turn` — never move the tree under the agent),
+ * the session can't take follow-ups anymore (`ended`), it isn't a telecode-launched worktree session
+ * (`not-launched` — adopted checkouts are display-only by design), the tree has uncommitted work
+ * (`dirty`), the branch doesn't exist locally (`not-found`), git refused because another worktree
+ * holds it (`checked-out-elsewhere` — usually the user's own working copy), or git failed
+ * (`failed`, the generic story — stderr can carry local paths).
+ */
+export const BRANCH_SWITCH_FAILURE_CODES = [
+  'mid-turn',
+  'ended',
+  'not-launched',
+  'dirty',
+  'not-found',
+  'checked-out-elsewhere',
+  'failed',
+] as const;
+export const branchSwitchFailureCodeSchema = z.enum(BRANCH_SWITCH_FAILURE_CODES);
+export type BranchSwitchFailureCode = z.infer<typeof branchSwitchFailureCodeSchema>;
+
+/**
+ * Payload for `session.branch.state` (daemon → web, sealed under the session content key): how the
+ * switch settled. Success names the branch actually checked out; a refusal always carries a code.
+ * The daemon also re-emits `session.meta` (new branch) and `session.changes` on success — this
+ * frame exists so the ASKING surface can settle its in-flight control.
+ */
+export const sessionBranchStatePayloadSchema = z.union([
+  z.object({ ok: z.literal(true), branch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS) }),
+  z.object({ ok: z.literal(false), code: branchSwitchFailureCodeSchema }),
+]);
+export type SessionBranchStatePayload = z.infer<typeof sessionBranchStatePayloadSchema>;
+
+/** Payload for `session.push` (web → daemon, branch-actions T6): push the session branch to origin. */
+export const sessionPushRequestPayloadSchema = z.object({});
+export type SessionPushRequestPayload = z.infer<typeof sessionPushRequestPayloadSchema>;
+
+/**
+ * Why a push was refused: not a telecode-launched worktree session (`not-launched`), a turn is in
+ * flight (`mid-turn` — never publish a state the agent is mid-way through writing), the repo has no
+ * `origin` (`no-remote`), the laptop's own git credentials were refused (`auth`), the remote
+ * refused the ref (`rejected` — non-fast-forward), the push ran out of time (`timeout`), or git
+ * failed some other way (`failed` — generic; stderr can carry local paths and never travels).
+ */
+export const PUSH_FAILURE_CODES = [
+  'not-launched',
+  'mid-turn',
+  'no-remote',
+  'auth',
+  'rejected',
+  'timeout',
+  'failed',
+] as const;
+export const pushFailureCodeSchema = z.enum(PUSH_FAILURE_CODES);
+export type PushFailureCode = z.infer<typeof pushFailureCodeSchema>;
+
+/**
+ * Payload for `session.push.state` (daemon → web, sealed under the session content key): how the
+ * push settled. Success names the pushed branch, the base NAME a compare URL wants (remote prefix
+ * stripped; absent when the base is a bare commit id), and `owner/name` when origin is a
+ * github.com remote — from these the BROWSER builds and opens the PR page itself.
+ */
+export const sessionPushStatePayloadSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    branch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS),
+    base: z.string().min(1).max(MAX_BRANCH_NAME_CHARS).optional(),
+    // Exactly `owner/name` in GitHub-valid characters — the wire enforces the shape the browser's
+    // URL builder assumes, independent of which daemon build produced the value.
+    githubRepo: z
+      .string()
+      .max(256)
+      .regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/)
+      .optional(),
+  }),
+  z.object({ ok: z.literal(false), code: pushFailureCodeSchema }),
+]);
+export type SessionPushStatePayload = z.infer<typeof sessionPushStatePayloadSchema>;
 
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
@@ -378,6 +523,45 @@ export const sessionMetaPayloadSchema = z.object({
   ts: entryTimestampSchema.optional(),
 });
 export type SessionMetaPayload = z.infer<typeof sessionMetaPayloadSchema>;
+
+/** The most files one `session.changes` frame carries — the daemon clips the list and flags
+ * `truncated` (totals stay accurate over the FULL diff), so one pathological diff can't bloat the
+ * sealed frame. Shared so the daemon's clip and the wire bound can never drift. */
+export const MAX_CHANGED_FILES = 200;
+
+/** The longest repo-relative file path one changed-file row carries. */
+export const MAX_CHANGED_FILE_PATH_CHARS = 512;
+
+/**
+ * One changed file in a `session.changes` summary. `additions`/`deletions` are `null` when a line
+ * count is unknowable — a binary file (git numstat `-`) or an untracked file git hasn't diffed —
+ * so the UI can render an honest "—" instead of a fake 0.
+ */
+export const changedFileSchema = z.object({
+  path: z.string().min(1).max(MAX_CHANGED_FILE_PATH_CHARS),
+  additions: z.number().int().nonnegative().nullable(),
+  deletions: z.number().int().nonnegative().nullable(),
+});
+export type ChangedFile = z.infer<typeof changedFileSchema>;
+
+/**
+ * Payload for `session.changes` (daemon → relay → web, branch-workflow Phase C): the launched
+ * session's diff vs the base branch it was cut from — working tree included, so uncommitted agent
+ * work shows up. Sealed under the per-session content key like {@link sessionMetaPayloadSchema};
+ * file paths are workspace content the relay must never see. `baseBranch` is the RESOLVED base ref
+ * the worktree was actually cut from (e.g. `origin/main`), so the panel can label "vs <base>"
+ * truthfully.
+ */
+export const sessionChangesPayloadSchema = z.object({
+  baseBranch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS),
+  files: z.array(changedFileSchema).max(MAX_CHANGED_FILES),
+  /** Totals over the FULL diff — accurate even when `files` is clipped to {@link MAX_CHANGED_FILES}. */
+  totalAdditions: z.number().int().nonnegative(),
+  totalDeletions: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  ts: entryTimestampSchema.optional(),
+});
+export type SessionChangesPayload = z.infer<typeof sessionChangesPayloadSchema>;
 
 /**
  * Payload for `session.title` (relay → web, ux Phase 6 T6): the user's rename override, kept in a blob

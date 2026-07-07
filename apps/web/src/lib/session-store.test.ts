@@ -85,6 +85,9 @@ function makeFakeConnection() {
       sendRepoBranchesRequest: () => {
         branchRequests += 1;
       },
+      sendWorkspaceReap: () => undefined,
+      switchBranch: () => undefined,
+      pushBranch: () => undefined,
       sendAdoptConfig: (set) => adoptConfigs.push(set),
       close: () => undefined,
     };
@@ -578,6 +581,9 @@ describe('session rename (ux Phase 6 T6)', () => {
           sealTitle: async () => null,
           sendAdoptConfig: () => undefined,
           sendRepoBranchesRequest: () => undefined,
+          sendWorkspaceReap: () => undefined,
+          switchBranch: () => undefined,
+          pushBranch: () => undefined,
           close: () => undefined,
         };
       },

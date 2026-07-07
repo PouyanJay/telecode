@@ -4,11 +4,12 @@
     type QuestionAnswerItem,
     type SessionControlAction,
   } from '@telecode/protocol';
-  import { ConfirmDialog } from '@telecode/ui';
+  import { ConfirmDialog, Switch } from '@telecode/ui';
 
   import { goto } from '$app/navigation';
 
   import Composer from '$lib/components/Composer.svelte';
+  import ForkBranchPicker from '$lib/components/ForkBranchPicker.svelte';
   import InheritedContext from '$lib/components/InheritedContext.svelte';
   import LineageStrip from '$lib/components/LineageStrip.svelte';
   import SegmentDivider from '$lib/components/SegmentDivider.svelte';
@@ -27,6 +28,8 @@
   import { SESSION_DISPLAY } from '$lib/session-display';
   import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
   import { canResumeAsNew } from '$lib/resume-as-new';
+  import { canSwitchBranch } from '$lib/branch-switch';
+  import { canPushBranch } from '$lib/push-offer';
   import {
     answer,
     answerHandover,
@@ -34,12 +37,15 @@
     connectionState,
     decide,
     deleteSessionForever,
+    reapWorkspace,
+    type WorkspaceReapOutcome,
     deviceChannels,
     renameSession,
     resetSessionTitle,
     resumeAsNew,
     sendControl,
     sendUserMessage,
+    sessionChanges,
     sessionDevices,
     sessionMetas,
     sessionTitleOverrides,
@@ -142,6 +148,47 @@
       'are not touched.',
   );
 
+  // Between-turns branch switch (branch-actions T4): the session-shape gate (launched + settled-
+  // but-followable) plus the liveness facts only this page holds (device reachable, channel up).
+  const switchOffered = $derived(
+    canSwitchBranch(effectiveStatus, registryRow?.origin ?? 'launched') &&
+      sessionDeviceOnline &&
+      connected,
+  );
+
+  // Open PR (branch-actions T6): the extracted session-shape gate (exhaustively unit-tested,
+  // like canSwitchBranch) plus the liveness facts only this page holds.
+  const pushOffered = $derived(
+    canPushBranch(
+      effectiveStatus,
+      registryRow?.origin ?? 'launched',
+      $sessionMetas.get(sessionId)?.branch,
+    ) &&
+      sessionDeviceOnline &&
+      connected,
+  );
+
+  // Worktree reaping (branch-actions T3): deleting a LAUNCHED session can also remove its worktree
+  // + branch — but only its own daemon can do that, so the offer exists only while it's reachable.
+  // Adopted sessions never get the offer: their checkout is the user's own, not telecode's.
+  const canOfferReap = $derived(
+    canHousekeep && (registryRow?.origin ?? 'launched') === 'launched' && sessionDeviceOnline,
+  );
+  let reapChecked = $state(false);
+  const reapLabel = 'Also remove its worktree and branch';
+  // Typed against the outcome union: adding a failure reason without copy is a compile error.
+  const REAP_STORIES: Record<Extract<WorkspaceReapOutcome, { ok: false }>['reason'], string> = {
+    dirty:
+      'Its worktree has uncommitted changes, so nothing was removed and the session was kept. ' +
+      'Commit or discard them on the device, or delete without removing the worktree.',
+    'unknown-session': 'The daemon no longer knows this session, so its worktree was not touched.',
+    'not-reapable': 'This session has no worktree its daemon can remove.',
+    failed: 'The device could not remove the worktree. The session was kept.',
+    'daemon-offline': 'The device went offline before it could remove the worktree. Session kept.',
+    timeout: 'The device did not answer in time, so nothing was deleted.',
+    'no-connection': 'No connection to the session’s device, so nothing was deleted.',
+  };
+
   async function onArchive(): Promise<void> {
     houseError = null;
     archiveBusy = true;
@@ -158,6 +205,18 @@
   async function onDeleteConfirm(): Promise<void> {
     houseError = null;
     deleteBusy = true;
+    // The opted-in reap runs FIRST, and a refusal aborts the delete: the registry row is the only
+    // handle pointing at that worktree — deleting it while the worktree survives would strand the
+    // leftover invisibly forever. The daemon's coded story (dirty, offline, …) is shown instead.
+    if (canOfferReap && reapChecked) {
+      const reaped = await reapWorkspace(sessionId);
+      if (!reaped.ok) {
+        deleteBusy = false;
+        confirmDeleteOpen = false;
+        houseError = REAP_STORIES[reaped.reason];
+        return;
+      }
+    }
     const result = await deleteSessionForever(sessionId);
     deleteBusy = false;
     confirmDeleteOpen = false;
@@ -244,12 +303,23 @@
   const resumeNotice =
     'This session can’t continue here. Your next message starts a new linked session ' +
     'that picks up where it left off.';
+  // Fork onto a chosen branch (branch-actions T5): the picker's current choice + validity. An
+  // invalid custom name BLOCKS the send with an honest story — never a silent fallback.
+  // Structurally absent for ADOPTED parents (requirements A8): their fork inherits nothing
+  // telecode owns — the daemon has no repo to cut from and would only fail the child.
+  const forkBranchOffered = $derived((registryRow?.origin ?? 'launched') === 'launched');
+  let forkBranch = $state<{ baseBranch: string; branchName?: string } | undefined>(undefined);
+  let forkBranchValid = $state(true);
 
   async function submitResumeAsNew(text: string): Promise<void> {
+    if (!forkBranchValid) {
+      resumeError = 'Fix the new branch name first — it isn’t a valid git branch name.';
+      return;
+    }
     resumeError = null;
     resuming = true;
     try {
-      const childId = await resumeAsNew(sessionId, text);
+      const childId = await resumeAsNew(sessionId, text, forkBranch);
       await goto(`/sessions/${childId}`, { invalidateAll: true });
     } catch (err) {
       resumeError = err instanceof Error ? err.message : 'Could not resume. Please try again.';
@@ -425,6 +495,18 @@
             <!-- Resume-as-new (T8): the honest affordance for a session that CANNOT continue in
                  place. Standing (no dismiss) — it reads for as long as the state does. -->
             <SessionNotice tone="warning" message={resumeNotice} />
+            {#if forkBranchOffered}
+              <!-- Fork onto a chosen branch (branch-actions T5): off = inherit the parent worktree. -->
+              <ForkBranchPicker
+                {sessionId}
+                parentBranch={$sessionMetas.get(sessionId)?.branch}
+                disabled={resuming}
+                onchange={(choice, valid) => {
+                  forkBranch = choice;
+                  forkBranchValid = valid;
+                }}
+              />
+            {/if}
           {/if}
           {#if resumeError}
             <SessionNotice
@@ -439,6 +521,9 @@
             placeholder={resumeMode
               ? 'Continue this work in a new session…'
               : 'Send a follow-up instruction…'}
+            disabledReason={resumeMode && !forkBranchValid
+              ? 'Fix the new branch name first — it isn’t a valid git branch name.'
+              : undefined}
             onsend={submitPrompt}
           />
         </div>
@@ -451,6 +536,9 @@
         deviceName={device?.name ?? null}
         connection={$connectionState}
         meta={$sessionMetas.get(sessionId)}
+        changes={$sessionChanges.get(sessionId)}
+        canSwitchBranch={switchOffered}
+        canPushBranch={pushOffered}
       />
     {/if}
   </div>
@@ -464,7 +552,26 @@
   confirmTone="danger"
   busy={deleteBusy}
   onconfirm={onDeleteConfirm}
-/>
+>
+  {#snippet details()}
+    {#if canOfferReap}
+      <div class="reap-opt">
+        <Switch
+          label={reapLabel}
+          checked={reapChecked}
+          disabled={deleteBusy}
+          onclick={() => (reapChecked = !reapChecked)}
+        />
+        <div class="reap-copy">
+          <span class="reap-title">{reapLabel}{device?.name ? ` on ${device.name}` : ''}</span>
+          <span class="reap-hint mono"
+            >Work not merged or pushed is lost. Uncommitted files cancel the delete instead.</span
+          >
+        </div>
+      </div>
+    {/if}
+  {/snippet}
+</ConfirmDialog>
 
 <style>
   .view {
@@ -472,6 +579,30 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  /* The delete dialog's reap opt-in (Phase C T3): switch + consequence copy on one calm row. */
+  .reap-opt {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-muted);
+  }
+  .reap-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .reap-title {
+    font-size: var(--text-sm);
+    color: var(--text);
+  }
+  .reap-hint {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
   .body {
     flex: 1;

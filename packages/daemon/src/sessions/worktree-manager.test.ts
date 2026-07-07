@@ -82,7 +82,11 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
 
     const second = await manager.ensureWorktree(sessionId, repoPath);
 
-    expect(second).toEqual(first);
+    // Same worktree, same branch — but no `baseBranch`: an existing worktree's cut point isn't
+    // recoverable from git, so the reuse path deliberately doesn't guess one (Phase C contract;
+    // the daemon keeps the base its record stored at the original cut).
+    expect(first.baseBranch).toBe('main');
+    expect(second).toEqual({ path: first.path, branch: first.branch });
     // The reuse must not wipe the agent's in-progress work.
     expect(await readFile(join(second.path, 'agent-output.txt'), 'utf8')).toBe('work in progress');
   });
@@ -123,6 +127,7 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
     });
 
     expect(worktree.branch).toBe('feat/picked');
+    expect(worktree.baseBranch).toBe('develop'); // the resolved cut point the Changes panel diffs against
     const head = await run('git', ['-C', worktree.path, 'rev-parse', '--abbrev-ref', 'HEAD']);
     expect(head.stdout.trim()).toBe('feat/picked');
     expect(await exists(join(worktree.path, 'develop-only.txt'))).toBe(true); // base honored
@@ -149,7 +154,23 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
     });
 
     expect(worktree.branch).toBe('feat/from-remote');
+    // The REMOTE-TRACKING form is what actually resolved — reported verbatim, `origin/` prefix intact.
+    expect(worktree.baseBranch).toBe('origin/develop');
     expect(await exists(join(worktree.path, 'develop-only.txt'))).toBe(true);
+  });
+
+  it('reports a detached-HEAD default cut point as the commit id, never the literal "HEAD"', async () => {
+    const repo = await makeRepo();
+    const sha = (await run('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+    await run('git', ['-C', repo, 'checkout', '-q', '--detach', sha]);
+
+    const root = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot: root });
+    const worktree = await manager.ensureWorktree(randomUUID(), repo);
+
+    // 'HEAD' as a recorded base would be useless for later diffing (the repo's HEAD moves) — the
+    // commit id is the durable, honest stand-in when no branch name exists.
+    expect(worktree.baseBranch).toBe(sha);
   });
 
   it('reuse reports the branch the worktree is ACTUALLY on — later options never win', async () => {

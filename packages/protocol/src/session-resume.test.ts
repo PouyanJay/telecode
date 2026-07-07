@@ -38,4 +38,25 @@ describe('session.resume_new wire contract (T8)', () => {
     expect(sessionResumeNewPayloadSchema.safeParse({}).success).toBe(false);
     expect(sessionResumeNewPayloadSchema.safeParse({ clientRef: 'r' }).success).toBe(false);
   });
+
+  it('carries an optional base + name for a fork onto a chosen branch (branch-actions T5)', () => {
+    expect(
+      sessionResumeNewPayloadSchema.parse({
+        prompt: 'continue over there',
+        baseBranch: 'telecode/parent-work-ab12',
+        branchName: 'feat/continued',
+      }),
+    ).toEqual({
+      prompt: 'continue over there',
+      baseBranch: 'telecode/parent-work-ab12',
+      branchName: 'feat/continued',
+    });
+    // The same conservative ref-name rule as the launch's fields — these reach git argv.
+    expect(
+      sessionResumeNewPayloadSchema.safeParse({ prompt: 'x', baseBranch: '-rf' }).success,
+    ).toBe(false);
+    expect(
+      sessionResumeNewPayloadSchema.safeParse({ prompt: 'x', branchName: 'a..b' }).success,
+    ).toBe(false);
+  });
 });

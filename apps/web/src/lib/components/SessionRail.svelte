@@ -1,7 +1,9 @@
 <script lang="ts">
-  import type { SessionMetaPayload } from '@telecode/protocol';
+  import type { SessionChangesPayload, SessionMetaPayload } from '@telecode/protocol';
 
-  import { summarizeChanges } from '$lib/changes';
+  import BranchSwitcher from '$lib/components/BranchSwitcher.svelte';
+  import PushPanel from '$lib/components/PushPanel.svelte';
+  import { changesView } from '$lib/changes';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionState } from '$lib/session';
   import type { ConnectionState } from '$lib/session-store';
@@ -9,26 +11,39 @@
   /**
    * The session-view right rail (enterprise-ui §7): durable facts about the run. "Session" and
    * "Connection" are true invariants (the daemon dials out over WSS, E2E via x25519, the relay forwards
-   * ciphertext only). "Changes" is derived from the approval-gate record via {@link summarizeChanges} —
-   * real +/- line counts from the proposed edits, never invented totals. Collapses below the stream on
-   * a phone.
+   * ciphertext only). "Changes" renders {@link changesView}: the daemon's sealed branch-diff vs the
+   * session's base when one exists (launched sessions, Phase C), else the approval-gate record — real
+   * counts from real sources, never invented totals. Collapses below the stream on a phone.
    */
   let {
     session,
     deviceName,
     connection,
     meta,
+    changes,
+    canSwitchBranch = false,
+    canPushBranch = false,
   }: {
     session: SessionState;
     deviceName: string | null;
     connection: ConnectionState;
     /** Decrypted session metadata (ux Phase 6): model, working directory, and git branch. */
     meta?: SessionMetaPayload | undefined;
+    /** Decrypted branch-diff summary (Phase C); absent → the gate-derived fallback renders. */
+    changes?: SessionChangesPayload | undefined;
+    /** Between-turns switch offer (Phase C T4): launched + settled + device reachable. */
+    canSwitchBranch?: boolean;
+    /** Open-PR offer (Phase C T6): launched + between turns + device reachable. */
+    canPushBranch?: boolean;
   } = $props();
 
   const display = $derived(SESSION_DISPLAY[session.status]);
-  const changes = $derived(summarizeChanges(session.entries));
+  const view = $derived(changesView(changes, session.entries));
   const online = $derived(connection === 'connected');
+
+  /** ±counts render honestly: a null count (binary/untracked file) is "—", never a fake 0. */
+  const stat = (prefix: '+' | '−', count: number | null): string =>
+    count === null ? '—' : `${prefix}${count}`;
 </script>
 
 <aside class="rail" aria-label="Session details">
@@ -61,6 +76,9 @@
         <span class="meta-key">Branch</span>
         <span class="meta-val mono" title={meta.branch}>{meta.branch}</span>
       </div>
+      {#if canSwitchBranch && session.sessionId}
+        <BranchSwitcher sessionId={session.sessionId} currentBranch={meta.branch} />
+      {/if}
     {/if}
     <div class="meta">
       <span class="meta-key">Session</span>
@@ -70,29 +88,39 @@
 
   <section class="rsec">
     <div class="rh">
-      <span class="eyebrow">Changes</span>
-      {#if changes.files.length > 0}
+      <span class="eyebrow">
+        Changes{#if view.baseBranch}<span class="vsbase mono" title={`diff vs ${view.baseBranch}`}>
+            vs {view.baseBranch}</span
+          >{/if}
+      </span>
+      {#if view.files.length > 0}
         <span class="totals mono">
-          <span class="add">+{changes.additions}</span>
-          <span class="del">−{changes.deletions}</span>
+          <span class="add">+{view.additions}</span>
+          <span class="del">−{view.deletions}</span>
         </span>
       {/if}
     </div>
-    {#if changes.files.length === 0}
+    {#if view.files.length === 0}
       <p class="muted">No file changes yet.</p>
     {:else}
-      {#each changes.files as file (file.path)}
+      {#each view.files as file (file.path)}
         <div class="meta hairline-b file">
           <span class="fname mono" title={file.path}>{file.path}</span>
           <span class="fstat mono">
-            <span class="add">+{file.additions}</span>
-            <span class="del">−{file.deletions}</span>
+            <span class="add">{stat('+', file.additions)}</span>
+            <span class="del">{stat('−', file.deletions)}</span>
           </span>
         </div>
       {/each}
-      {#if changes.pending > 0}
-        <p class="pending mono">{changes.pending} pending · not yet written to disk</p>
+      {#if view.truncated}
+        <p class="pending mono">list truncated · totals cover the full diff</p>
       {/if}
+      {#if view.pending > 0}
+        <p class="pending mono">{view.pending} pending · not yet written to disk</p>
+      {/if}
+    {/if}
+    {#if canPushBranch && session.sessionId}
+      <PushPanel sessionId={session.sessionId} />
     {/if}
   </section>
 
@@ -144,6 +172,12 @@
   }
   .rh .eyebrow {
     margin: 0;
+  }
+  .vsbase {
+    margin-left: var(--space-2);
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--text-secondary);
   }
   .totals {
     display: flex;

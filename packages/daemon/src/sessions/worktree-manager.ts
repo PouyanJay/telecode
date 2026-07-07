@@ -13,6 +13,13 @@ const run = promisify(execFile);
 export interface SessionWorktree {
   readonly path: string;
   readonly branch: string;
+  /**
+   * The RESOLVED ref the branch was cut from (`main`, `origin/main`, …) — what the Changes panel
+   * diffs against (branch-actions, Phase C). Absent on the idempotent-reuse path: an existing
+   * worktree's cut point isn't recoverable from git alone; the daemon falls back to what it
+   * recorded at the original cut.
+   */
+  readonly baseBranch?: string;
 }
 
 /**
@@ -109,6 +116,57 @@ export function createGitWorktreeManager(options: GitWorktreeManagerOptions): Wo
     return base;
   }
 
+  /** The repo HEAD's branch name, or its commit id when detached (no name exists to report). */
+  async function resolveHeadName(repoPath: string): Promise<string> {
+    const head = (
+      await run('git', ['-C', repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'])
+    ).stdout.trim();
+    if (head !== 'HEAD') return head;
+    return (await run('git', ['-C', repoPath, 'rev-parse', 'HEAD'])).stdout.trim();
+  }
+
+  /**
+   * Pin the cut point to a NAME the Changes panel can diff against later — `HEAD` is only
+   * meaningful at this instant (the repo's HEAD moves). A detached HEAD has no name; its commit id
+   * is the honest stand-in. Failures wrap like the add's own (git stderr may carry local paths).
+   */
+  async function resolveBaseName(
+    repo: string,
+    cutTarget: string,
+    sessionId: string,
+  ): Promise<string> {
+    try {
+      return cutTarget !== 'HEAD' ? cutTarget : await resolveHeadName(repo);
+    } catch (cause) {
+      throw new WorktreeError(`failed to create git worktree for session ${sessionId}`, { cause });
+    }
+  }
+
+  /**
+   * `worktree add -b <branch> <path> <base>`: new branch off the resolved base, checked out at
+   * `path`. execFile (not a shell) with an args array — no string interpolation. A creator racing
+   * the {@link resolveCutTarget} precheck still deserves the friendly story git buries in stderr.
+   */
+  async function addWorktree(
+    repo: string,
+    branch: string,
+    path: string,
+    baseBranch: string,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      await run('git', ['-C', repo, 'worktree', 'add', '-b', branch, path, baseBranch]);
+    } catch (cause) {
+      if (cause instanceof Error && /already exists/i.test(cause.message)) {
+        throw new WorktreeError(`branch already exists: ${branch}`, {
+          cause,
+          code: 'branch-exists',
+        });
+      }
+      throw new WorktreeError(`failed to create git worktree for session ${sessionId}`, { cause });
+    }
+  }
+
   async function branchExists(repoPath: string, branch: string): Promise<boolean> {
     try {
       await run('git', [
@@ -139,27 +197,13 @@ export function createGitWorktreeManager(options: GitWorktreeManagerOptions): Wo
       }
 
       const repo = resolve(repoPath);
-      const base = await resolveCutTarget(repo, branch, options);
+      const cutTarget = await resolveCutTarget(repo, branch, options);
+      const baseBranch = await resolveBaseName(repo, cutTarget, sessionId);
       await mkdir(worktreesRoot, { recursive: true });
-      try {
-        // `worktree add -b <branch> <path> <base>`: new branch off the chosen base (default: HEAD),
-        // checked out at `path`. execFile (not a shell) with an args array — no string interpolation.
-        await run('git', ['-C', repo, 'worktree', 'add', '-b', branch, path, base]);
-      } catch (cause) {
-        // A creator racing the precheck still deserves the friendly story git buries in stderr.
-        if (cause instanceof Error && /already exists/i.test(cause.message)) {
-          throw new WorktreeError(`branch already exists: ${branch}`, {
-            cause,
-            code: 'branch-exists',
-          });
-        }
-        throw new WorktreeError(`failed to create git worktree for session ${sessionId}`, {
-          cause,
-        });
-      }
+      await addWorktree(repo, branch, path, baseBranch, sessionId);
       // Log the branch, never the absolute path (treated as payload-adjacent — kept out of log sinks).
       log.info({ sessionId, branch }, 'worktree-manager: created session worktree');
-      return { path, branch };
+      return { path, branch, baseBranch };
     },
   };
 }
