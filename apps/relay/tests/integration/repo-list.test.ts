@@ -59,6 +59,9 @@ describe('relay repo listing: GET /me/repos', () => {
       }
       return REPOS;
     },
+    listBranches(): Promise<string[]> {
+      return Promise.reject(new Error('not under test'));
+    },
   };
 
   beforeAll(async () => {

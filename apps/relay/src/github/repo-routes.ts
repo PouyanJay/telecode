@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 
 import { type AuthService } from '../auth/auth-service';
 import { type OAuthTokenStore } from '../auth/oauth-token-store';
@@ -43,6 +44,64 @@ export function registerRepoListRoute(
     } catch {
       // The token is present but GitHub rejected/failed it (e.g. revoked). Surface a clear upstream
       // failure (never the token or error detail) so the UI can prompt a reconnect.
+      return reply.code(502).send({ error: 'github_unavailable' });
+    }
+  });
+}
+
+/**
+ * A GitHub-valid owner/name path segment — same rules as the launch payload's repo ref (protocol
+ * `repoPathSegmentSchema`): these flow into the GitHub API URL, so they are constrained at the boundary.
+ */
+const repoParamsSchema = z.object({
+  owner: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9._-]+$/)
+    .refine((value) => value !== '.' && value !== '..'),
+  name: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z0-9._-]+$/)
+    .refine((value) => value !== '.' && value !== '..'),
+});
+
+/**
+ * Web → relay: list one GitHub repo's branches for the launch drawer's base-branch picker (Phase B).
+ * Same trust path as /me/repos — the user's stored token is decrypted relay-side and never returned;
+ * `connected: false` means no linked GitHub token (the drawer falls back to the default branch only).
+ */
+export function registerRepoBranchesRoute(
+  app: FastifyInstance,
+  auth: AuthService,
+  tokenStore: OAuthTokenStore,
+  github: GithubClient,
+): void {
+  app.get('/me/repos/:owner/:name/branches', async (request, reply) => {
+    const userId = await requireUser(request, reply, auth);
+    if (!userId) return reply;
+
+    const params = repoParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid_repo' });
+    }
+
+    const stored = await tokenStore.getToken(userId);
+    if (!stored) {
+      return reply.send({ connected: false, branches: [] });
+    }
+
+    try {
+      const branches = await github.listBranches(
+        stored.accessToken,
+        params.data.owner,
+        params.data.name,
+      );
+      return reply.send({ connected: true, branches });
+    } catch {
+      // Token present but GitHub failed it — surface a clear upstream failure, never the detail.
       return reply.code(502).send({ error: 'github_unavailable' });
     }
   });
