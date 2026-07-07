@@ -50,7 +50,7 @@ describe('daemon: session.push round-trip (branch-actions T6)', () => {
     };
   }
 
-  async function startHarness(options?: { withOrigin?: boolean }): Promise<{
+  async function startHarness(options?: { withOrigin?: boolean; adapter?: AgentAdapter }): Promise<{
     relay: FakeRelay;
     userId: string;
     deviceId: string;
@@ -89,7 +89,7 @@ describe('daemon: session.push round-trip (branch-actions T6)', () => {
       relayUrl: relay.url,
       userId,
       deviceId,
-      agentAdapter: instantAdapter(),
+      agentAdapter: options?.adapter ?? instantAdapter(),
       logger: silent,
       worktreeManager: createGitWorktreeManager({ worktreesRoot, logger: silent }),
       defaultRepoPath: repoPath,
@@ -173,60 +173,28 @@ describe('daemon: session.push round-trip (branch-actions T6)', () => {
   });
 
   it('refuses to push mid-turn — never publish a state the agent is writing', async () => {
-    // Same harness shape, but the adapter holds its turn open until the test releases it.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const origin = await tempDir('telecode-push-rt-mid-origin-');
-    await run('git', ['init', '-q', '--bare', '-b', 'main', origin]);
-    const parent = await tempDir('telecode-push-rt-mid-clone-');
-    const repoPath = join(parent, 'clone');
-    await run('git', ['clone', '-q', '--', origin, repoPath]);
-    await run('git', ['-C', repoPath, 'config', 'user.email', 'test@telecode.local']);
-    await run('git', ['-C', repoPath, 'config', 'user.name', 'telecode-test']);
-    await appendFile(join(repoPath, 'README.md'), '# repo\n');
-    await run('git', ['-C', repoPath, 'add', '.']);
-    await run('git', ['-C', repoPath, 'commit', '-qm', 'init']);
-    await run('git', ['-C', repoPath, 'push', '-q', 'origin', 'main']);
-    const worktreesRoot = await tempDir('telecode-push-rt-mid-worktrees-');
-    const userId = randomUUID();
-    const deviceId = randomUUID();
-    const relay = await startFakeRelay(userId, deviceId);
-    relays.push(relay);
-    const daemon = createDaemon({
-      relayUrl: relay.url,
-      userId,
-      deviceId,
-      agentAdapter: {
+    const harness = await startHarness({
+      adapter: {
         async run(_prompt, opts) {
           await gate;
           opts.onEvent({ type: 'message', text: 'done' });
           return { intercepted: [], allowed: [], denied: [], sessionId: 'sdk-held' };
         },
       },
-      logger: silent,
-      worktreeManager: createGitWorktreeManager({ worktreesRoot, logger: silent }),
-      defaultRepoPath: repoPath,
-      pushBranch: createGitBranchPusher(),
     });
-    daemons.push(daemon);
-    await daemon.start();
-
     const sessionId = randomUUID();
-    relay.send(
-      makeEnvelope({
-        type: 'session.launch',
-        userId,
-        deviceId,
-        sessionId,
-        payload: { prompt: 'push me mid-turn' },
-      }),
-    );
-    await relay.waitForFrame((e) => e.type === 'session.started');
+    harness.launch(sessionId);
+    await harness.relay.waitForFrame((e) => e.type === 'session.started');
 
-    relay.send(makeEnvelope({ type: 'session.push', userId, deviceId, sessionId, payload: {} }));
-    expect(await awaitPushState(relay, sessionId)).toEqual({ ok: false, code: 'mid-turn' });
+    harness.push(sessionId);
+    expect(await awaitPushState(harness.relay, sessionId)).toEqual({
+      ok: false,
+      code: 'mid-turn',
+    });
 
     release(); // settle the run so teardown is clean
-    await relay.waitForFrame((e) => e.type === 'session.ended');
+    await harness.relay.waitForFrame((e) => e.type === 'session.ended');
   });
 });

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button } from '@telecode/ui';
+  import { Button, FieldNote } from '@telecode/ui';
 
   import { pullRequestUrl } from '$lib/open-pr';
   import { pushSessionBranch, type SessionPushOutcome } from '$lib/session-store';
@@ -53,15 +53,15 @@
   {#if pushed === null}
     <Button variant="ghost" size="sm" loading={busy} onclick={push}>Push branch for a PR</Button>
   {:else if prLink !== null}
-    <p class="note mono">Pushed {pushed.branch}.</p>
+    <FieldNote>Pushed {pushed.branch}.</FieldNote>
     <a class="pr-link" href={prLink} target="_blank" rel="noopener noreferrer">
       Open a pull request on GitHub ↗
     </a>
   {:else}
-    <p class="note mono">Pushed {pushed.branch} to origin. Open a PR from your git host.</p>
+    <FieldNote>Pushed {pushed.branch} to origin. Open a PR from your git host.</FieldNote>
   {/if}
   {#if error}
-    <p class="note err mono" role="alert">{error}</p>
+    <FieldNote tone="danger">{error}</FieldNote>
   {/if}
 </div>
 
@@ -72,15 +72,6 @@
     align-items: flex-start;
     gap: var(--space-2);
     padding-top: var(--space-2);
-  }
-  .note {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    overflow-wrap: anywhere;
-  }
-  .note.err {
-    color: var(--danger);
   }
   .pr-link {
     font-size: var(--text-sm);

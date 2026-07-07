@@ -346,7 +346,13 @@ export const sessionPushStatePayloadSchema = z.union([
     ok: z.literal(true),
     branch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS),
     base: z.string().min(1).max(MAX_BRANCH_NAME_CHARS).optional(),
-    githubRepo: z.string().min(1).max(256).optional(),
+    // Exactly `owner/name` in GitHub-valid characters — the wire enforces the shape the browser's
+    // URL builder assumes, independent of which daemon build produced the value.
+    githubRepo: z
+      .string()
+      .max(256)
+      .regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/)
+      .optional(),
   }),
   z.object({ ok: z.literal(false), code: pushFailureCodeSchema }),
 ]);

@@ -74,7 +74,8 @@ import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import { type BranchReader } from './adopt/git-branch';
 import { type BranchLister } from './sessions/branch-list';
-import { parseGithubRemote, type BranchPusher } from './sessions/branch-push';
+import { type BranchPusher } from './sessions/branch-push';
+import { parseGithubRemote } from './sessions/parse-github-remote';
 import { type BranchSwitcher } from './sessions/branch-switcher';
 import { type WorkspaceChangesReader } from './sessions/workspace-changes';
 import { type WorkspaceReaper } from './sessions/workspace-reaper';
@@ -90,7 +91,11 @@ import { classifyTool } from './permission-policy';
 import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
 import { type PersistedSession, type SessionStore } from './sessions/session-store';
-import { WorktreeError, type WorktreeManager } from './sessions/worktree-manager';
+import {
+  WorktreeError,
+  type SessionWorktree,
+  type WorktreeManager,
+} from './sessions/worktree-manager';
 
 /** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
 const HANDOVER_TITLE_PREVIEW_CHARS = 60;
@@ -1474,28 +1479,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
       return;
     }
-    const permissionMode = parent?.permissionMode ?? 'default';
-    const inheritedCwd = sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd;
-    // The child runs where the parent ran, so it also IS the parent's repo and branch — a worktree
-    // cwd alone can't say so (it ends in the parent's session id, not the repo or branch name).
-    const repo = parent?.meta?.repo;
-    const branch = parent?.meta?.branch;
     // Fork onto a chosen branch (branch-actions T5): either field means the child gets its OWN
-    // worktree instead of inheriting the parent's — cwd/branch then come from the cut, not the
-    // parent, so they are deliberately left out of the minting patch (no wrong-value flash).
+    // worktree instead of inheriting the parent's.
     const wantsOwnWorktree = request.baseBranch !== undefined || request.branchName !== undefined;
+    const inherited = resolveChildInheritance(parentId, parent, wantsOwnWorktree);
     const minted = await mintChainedChild({
       parentSessionId: parentId,
-      permissionMode,
-      metaPatch: {
-        ...resolveLaunchTitle(undefined, prompt),
-        ...(inheritedCwd !== undefined && !wantsOwnWorktree ? { cwd: inheritedCwd } : {}),
-        ...(repo !== undefined ? { repo } : {}),
-        ...(branch !== undefined && !wantsOwnWorktree ? { branch } : {}),
-        permissionMode,
-      },
+      permissionMode: inherited.permissionMode,
+      metaPatch: { ...resolveLaunchTitle(undefined, prompt), ...inherited.metaPatch },
       firstTurnText: prompt,
-      ...(inheritedCwd !== undefined && !wantsOwnWorktree ? { cwd: inheritedCwd } : {}),
+      ...(inherited.cwd !== undefined ? { cwd: inherited.cwd } : {}),
       ...(request.clientRef !== undefined ? { startedClientRef: request.clientRef } : {}),
       // The acting browser must decrypt the started frame's clientRef to pair + navigate — deliver
       // the child's key to the pubkey the (sealed) request announced.
@@ -1504,23 +1497,62 @@ export function createDaemon(options: DaemonOptions): Daemon {
         : {}),
     });
     if (!minted) return;
-    let cwd = inheritedCwd;
+    let cwd = inherited.cwd;
     if (wantsOwnWorktree) {
       const forkCwd = await prepareForkWorkspace({
         childId: minted.childId,
         source: minted.source,
         repoPath: parent?.repoPath,
         // The default base is the parent's OWN branch — the fork continues its code state.
-        baseBranch: request.baseBranch ?? branch,
+        baseBranch: request.baseBranch ?? parent?.meta?.branch,
         branchName: request.branchName,
         prompt,
       });
       if (forkCwd === undefined) return; // the child already failed cleanly
       cwd = forkCwd;
     }
+    await runResumedTurn(minted, parentId, prompt, cwd);
+  }
+
+  /**
+   * What a resume-as-new child takes from its parent. With its own worktree coming (T5), cwd and
+   * branch are deliberately absent — they belong to the cut, and a wrong value must never flash on
+   * the wire first. The repo tag always carries over: the child IS in the parent's repo either way
+   * (a worktree cwd alone can never name it — it ends in a session id).
+   */
+  function resolveChildInheritance(
+    parentId: string,
+    parent: SessionRecord | undefined,
+    wantsOwnWorktree: boolean,
+  ): { permissionMode: PermissionModeName; cwd?: string; metaPatch: Partial<SessionMetaPayload> } {
+    const cwd = wantsOwnWorktree
+      ? undefined
+      : (sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd);
+    const branch = wantsOwnWorktree ? undefined : parent?.meta?.branch;
+    const repo = parent?.meta?.repo;
+    const permissionMode = parent?.permissionMode ?? 'default';
+    return {
+      permissionMode,
+      ...(cwd !== undefined ? { cwd } : {}),
+      metaPatch: {
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(repo !== undefined ? { repo } : {}),
+        ...(branch !== undefined ? { branch } : {}),
+        permissionMode,
+      },
+    };
+  }
+
+  /** The resume-as-new tail: fork-resume when the parent conversation survives, fresh run otherwise. */
+  async function runResumedTurn(
+    minted: { childId: string; source: Envelope },
+    parentId: string,
+    prompt: string,
+    cwd: string | undefined,
+  ): Promise<void> {
     // The resume id survives on the record for launched AND adopted parents (T4); fall back to the
     // in-memory map. Absent → fresh launch, still linked.
-    const resume = parent?.claudeSessionId ?? sdkSessions.get(parentId);
+    const resume = sessionRecords.get(parentId)?.claudeSessionId ?? sdkSessions.get(parentId);
     log.info(
       {
         deviceId: options.deviceId,
@@ -1565,14 +1597,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         ...(params.baseBranch !== undefined ? { baseBranch: params.baseBranch } : {}),
         branchName: params.branchName ?? deriveBranchName(params.prompt, params.childId),
       });
-      const rec = recordFor(params.childId);
-      sessionCwds.set(params.childId, worktree.path);
-      rec.cwd = worktree.path;
-      rec.repoPath = params.repoPath;
-      if (worktree.baseBranch !== undefined) rec.baseBranch = worktree.baseBranch;
-      emitSessionMeta(params.source, { cwd: worktree.path, branch: worktree.branch });
-      emitSessionChanges(params.source);
-      return worktree.path;
+      return recordForkWorktree(params.childId, params.source, params.repoPath, worktree);
     } catch (err) {
       // Coded worktree errors are user-fixable and safe verbatim; anything else stays generic
       // (git stderr can carry local paths). Log the shape only, never the branch names.
@@ -1590,6 +1615,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
           : 'failed to prepare session workspace',
       );
     }
+  }
+
+  /** Book the fork's fresh worktree onto the child record and announce it (identity + changes). */
+  function recordForkWorktree(
+    childId: string,
+    source: Envelope,
+    repoPath: string,
+    worktree: SessionWorktree,
+  ): string {
+    const rec = recordFor(childId);
+    sessionCwds.set(childId, worktree.path);
+    rec.cwd = worktree.path;
+    rec.repoPath = repoPath;
+    if (worktree.baseBranch !== undefined) rec.baseBranch = worktree.baseBranch;
+    emitSessionMeta(source, { cwd: worktree.path, branch: worktree.branch });
+    emitSessionChanges(source);
+    return worktree.path;
   }
 
   async function handleFrame(raw: Buffer, onReady: () => void): Promise<void> {
@@ -2327,6 +2369,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
   function compareBaseName(baseRef: string | undefined): string | undefined {
     if (baseRef === undefined) return undefined;
     const name = baseRef.replace(/^origin\//, '');
+    // Heuristic: a branch literally NAMED like a hex id (e.g. `deadbeef`) is misread as a commit
+    // and dropped — the PR link then falls back to the default-base page. Accepted trade-off.
     return /^[0-9a-f]{7,40}$/i.test(name) ? undefined : name;
   }
 

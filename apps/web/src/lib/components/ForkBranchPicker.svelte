@@ -1,6 +1,6 @@
 <script lang="ts">
   import { isValidGitBranchName } from '@telecode/protocol';
-  import { Switch } from '@telecode/ui';
+  import { FieldNote, SelectField, Switch } from '@telecode/ui';
 
   import { forkBaseOptions } from '$lib/fork-branch';
   import { requestSessionBranches, sessionBranches } from '$lib/session-store';
@@ -58,22 +58,26 @@
 
 <div class="fork-branch">
   <div class="row">
-    <Switch label="Start the new session on a new branch" checked={wantNew} {disabled} onclick={toggle} />
+    <Switch
+      label="Start the new session on a new branch"
+      checked={wantNew}
+      {disabled}
+      onclick={toggle}
+    />
     <span class="row-label">Start on a new branch</span>
   </div>
   {#if wantNew}
     <div class="fields">
-      <label class="lbl" for="fork-base-{sessionId}">From base</label>
       {#if options.length === 0}
-        <p class="note mono">No branch list available — the fork will continue in place.</p>
+        <FieldNote>No branch list available — the fork will continue in place.</FieldNote>
       {:else}
-        <select id="fork-base-{sessionId}" class="mono" bind:value={base} {disabled}>
+        <SelectField id="fork-base-{sessionId}" label="From base" bind:value={base} {disabled}>
           {#each options as option (option)}
             <option value={option}>
               {option}{option === parentBranch ? ' (parent)' : ''}
             </option>
           {/each}
-        </select>
+        </SelectField>
       {/if}
       <label class="lbl" for="fork-name-{sessionId}">New branch name (optional)</label>
       <input
@@ -86,7 +90,7 @@
         aria-invalid={nameInvalid}
       />
       {#if nameInvalid}
-        <p class="note err mono" role="alert">Not a valid git branch name.</p>
+        <FieldNote tone="danger">Not a valid git branch name.</FieldNote>
       {/if}
     </div>
   {/if}
@@ -120,7 +124,6 @@
     font-size: var(--text-xs);
     color: var(--text-muted);
   }
-  select,
   input {
     width: 100%;
     padding: var(--space-2);
@@ -130,20 +133,11 @@
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm);
   }
-  select:focus-visible,
   input:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
   input::placeholder {
     color: var(--text-muted);
-  }
-  .note {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-  .note.err {
-    color: var(--danger);
   }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button } from '@telecode/ui';
+  import { Button, FieldNote, SelectField } from '@telecode/ui';
 
   import {
     requestSessionBranches,
@@ -30,9 +30,7 @@
   let error = $state<string | null>(null);
 
   const listing = $derived($sessionBranches.get(sessionId));
-  const choices = $derived(
-    (listing?.branches ?? []).filter((branch) => branch !== currentBranch),
-  );
+  const choices = $derived((listing?.branches ?? []).filter((branch) => branch !== currentBranch));
 
   // Typed against the outcome union: adding a failure reason without copy is a compile error.
   const SWITCH_STORIES: Record<Extract<BranchSwitchOutcome, { ok: false }>['reason'], string> = {
@@ -80,15 +78,14 @@
     <Button variant="ghost" size="sm" onclick={openPicker}>Switch branch</Button>
   {:else}
     <div class="picker">
-      <label class="lbl" for="switch-branch-{sessionId}">Switch to</label>
       {#if listing === undefined}
-        <p class="note mono" role="status">Loading branches…</p>
+        <FieldNote role="status">Loading branches…</FieldNote>
       {:else if !listing.available || choices.length === 0}
-        <p class="note mono">No other branch to switch to.</p>
+        <FieldNote>No other branch to switch to.</FieldNote>
       {:else}
-        <select
+        <SelectField
           id="switch-branch-{sessionId}"
-          class="mono"
+          label="Switch to"
           bind:value={picked}
           disabled={busy}
         >
@@ -96,10 +93,10 @@
           {#each choices as branch (branch)}
             <option value={branch}>{branch}</option>
           {/each}
-        </select>
+        </SelectField>
       {/if}
       {#if error}
-        <p class="note err mono" role="alert">{error}</p>
+        <FieldNote tone="danger">{error}</FieldNote>
       {/if}
       <div class="row">
         <Button variant="ghost" size="sm" onclick={cancel} disabled={busy}>Cancel</Button>
@@ -133,31 +130,6 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-muted);
-  }
-  .lbl {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-  select {
-    width: 100%;
-    padding: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-  }
-  select:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-  .note {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-  .note.err {
-    color: var(--danger);
   }
   .row {
     display: flex;

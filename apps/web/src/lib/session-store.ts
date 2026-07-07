@@ -261,11 +261,17 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
     return;
   }
   if (envelope.type === 'session.branch.state') {
-    settleBranchSwitchFrame(envelope);
+    // The switch verdict (T4): settles the asking control; the branch ROW follows the daemon's
+    // session.meta re-emit, never this frame.
+    settleVerdictFrame(envelope, sessionBranchStatePayloadSchema, switchAsks, (data) =>
+      data.ok ? { ok: true, branch: data.branch } : { ok: false, reason: data.code },
+    );
     return;
   }
   if (envelope.type === 'session.push.state') {
-    settlePushFrame(envelope);
+    settleVerdictFrame(envelope, sessionPushStatePayloadSchema, pushAsks, (data) =>
+      data.ok ? data : { ok: false, reason: data.code },
+    );
     return;
   }
   if (envelope.type === 'relay.error' && settleOfflineDeviceAsk(envelope)) {
@@ -276,30 +282,20 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
 }
 
 /**
- * The switch verdict (Phase C T4): settles the asking control; the branch row itself follows the
- * daemon's `session.meta` re-emit, so this never touches the meta map.
+ * Settle a session-scoped verdict frame into its ask ledger — the one shape every coded RPC reply
+ * shares (switch T4, push T6, and whatever Phase C grows next): guard the id, parse at the trust
+ * boundary, map the daemon's wire verdict onto the caller-facing outcome.
  */
-function settleBranchSwitchFrame(envelope: Envelope): void {
+function settleVerdictFrame<TWire, TOutcome extends { ok: boolean }>(
+  envelope: Envelope,
+  schema: { safeParse: (data: unknown) => { success: true; data: TWire } | { success: false } },
+  asks: { settle: (sessionId: string, outcome: TOutcome) => void },
+  toOutcome: (data: TWire) => TOutcome,
+): void {
   if (envelope.session_id === undefined) return;
-  const parsed = sessionBranchStatePayloadSchema.safeParse(envelope.payload);
+  const parsed = schema.safeParse(envelope.payload);
   if (!parsed.success) return;
-  switchAsks.settle(
-    envelope.session_id,
-    parsed.data.ok
-      ? { ok: true, branch: parsed.data.branch }
-      : { ok: false, reason: parsed.data.code },
-  );
-}
-
-/** The push verdict (Phase C T6): settles the asking control with the daemon's own answer. */
-function settlePushFrame(envelope: Envelope): void {
-  if (envelope.session_id === undefined) return;
-  const parsed = sessionPushStatePayloadSchema.safeParse(envelope.payload);
-  if (!parsed.success) return;
-  pushAsks.settle(
-    envelope.session_id,
-    parsed.data.ok ? parsed.data : { ok: false, reason: parsed.data.code },
-  );
+  asks.settle(envelope.session_id, toOutcome(parsed.data));
 }
 
 /**

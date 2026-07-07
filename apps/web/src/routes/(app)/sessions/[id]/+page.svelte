@@ -9,12 +9,12 @@
   import { goto } from '$app/navigation';
 
   import Composer from '$lib/components/Composer.svelte';
+  import ForkBranchPicker from '$lib/components/ForkBranchPicker.svelte';
   import InheritedContext from '$lib/components/InheritedContext.svelte';
   import LineageStrip from '$lib/components/LineageStrip.svelte';
   import SegmentDivider from '$lib/components/SegmentDivider.svelte';
   import SessionHeader from '$lib/components/SessionHeader.svelte';
   import SessionNotice from '$lib/components/SessionNotice.svelte';
-  import ForkBranchPicker from '$lib/components/ForkBranchPicker.svelte';
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, type SessionState } from '$lib/session';
@@ -29,6 +29,7 @@
   import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
   import { canResumeAsNew } from '$lib/resume-as-new';
   import { canSwitchBranch } from '$lib/branch-switch';
+  import { canPushBranch } from '$lib/push-offer';
   import {
     answer,
     answerHandover,
@@ -155,12 +156,14 @@
       connected,
   );
 
-  // Open PR (branch-actions T6): pushing shares the switch's between-turns shape — launched with a
-  // known branch, never mid-turn — plus the same liveness facts. Terminal-but-followable included.
+  // Open PR (branch-actions T6): the extracted session-shape gate (exhaustively unit-tested,
+  // like canSwitchBranch) plus the liveness facts only this page holds.
   const pushOffered = $derived(
-    (registryRow?.origin ?? 'launched') === 'launched' &&
-      !isBusy &&
-      $sessionMetas.get(sessionId)?.branch !== undefined &&
+    canPushBranch(
+      effectiveStatus,
+      registryRow?.origin ?? 'launched',
+      $sessionMetas.get(sessionId)?.branch,
+    ) &&
       sessionDeviceOnline &&
       connected,
   );
@@ -302,6 +305,9 @@
     'that picks up where it left off.';
   // Fork onto a chosen branch (branch-actions T5): the picker's current choice + validity. An
   // invalid custom name BLOCKS the send with an honest story — never a silent fallback.
+  // Structurally absent for ADOPTED parents (requirements A8): their fork inherits nothing
+  // telecode owns — the daemon has no repo to cut from and would only fail the child.
+  const forkBranchOffered = $derived((registryRow?.origin ?? 'launched') === 'launched');
   let forkBranch = $state<{ baseBranch: string; branchName?: string } | undefined>(undefined);
   let forkBranchValid = $state(true);
 
@@ -489,16 +495,18 @@
             <!-- Resume-as-new (T8): the honest affordance for a session that CANNOT continue in
                  place. Standing (no dismiss) — it reads for as long as the state does. -->
             <SessionNotice tone="warning" message={resumeNotice} />
-            <!-- Fork onto a chosen branch (branch-actions T5): off = inherit the parent worktree. -->
-            <ForkBranchPicker
-              {sessionId}
-              parentBranch={$sessionMetas.get(sessionId)?.branch}
-              disabled={resuming}
-              onchange={(choice, valid) => {
-                forkBranch = choice;
-                forkBranchValid = valid;
-              }}
-            />
+            {#if forkBranchOffered}
+              <!-- Fork onto a chosen branch (branch-actions T5): off = inherit the parent worktree. -->
+              <ForkBranchPicker
+                {sessionId}
+                parentBranch={$sessionMetas.get(sessionId)?.branch}
+                disabled={resuming}
+                onchange={(choice, valid) => {
+                  forkBranch = choice;
+                  forkBranchValid = valid;
+                }}
+              />
+            {/if}
           {/if}
           {#if resumeError}
             <SessionNotice

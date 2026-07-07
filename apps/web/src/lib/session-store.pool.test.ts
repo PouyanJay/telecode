@@ -614,13 +614,10 @@ describe('pushSessionBranch (branch-actions T6)', () => {
     await expect(outcome).resolves.toEqual({ ok: false, reason: 'auth' });
   });
 
-  it('resolves daemon-offline from the relay honest error and times out on silence (45s window)', async () => {
+  it('resolves daemon-offline from the relay honest error', async () => {
     const pool = makeFakePool();
     connectDevices([DEVICE_A], options, pool.create);
-    seedSessionDevices([
-      { id: 'sess-push-offline', deviceId: 'device-a' },
-      { id: 'sess-push-silent', deviceId: 'device-a' },
-    ]);
+    seedSessionDevices([{ id: 'sess-push-offline', deviceId: 'device-a' }]);
 
     const offline = pushSessionBranch('sess-push-offline');
     pool.byDevice.get('device-a')!.emit(
@@ -633,6 +630,12 @@ describe('pushSessionBranch (branch-actions T6)', () => {
       }),
     );
     await expect(offline).resolves.toEqual({ ok: false, reason: 'daemon-offline' });
+  });
+
+  it('gives the push a LONGER (45s) window before timing out', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-push-silent', deviceId: 'device-a' }]);
 
     const silent = pushSessionBranch('sess-push-silent');
     // A push gets MORE time than the 15s device-RPC default — the daemon's own git timeout is 30s.
@@ -645,5 +648,38 @@ describe('pushSessionBranch (branch-actions T6)', () => {
     expect(settled).toBe(false);
     vi.advanceTimersByTime(30_000);
     await expect(silent).resolves.toEqual({ ok: false, reason: 'timeout' });
+  });
+
+  it('resolves no-connection for an unrouted session in a multi-device pool (no guessing)', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    await expect(pushSessionBranch('sess-push-unrouted')).resolves.toEqual({
+      ok: false,
+      reason: 'no-connection',
+    });
+  });
+
+  it('a second ask supersedes the first — the stale timer never fires into the new slot', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-push-twice', deviceId: 'device-a' }]);
+
+    const first = pushSessionBranch('sess-push-twice');
+    vi.advanceTimersByTime(40_000); // deep into the first ask's window
+    const second = pushSessionBranch('sess-push-twice');
+    await expect(first).resolves.toEqual({ ok: false, reason: 'no-connection' }); // superseded
+
+    // The FIRST ask's timer would fire now — it must not settle the second ask as timeout.
+    vi.advanceTimersByTime(6_000);
+    pool.byDevice.get('device-a')!.emit(
+      makeEnvelope({
+        type: 'session.push.state',
+        userId,
+        deviceId: 'device-a',
+        sessionId: 'sess-push-twice',
+        payload: { ok: true, branch: 'telecode/twice' },
+      }),
+    );
+    await expect(second).resolves.toEqual({ ok: true, branch: 'telecode/twice' });
   });
 });

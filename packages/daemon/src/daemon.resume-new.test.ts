@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -26,6 +25,7 @@ import {
   startE2eDaemon,
   unwrapContentKey,
 } from './e2e-harness';
+import { hookRpc } from './hook-rpc';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
 
@@ -34,26 +34,6 @@ const execFileAsync = promisify(execFile);
 /** Run one git command in `cwd`, returning stdout (test-only convenience). */
 async function runGitCmd(cwd: string, args: string[]): Promise<string> {
   return (await execFileAsync('git', ['-C', cwd, ...args])).stdout;
-}
-
-/** One bridge round-trip over the hook socket: write the event, half-close, read the decision JSON. */
-function hookRpc(socketPath: string, event: unknown): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const client = createConnection(socketPath);
-    let out = '';
-    client.on('connect', () => client.end(JSON.stringify(event)));
-    client.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf8');
-    });
-    client.on('end', () => {
-      try {
-        resolve(out === '' ? {} : JSON.parse(out));
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error('hook response parse failed'));
-      }
-    });
-    client.on('error', reject);
-  });
 }
 
 /**

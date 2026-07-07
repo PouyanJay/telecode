@@ -106,5 +106,42 @@ describe('daemon: adopted sessions refuse switch and push (branch-actions T7)', 
       ).payload,
     );
     expect(pushState).toEqual({ ok: false, code: 'not-launched' });
+
+    // Fork-onto-branch against the (now ended) adopted parent: the daemon holds no repo it may cut
+    // from — the child must fail CLEANLY with the coded story, never touch the user's checkout.
+    await hookRpc(socketPath, {
+      hook_event_name: 'SessionEnd',
+      session_id: 'claude-external-refusals',
+      cwd: dir,
+    });
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sessionId);
+
+    relay.send(
+      makeEnvelope({
+        type: 'session.resume_new',
+        userId,
+        deviceId,
+        sessionId,
+        payload: { prompt: 'continue on a branch', branchName: 'feat/from-adopted' },
+      }),
+    );
+    const announce2 = await relay.waitForFrame((e) => e.type === 'session.chained');
+    const childId = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.chained',
+        userId,
+        deviceId,
+        sessionId: childId,
+        payload: announce2.payload,
+      }),
+    );
+    const childEnded = await relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.session_id === childId,
+    );
+    expect(childEnded.payload).toMatchObject({
+      status: 'error',
+      error: 'cannot fork onto a branch: the original repo is not available here',
+    });
   });
 });
