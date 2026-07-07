@@ -143,6 +143,23 @@ test('switch the session branch between turns from the rail (branch-actions T4)'
   await expect(rail.getByRole('button', { name: 'Switch branch' })).toBeVisible();
 });
 
+test('a refused switch tells its coded story inline and changes nothing (T4)', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'hold the branch elsewhere please');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Switch branch' }).click();
+  await rail.getByLabel('Switch to').selectOption('develop');
+  await rail.getByRole('button', { name: 'Switch', exact: true }).click();
+
+  // The daemon refused: the inline story appears, the picker stays open, the branch row is
+  // untouched (still the launch-time worktree branch, never an optimistic 'develop').
+  await expect(rail.getByText('That branch is checked out in another worktree.')).toBeVisible();
+  await expect(rail.getByText(/^telecode\/[0-9a-f-]{36}$/)).toBeVisible();
+});
+
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {
   await signIn(page);
   await launchFromDashboard(page, 'Add a hello line to the README');

@@ -36,6 +36,7 @@
     decide,
     deleteSessionForever,
     reapWorkspace,
+    type WorkspaceReapOutcome,
     deviceChannels,
     renameSession,
     resetSessionTitle,
@@ -160,7 +161,9 @@
     canHousekeep && (registryRow?.origin ?? 'launched') === 'launched' && sessionDeviceOnline,
   );
   let reapChecked = $state(false);
-  const REAP_STORIES: Record<string, string> = {
+  const reapLabel = 'Also remove its worktree and branch';
+  // Typed against the outcome union: adding a failure reason without copy is a compile error.
+  const REAP_STORIES: Record<Extract<WorkspaceReapOutcome, { ok: false }>['reason'], string> = {
     dirty:
       'Its worktree has uncommitted changes, so nothing was removed and the session was kept. ' +
       'Commit or discard them on the device, or delete without removing the worktree.',
@@ -196,7 +199,7 @@
       if (!reaped.ok) {
         deleteBusy = false;
         confirmDeleteOpen = false;
-        houseError = REAP_STORIES[reaped.reason] ?? REAP_STORIES.failed ?? null;
+        houseError = REAP_STORIES[reaped.reason];
         return;
       }
     }
@@ -513,13 +516,13 @@
     {#if canOfferReap}
       <div class="reap-opt">
         <Switch
-          label="Also remove its worktree and branch"
+          label={reapLabel}
           checked={reapChecked}
           disabled={deleteBusy}
           onclick={() => (reapChecked = !reapChecked)}
         />
         <div class="reap-copy">
-          <span class="reap-title">Also remove its worktree and branch{device?.name ? ` on ${device.name}` : ''}</span>
+          <span class="reap-title">{reapLabel}{device?.name ? ` on ${device.name}` : ''}</span>
           <span class="reap-hint mono"
             >Work not merged or pushed is lost. Uncommitted files cancel the delete instead.</span
           >

@@ -140,7 +140,8 @@ export function createSessionStore(options: { dir: string; logger?: Logger }): S
       try {
         await unlink(join(dir, `${sessionId}.json`));
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+        if (code !== 'ENOENT') {
           logger?.warn({ err, sessionId }, 'session-store: failed to remove session file');
         }
       }

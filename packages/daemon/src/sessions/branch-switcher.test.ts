@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -71,9 +71,16 @@ describe('createGitBranchSwitcher', () => {
   });
 
   it('codes a branch held by another worktree as checked-out-elsewhere', async () => {
-    const { repo, cwd } = await makeWorkspace();
+    const { cwd } = await makeWorkspace();
     // `main` is checked out in the parent repo itself — exactly the user's-own-checkout case.
     expect(await switcher(cwd, 'main')).toEqual({ ok: false, code: 'checked-out-elsewhere' });
-    void repo;
+  });
+
+  it('codes any other git failure as the generic failed (raw stderr never escapes)', async () => {
+    const { repo, cwd } = await makeWorkspace();
+    // A corrupt worktree index: `rev-parse` (refs only) still succeeds, `status` dies with a fatal
+    // that matches none of the coded shapes — exactly the generic catch-all's territory.
+    await writeFile(join(repo, '.git', 'worktrees', basename(cwd), 'index'), 'garbage');
+    expect(await switcher(cwd, 'feat/other')).toEqual({ ok: false, code: 'failed' });
   });
 });

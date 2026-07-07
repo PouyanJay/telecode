@@ -25,6 +25,7 @@ import {
   sessions,
   setAdoptConfig,
   subscribe,
+  switchSessionBranch,
 } from './session-store';
 
 /**
@@ -461,5 +462,102 @@ describe('reapWorkspace (branch-actions T3)', () => {
     const outcome = reapWorkspace('sess-silent');
     vi.advanceTimersByTime(15_000);
     await expect(outcome).resolves.toEqual({ ok: false, reason: 'timeout' });
+  });
+});
+
+/**
+ * Between-turns branch switch (branch-actions T4): same correlation contract as reapWorkspace —
+ * routed to the session's OWN device, settled only by the daemon's sealed verdict / the relay's
+ * honest offline error / the local timeout, never optimistic. Plus the supersede rule: a second
+ * ask for the same session settles the first as no-connection (its stale timer must never fire
+ * into the new ask's slot).
+ */
+describe('switchSessionBranch (branch-actions T4)', () => {
+  function branchState(deviceId: string, sessionId: string, payload: unknown): Envelope {
+    return makeEnvelope({ type: 'session.branch.state', userId, deviceId, sessionId, payload });
+  }
+
+  it('sends the switch on the session own device and resolves the daemon ok verdict', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    seedSessionDevices([{ id: 'sess-switch', deviceId: 'device-b' }]);
+
+    const outcome = switchSessionBranch('sess-switch', 'feat/other');
+    const connB = pool.byDevice.get('device-b')!;
+    expect(connB.switches).toEqual([{ sessionId: 'sess-switch', branch: 'feat/other' }]);
+    expect(pool.byDevice.get('device-a')!.switches).toEqual([]);
+
+    connB.emit(branchState('device-b', 'sess-switch', { ok: true, branch: 'feat/other' }));
+    await expect(outcome).resolves.toEqual({ ok: true, branch: 'feat/other' });
+  });
+
+  it('resolves the daemon coded refusal as-is', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-held', deviceId: 'device-a' }]);
+
+    const outcome = switchSessionBranch('sess-held', 'main');
+    pool.byDevice
+      .get('device-a')!
+      .emit(branchState('device-a', 'sess-held', { ok: false, code: 'checked-out-elsewhere' }));
+    await expect(outcome).resolves.toEqual({ ok: false, reason: 'checked-out-elsewhere' });
+  });
+
+  it('resolves daemon-offline from the relay honest error, and ignores unrelated sessions', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-sw-offline', deviceId: 'device-a' }]);
+
+    const outcome = switchSessionBranch('sess-sw-offline', 'feat/other');
+    const connA = pool.byDevice.get('device-a')!;
+    // A verdict for a DIFFERENT session must not settle this one.
+    connA.emit(branchState('device-a', 'sess-sw-other', { ok: true, branch: 'x' }));
+    connA.emit(
+      makeEnvelope({
+        type: 'relay.error',
+        userId,
+        deviceId: 'device-a',
+        sessionId: 'sess-sw-offline',
+        payload: { code: 'device_offline', regarding: 'session.branch.switch' },
+      }),
+    );
+    await expect(outcome).resolves.toEqual({ ok: false, reason: 'daemon-offline' });
+  });
+
+  it('resolves no-connection for an unrouted session in a multi-device pool (no guessing)', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    await expect(switchSessionBranch('sess-sw-unrouted', 'feat/other')).resolves.toEqual({
+      ok: false,
+      reason: 'no-connection',
+    });
+  });
+
+  it('times out into an honest failure when nothing ever answers', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-sw-silent', deviceId: 'device-a' }]);
+
+    const outcome = switchSessionBranch('sess-sw-silent', 'feat/other');
+    vi.advanceTimersByTime(15_000);
+    await expect(outcome).resolves.toEqual({ ok: false, reason: 'timeout' });
+  });
+
+  it('a second ask supersedes the first — the stale timer never fires into the new slot', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-sw-twice', deviceId: 'device-a' }]);
+
+    const first = switchSessionBranch('sess-sw-twice', 'feat/one');
+    vi.advanceTimersByTime(10_000); // deep into the first ask's window
+    const second = switchSessionBranch('sess-sw-twice', 'feat/two');
+    await expect(first).resolves.toEqual({ ok: false, reason: 'no-connection' }); // superseded
+
+    // The FIRST ask's timer would fire now — it must not settle the second ask as timeout.
+    vi.advanceTimersByTime(6_000);
+    pool.byDevice
+      .get('device-a')!
+      .emit(branchState('device-a', 'sess-sw-twice', { ok: true, branch: 'feat/two' }));
+    await expect(second).resolves.toEqual({ ok: true, branch: 'feat/two' });
   });
 });

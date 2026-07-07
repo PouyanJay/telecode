@@ -5,6 +5,7 @@
     requestSessionBranches,
     sessionBranches,
     switchSessionBranch,
+    type BranchSwitchOutcome,
   } from '$lib/session-store';
 
   /**
@@ -33,7 +34,8 @@
     (listing?.branches ?? []).filter((branch) => branch !== currentBranch),
   );
 
-  const SWITCH_STORIES: Record<string, string> = {
+  // Typed against the outcome union: adding a failure reason without copy is a compile error.
+  const SWITCH_STORIES: Record<Extract<BranchSwitchOutcome, { ok: false }>['reason'], string> = {
     'mid-turn': 'A turn is running — switch between turns.',
     ended: 'This session can no longer take follow-ups.',
     'not-launched': 'Only telecode-launched sessions can switch.',
@@ -69,7 +71,7 @@
       open = false; // the Branch row follows the daemon's meta re-emit
       return;
     }
-    error = SWITCH_STORIES[outcome.reason] ?? SWITCH_STORIES.failed ?? null;
+    error = SWITCH_STORIES[outcome.reason];
   }
 </script>
 

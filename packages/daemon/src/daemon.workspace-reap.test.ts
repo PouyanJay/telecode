@@ -5,11 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { makeEnvelope, workspaceReapStatePayloadSchema } from '@telecode/protocol';
+import {
+  makeEnvelope,
+  sessionMetaPayloadSchema,
+  workspaceReapStatePayloadSchema,
+} from '@telecode/protocol';
 import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { type AgentAdapter } from './agent-adapter';
+import { hookRpc } from './hook-rpc';
 import { createDaemon, type Daemon } from './daemon';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
 import { createSessionStore } from './sessions/session-store';
@@ -79,6 +84,7 @@ describe('daemon: workspace.reap round-trip (branch-actions T3)', () => {
     deviceId: string;
     storeDir: string;
     worktreesRoot: string;
+    repoPath: string;
     launch: (sessionId: string) => void;
     reap: (sessionId: string) => void;
   }> {
@@ -108,6 +114,7 @@ describe('daemon: workspace.reap round-trip (branch-actions T3)', () => {
       deviceId,
       storeDir,
       worktreesRoot,
+      repoPath,
       launch: (sessionId) =>
         relay.send(
           makeEnvelope({
@@ -141,6 +148,16 @@ describe('daemon: workspace.reap round-trip (branch-actions T3)', () => {
     const harness = await startHarness(instantAdapter());
     const sessionId = randomUUID();
     harness.launch(sessionId);
+    // The session's OWN branch, from its sealed identity — what the reap must delete (and only it).
+    const branch = sessionMetaPayloadSchema.parse(
+      (
+        await harness.relay.waitForFrame((e) => {
+          if (e.type !== 'session.meta' || e.session_id !== sessionId) return false;
+          const parsed = sessionMetaPayloadSchema.safeParse(e.payload);
+          return parsed.success && parsed.data.branch !== undefined;
+        })
+      ).payload,
+    ).branch;
     await harness.relay.waitForFrame((e) => e.type === 'session.ended');
 
     harness.reap(sessionId);
@@ -149,6 +166,10 @@ describe('daemon: workspace.reap round-trip (branch-actions T3)', () => {
 
     expect(await exists(join(harness.worktreesRoot, sessionId))).toBe(false);
     expect(await exists(join(harness.storeDir, `${sessionId}.json`))).toBe(false);
+    // The branch itself is gone from the parent repo — not just the directory.
+    const branches = await run('git', ['-C', harness.repoPath, 'branch', '--list', branch ?? '']);
+    expect(branch).toBeDefined();
+    expect(branches.stdout.trim()).toBe('');
     // The daemon no longer holds the session — a subscribe backfills the honest offline fallback.
     harness.relay.send(
       makeEnvelope({
@@ -161,6 +182,58 @@ describe('daemon: workspace.reap round-trip (branch-actions T3)', () => {
     );
     const history = await harness.relay.waitForFrame((e) => e.type === 'session.history');
     expect(history.payload).toMatchObject({ status: 'offline_paused', entries: [] });
+  });
+
+  it('never reaps an ADOPTED session — the checkout is the user’s own (AD-5)', async () => {
+    // A real adoption over the hook socket: the daemon announces, the relay acks with a minted id.
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const worktreesRoot = await tempDir('telecode-reap-adopt-worktrees-');
+    const dir = await tempDir('telecode-reap-adopt-home-');
+    const socketPath = join(dir, 'hook.sock');
+    const relay = await startFakeRelay(userId, deviceId);
+    relays.push(relay);
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId,
+      deviceId,
+      agentAdapter: instantAdapter(),
+      logger: silent,
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+      reapWorkspace: createGitWorkspaceReaper({ worktreesRoot }),
+    });
+    daemons.push(daemon);
+    await daemon.start();
+
+    const sessionId = randomUUID();
+    const decision = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: 'claude-external-1',
+      cwd: dir,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    relay.send(
+      makeEnvelope({
+        type: 'session.adopted',
+        userId,
+        deviceId,
+        sessionId,
+        payload: { clientRef: (announce.payload as { clientRef: string }).clientRef },
+      }),
+    );
+    await decision; // adoption resolved — the daemon now HOLDS this session as external-origin
+
+    relay.send(makeEnvelope({ type: 'workspace.reap', userId, deviceId, payload: { sessionId } }));
+    // A dropped `origin === 'external'` guard would answer ok and delete the user's own checkout;
+    // the only acceptable answer is the coded refusal, with the directory untouched.
+    expect(await awaitReapState(relay, sessionId)).toEqual({
+      sessionId,
+      ok: false,
+      code: 'not-reapable',
+    });
+    expect(await exists(dir)).toBe(true);
   });
 
   it('answers unknown-session for an id it never held', async () => {

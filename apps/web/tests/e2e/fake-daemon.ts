@@ -85,6 +85,9 @@ const TURN_LIMIT_PROMPT = 'hit the turn limit';
 const LOSE_SESSION_PROMPT = 'lose this session';
 // Reap behavior (Phase C T3): a session launched with this prompt answers `dirty` to workspace.reap.
 const DIRTY_WORKTREE_PROMPT = 'leave the worktree dirty';
+// Switch behavior (Phase C T4): a session launched with this prompt refuses every branch switch
+// with `checked-out-elsewhere` — the refusal an e2e spec can drive into the rail's inline story.
+const HELD_BRANCH_PROMPT = 'hold the branch elsewhere';
 const CHAIN_PARENT_REF = 'chain-parent';
 const CHAIN_CHILD_REF = 'chain-child';
 // Overridable so the spec can use a per-run unique title — earlier runs' chains persist in the
@@ -492,12 +495,21 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
   }
 
   // Between-turns branch switch (Phase C T4): settle the ask, then re-announce like the real
-  // daemon — fresh meta with the new branch and a recomputed changes summary.
+  // daemon — fresh meta with the new branch and a recomputed changes summary. The magic-prompt
+  // session refuses instead, so specs can drive a coded refusal into the UI.
   if (envelope.type === 'session.branch.switch') {
     const ask = sessionBranchSwitchPayloadSchema.safeParse(envelope.payload);
     if (!ask.success) return;
-    if (records.get(sid) === undefined) {
+    const target = records.get(sid);
+    if (target === undefined) {
       send('session.branch.state', { ok: false, code: 'not-launched' }, sid);
+      return;
+    }
+    const held = target.transcript.some(
+      (entry) => entry.kind === 'user' && entry.text.startsWith(HELD_BRANCH_PROMPT),
+    );
+    if (held) {
+      send('session.branch.state', { ok: false, code: 'checked-out-elsewhere' }, sid);
       return;
     }
     send('session.branch.state', { ok: true, branch: ask.data.branch }, sid);

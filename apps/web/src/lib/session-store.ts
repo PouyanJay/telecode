@@ -258,35 +258,51 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
     sessionChangesMap.update((map) => applyChangesFrame(map, envelope));
     return;
   }
-  if (envelope.type === 'session.branch.state' && envelope.session_id !== undefined) {
-    // The switch verdict (Phase C T4): settles the asking control; the branch row itself follows
-    // the daemon's session.meta re-emit, so this never touches the meta map.
-    const parsed = sessionBranchStatePayloadSchema.safeParse(envelope.payload);
-    if (parsed.success) {
-      settleBranchSwitch(
-        envelope.session_id,
-        parsed.data.ok
-          ? { ok: true, branch: parsed.data.branch }
-          : { ok: false, reason: parsed.data.code },
-      );
-    }
+  if (envelope.type === 'session.branch.state') {
+    settleBranchSwitchFrame(envelope);
     return;
   }
-  if (envelope.type === 'relay.error' && envelope.session_id !== undefined) {
-    // An action that reached an offline device (Phase C): settle the waiting flow honestly instead
-    // of letting it time out. Every other relay.error keeps flowing into the session fold.
-    const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
-    if (parsed.success && parsed.data.regarding === 'workspace.reap') {
-      settleReap(envelope.session_id, { ok: false, reason: 'daemon-offline' });
-      return;
-    }
-    if (parsed.success && parsed.data.regarding === 'session.branch.switch') {
-      settleBranchSwitch(envelope.session_id, { ok: false, reason: 'daemon-offline' });
-      return;
-    }
+  if (envelope.type === 'relay.error' && settleOfflineDeviceAsk(envelope)) {
+    return;
   }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
   resolvePendingLaunch(envelope);
+}
+
+/**
+ * The switch verdict (Phase C T4): settles the asking control; the branch row itself follows the
+ * daemon's `session.meta` re-emit, so this never touches the meta map.
+ */
+function settleBranchSwitchFrame(envelope: Envelope): void {
+  if (envelope.session_id === undefined) return;
+  const parsed = sessionBranchStatePayloadSchema.safeParse(envelope.payload);
+  if (!parsed.success) return;
+  switchAsks.settle(
+    envelope.session_id,
+    parsed.data.ok
+      ? { ok: true, branch: parsed.data.branch }
+      : { ok: false, reason: parsed.data.code },
+  );
+}
+
+/**
+ * A device-ask that reached an offline device (Phase C): settle the waiting flow honestly instead
+ * of letting it time out. Returns whether the error was consumed — every other `relay.error`
+ * keeps flowing into the session fold (gate un-spin).
+ */
+function settleOfflineDeviceAsk(envelope: Envelope): boolean {
+  if (envelope.session_id === undefined) return false;
+  const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
+  if (!parsed.success) return false;
+  if (parsed.data.regarding === 'workspace.reap') {
+    reapAsks.settle(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+    return true;
+  }
+  if (parsed.data.regarding === 'session.branch.switch') {
+    switchAsks.settle(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -424,7 +440,7 @@ function dialDeviceChannel(
       }
     },
     onWorkspaceReap: (state) =>
-      settleReap(state.sessionId, state.ok ? { ok: true } : { ok: false, reason: state.code }),
+      reapAsks.settle(state.sessionId, state.ok ? { ok: true } : { ok: false, reason: state.code }),
   });
   connections.set(device.id, connection);
 }
@@ -886,21 +902,64 @@ export type WorkspaceReapOutcome =
       reason: WorkspaceReapFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
     };
 
-// One reap can be in flight per session (the delete dialog is modal); settled by the daemon's
-// sealed workspace.reap.state, the relay's honest device-offline error, or the local timeout.
-const REAP_TIMEOUT_MS = 15_000;
-const pendingReaps = new Map<
-  string,
-  { resolve: (outcome: WorkspaceReapOutcome) => void; timer: ReturnType<typeof setTimeout> }
->();
+/** How a branch-switch request settled (branch-actions T4) — every failure is a retellable reason. */
+export type BranchSwitchOutcome =
+  | { ok: true; branch: string }
+  | {
+      ok: false;
+      reason: BranchSwitchFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
+    };
 
-function settleReap(sessionId: string, outcome: WorkspaceReapOutcome): void {
-  const pending = pendingReaps.get(sessionId);
-  if (!pending) return;
-  pendingReaps.delete(sessionId);
-  clearTimeout(pending.timer);
-  pending.resolve(outcome);
+/** Every session-keyed ask (reap, switch, …) settles this way when it can't (or can no longer) run. */
+type UnstartableOutcome = { ok: false; reason: 'no-connection' };
+
+const DEVICE_RPC_TIMEOUT_MS = 15_000;
+
+/**
+ * One in-flight ask per session, settled by exactly one of: the daemon's sealed verdict, the
+ * relay's honest device-offline error, the local timeout, or teardown — the shape every
+ * session-keyed device RPC shares (reap T3, switch T4, and whatever Phase C adds next). A second
+ * ask for the same session SUPERSEDES the first (settled `no-connection`, timer cleared) so a
+ * stale timeout can never fire into the new ask's slot.
+ */
+function createPendingAsks<TOutcome extends { ok: boolean }>(timeoutOutcome: TOutcome) {
+  const pending = new Map<
+    string,
+    {
+      resolve: (outcome: TOutcome | UnstartableOutcome) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  function settle(sessionId: string, outcome: TOutcome | UnstartableOutcome): void {
+    const entry = pending.get(sessionId);
+    if (!entry) return;
+    pending.delete(sessionId);
+    clearTimeout(entry.timer);
+    entry.resolve(outcome);
+  }
+
+  function start(sessionId: string, send: () => void): Promise<TOutcome | UnstartableOutcome> {
+    settle(sessionId, { ok: false, reason: 'no-connection' }); // supersede any stale ask
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => settle(sessionId, timeoutOutcome), DEVICE_RPC_TIMEOUT_MS);
+      pending.set(sessionId, { resolve, timer });
+      send();
+    });
+  }
+
+  /** Teardown (sign-out): nothing stale survives — every waiter settles now, honestly. */
+  function drain(): void {
+    for (const sessionId of [...pending.keys()]) {
+      settle(sessionId, { ok: false, reason: 'no-connection' });
+    }
+  }
+
+  return { settle, start, drain };
 }
+
+const reapAsks = createPendingAsks<WorkspaceReapOutcome>({ ok: false, reason: 'timeout' });
+const switchAsks = createPendingAsks<BranchSwitchOutcome>({ ok: false, reason: 'timeout' });
 
 /**
  * Ask the session's device to remove its worktree + branch (the delete dialog's explicit opt-in,
@@ -910,36 +969,7 @@ function settleReap(sessionId: string, outcome: WorkspaceReapOutcome): void {
 export function reapWorkspace(sessionId: string): Promise<WorkspaceReapOutcome> {
   const connection = connectionFor(sessionId);
   if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
-  return new Promise((resolve) => {
-    const timer = setTimeout(
-      () => settleReap(sessionId, { ok: false, reason: 'timeout' }),
-      REAP_TIMEOUT_MS,
-    );
-    pendingReaps.set(sessionId, { resolve, timer });
-    connection.sendWorkspaceReap(sessionId);
-  });
-}
-
-/** How a branch-switch request settled (branch-actions T4) — every failure is a retellable reason. */
-export type BranchSwitchOutcome =
-  | { ok: true; branch: string }
-  | {
-      ok: false;
-      reason: BranchSwitchFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
-    };
-
-const SWITCH_TIMEOUT_MS = 15_000;
-const pendingBranchSwitches = new Map<
-  string,
-  { resolve: (outcome: BranchSwitchOutcome) => void; timer: ReturnType<typeof setTimeout> }
->();
-
-function settleBranchSwitch(sessionId: string, outcome: BranchSwitchOutcome): void {
-  const pending = pendingBranchSwitches.get(sessionId);
-  if (!pending) return;
-  pendingBranchSwitches.delete(sessionId);
-  clearTimeout(pending.timer);
-  pending.resolve(outcome);
+  return reapAsks.start(sessionId, () => connection.sendWorkspaceReap(sessionId));
 }
 
 /**
@@ -953,14 +983,7 @@ export function switchSessionBranch(
 ): Promise<BranchSwitchOutcome> {
   const connection = connectionFor(sessionId);
   if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
-  return new Promise((resolve) => {
-    const timer = setTimeout(
-      () => settleBranchSwitch(sessionId, { ok: false, reason: 'timeout' }),
-      SWITCH_TIMEOUT_MS,
-    );
-    pendingBranchSwitches.set(sessionId, { resolve, timer });
-    connection.switchBranch(sessionId, branch);
-  });
+  return switchAsks.start(sessionId, () => connection.switchBranch(sessionId, branch));
 }
 
 /** Ask the session's device for its repo's branch list (T4); lands in {@link sessionBranches}. */
@@ -1058,6 +1081,9 @@ export function disconnect(): void {
   for (const pending of pendingLaunches.splice(0)) {
     pending.reject(new Error('Disconnected.'));
   }
+  // Session-keyed device asks settle now (no-connection) — nothing waits into the signed-out void.
+  reapAsks.drain();
+  switchAsks.drain();
   for (const connection of connections.values()) connection.close();
   connections.clear();
   deviceChannelMap.set(new Map());

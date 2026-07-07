@@ -210,7 +210,7 @@ describe('daemon: session.branch.switch round-trip (branch-actions T4)', () => {
     });
   });
 
-  it('codes the full refusal matrix: unknown session, missing branch, held branch', async () => {
+  it('codes refusals: unknown session, missing branch, held branch, dirty tree', async () => {
     const harness = await startHarness();
     const sessionId = randomUUID();
     harness.launch(sessionId);
@@ -235,6 +235,32 @@ describe('daemon: session.branch.switch round-trip (branch-actions T4)', () => {
       ok: false,
       code: 'checked-out-elsewhere',
     });
+
+    // Uncommitted work in the worktree refuses through the whole round-trip, not just the seam.
+    await appendFile(join(harness.worktreesRoot, sessionId, 'README.md'), 'uncommitted\n');
+    harness.switchTo(sessionId, 'feat/other');
+    expect(await awaitSwitchState(harness.relay, sessionId)).toEqual({
+      ok: false,
+      code: 'dirty',
+    });
+  });
+
+  it('codes a session past following (error status) as ended', async () => {
+    // An adapter that THROWS mid-run: the turn fails, the session settles as `error` — the state
+    // whose refusal must be `ended` (nothing would continue it), never a misleading `mid-turn`.
+    const harness = await startHarness({
+      async run() {
+        throw new Error('the agent run failed');
+      },
+    });
+    const sessionId = randomUUID();
+    harness.launch(sessionId);
+    await harness.relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.status === 'error' && e.session_id === sessionId,
+    );
+
+    harness.switchTo(sessionId, 'feat/other');
+    expect(await awaitSwitchState(harness.relay, sessionId)).toEqual({ ok: false, code: 'ended' });
   });
 
   it('lists the SESSION repo’s branches for the picker and echoes the session id (AD-7)', async () => {

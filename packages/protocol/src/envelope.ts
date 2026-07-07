@@ -57,10 +57,13 @@ export const MESSAGE_TYPES = [
   // (daemon -> web) answers the requesting browser — branch names are content, sealed only.
   'repo.branches',
   'repo.branches.state',
-  // Worktree/branch hygiene (branch-actions Phase C), session-less + box-sealed like adopt.*:
+  // Worktree/branch hygiene (branch-actions Phase C), a device-scoped box-sealed RPC like adopt.*:
   // `workspace.reap` (web -> daemon) asks — as the delete flow's explicit opt-in — to remove a
   // launched session's worktree and branch; `workspace.reap.state` (daemon -> web) answers the
-  // requesting browser with ok or a coded refusal. Workspace paths/branch names stay sealed.
+  // requesting browser with ok or a coded refusal. The PAYLOAD is sealed (paths/branch names never
+  // reach the relay); unlike adopt.*, the ENVELOPE deliberately carries the session id — cleartext
+  // routing metadata (as on every session frame) so the relay's offline-honesty path can name the
+  // action that went nowhere. The daemon authorizes from the SEALED id only.
   'workspace.reap',
   'workspace.reap.state',
   // Between-turns branch switch for LAUNCHED sessions (branch-actions T4), session-scoped and

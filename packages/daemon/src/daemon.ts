@@ -1980,6 +1980,38 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * relay only ever sees ciphertext, so the denylist's repo paths never leave the machine in the clear
    * (invariant #5). Cleartext on a pre-E2E daemon (no keypair).
    */
+  /**
+   * Send a device-scoped RPC reply, box-sealed to the requesting browser when E2E is on (adopt.state,
+   * repo.branches.state, workspace.reap.state, …). The relay broadcasts it channel-wide; only the
+   * asker can open it. The counterpart of {@link sendForSession} for session-less request/reply.
+   */
+  function replyToBrowser(
+    browserPublicKey: string | undefined,
+    type: MessageType,
+    state: unknown,
+  ): void {
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        cipher.enabled && browserPublicKey !== undefined
+          ? await cipher.sealToBrowser(browserPublicKey, state)
+          : { payload: state, nonce: '' };
+      return JSON.stringify(
+        makeEnvelope({
+          type,
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
+  /** Adopted sessions are the user's own checkout — telecode never lists, moves, or deletes them. */
+  function isAdoptedSession(rec: SessionRecord): boolean {
+    return rec.origin === 'external';
+  }
+
   async function handleAdoptConfig(envelope: Envelope): Promise<void> {
     let payload: unknown;
     try {
@@ -2013,23 +2045,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       );
     }
     // Reply the current policy + setup status, sealed to the requesting browser so repo paths never reach the relay.
-    const browserPublicKey = envelope.sender_public_key;
-    const state = await buildAdoptState();
-    enqueueSend(async () => {
-      const fields: { payload: unknown; nonce: string } =
-        cipher.enabled && browserPublicKey !== undefined
-          ? await cipher.sealToBrowser(browserPublicKey, state)
-          : { payload: state, nonce: '' };
-      return JSON.stringify(
-        makeEnvelope({
-          type: 'adopt.state',
-          userId: options.userId,
-          deviceId: options.deviceId,
-          payload: fields.payload,
-          nonce: fields.nonce,
-        }),
-      );
-    });
+    replyToBrowser(envelope.sender_public_key, 'adopt.state', await buildAdoptState());
   }
 
   /**
@@ -2049,21 +2065,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
       log.warn({ err, deviceId: options.deviceId }, 'daemon: dropped invalid repo.branches');
       return;
     }
-    // The default repo (Phase B), or — session-scoped ask (T4) — that LAUNCHED session's own repo
-    // (an unknown/adopted/repo-less session answers unavailable; adopted checkouts stay untouched).
-    const sessionRec =
-      askedSessionId !== undefined ? sessionRecords.get(askedSessionId) : undefined;
-    const repoToList =
-      askedSessionId !== undefined
-        ? sessionRec?.origin !== 'external'
-          ? sessionRec?.repoPath
-          : undefined
-        : defaultRepoPath;
     let state: RepoBranchesStatePayload = {
       available: false,
       branches: [],
       ...(askedSessionId !== undefined ? { sessionId: askedSessionId } : {}),
     };
+    const repoToList = resolveRepoToList(askedSessionId);
     if (repoToList !== undefined && options.listRepoBranches !== undefined) {
       try {
         const listed = await options.listRepoBranches(repoToList);
@@ -2077,21 +2084,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
         log.warn({ err, deviceId: options.deviceId }, 'daemon: could not list repo branches');
       }
     }
-    enqueueSend(async () => {
-      const fields: { payload: unknown; nonce: string } =
-        cipher.enabled && browserPublicKey !== undefined
-          ? await cipher.sealToBrowser(browserPublicKey, state)
-          : { payload: state, nonce: '' };
-      return JSON.stringify(
-        makeEnvelope({
-          type: 'repo.branches.state',
-          userId: options.userId,
-          deviceId: options.deviceId,
-          payload: fields.payload,
-          nonce: fields.nonce,
-        }),
-      );
-    });
+    replyToBrowser(browserPublicKey, 'repo.branches.state', state);
+  }
+
+  /**
+   * Which repo a `repo.branches` ask names: the daemon's default repo (Phase B), or — session-scoped
+   * ask (T4) — that LAUNCHED session's own repo. An unknown, adopted, or repo-less session resolves
+   * to nothing (answers unavailable); adopted checkouts are never listed.
+   */
+  function resolveRepoToList(askedSessionId: string | undefined): string | undefined {
+    if (askedSessionId === undefined) return defaultRepoPath;
+    const rec = sessionRecords.get(askedSessionId);
+    if (rec === undefined || isAdoptedSession(rec)) return undefined;
+    return rec.repoPath;
   }
 
   /**
@@ -2139,7 +2144,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const cwd = sessionCwds.get(sessionId) ?? rec?.cwd;
     if (
       rec === undefined ||
-      rec.origin === 'external' || // adopted sessions are display-only by design
+      isAdoptedSession(rec) ||
       options.switchBranch === undefined ||
       cwd === undefined ||
       rec.repoPath === undefined // a daemon-cwd session runs in the user's own dir — never moved
@@ -2191,21 +2196,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
       },
       'daemon: workspace reap answered',
     );
-    enqueueSend(async () => {
-      const fields: { payload: unknown; nonce: string } =
-        cipher.enabled && browserPublicKey !== undefined
-          ? await cipher.sealToBrowser(browserPublicKey, state)
-          : { payload: state, nonce: '' };
-      return JSON.stringify(
-        makeEnvelope({
-          type: 'workspace.reap.state',
-          userId: options.userId,
-          deviceId: options.deviceId,
-          payload: fields.payload,
-          nonce: fields.nonce,
-        }),
-      );
-    });
+    replyToBrowser(browserPublicKey, 'workspace.reap.state', state);
   }
 
   /** The reap decision for one session — every refusal is a coded, retellable story. */
@@ -2216,7 +2207,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const branch = rec.meta?.branch;
     if (
       options.reapWorkspace === undefined ||
-      rec.origin === 'external' || // adopted checkouts are the user's own — never telecode's to delete
+      isAdoptedSession(rec) ||
       !isSessionEndStatus(rec.status) ||
       activeRuns.has(sessionId) ||
       cwd === undefined ||
