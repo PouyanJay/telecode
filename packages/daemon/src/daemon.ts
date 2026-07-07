@@ -46,6 +46,7 @@ import {
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
 import { DaemonUnauthorizedError } from './daemon-unauthorized-error';
 import { deriveSessionTitle, derivedMetaPatch, resolveLaunchTitle } from './derive-title';
+import { deriveBranchName } from './derive-branch-name';
 import { diffStatForTool } from './diff-stat';
 import { createAdoptedSessionManager, type AdoptedSessionManager } from './adopt/adopted-sessions';
 import { adoptedGateDecision } from './adopt/adopted-gate-decision';
@@ -75,7 +76,7 @@ import { classifyTool } from './permission-policy';
 import { createSessionCipher } from './session-cipher';
 import { type RepoManager } from './sessions/repo-manager';
 import { type PersistedSession, type SessionStore } from './sessions/session-store';
-import { type WorktreeManager } from './sessions/worktree-manager';
+import { WorktreeError, type WorktreeManager } from './sessions/worktree-manager';
 
 /** How much of a free-form question to preview in a handover continuation's title (UI readability budget). */
 const HANDOVER_TITLE_PREVIEW_CHARS = 60;
@@ -1075,9 +1076,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       const resolved = await resolveSessionRepo(launch);
       if (resolved === undefined) return {};
       // Launch-chosen branch control (Phase B) — validated at the wire boundary by the launch schema.
+      // Unnamed launches get a readable prompt-slug name instead of the old bare short-uuid label.
       const worktree = await worktreeManager.ensureWorktree(sessionId, resolved.path, {
         ...(launch.baseBranch !== undefined ? { baseBranch: launch.baseBranch } : {}),
-        ...(launch.branchName !== undefined ? { branchName: launch.branchName } : {}),
+        branchName: launch.branchName ?? deriveBranchName(launch.prompt, sessionId),
       });
       sessionCwds.set(sessionId, worktree.path);
       recordFor(sessionId).cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
@@ -1098,10 +1100,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
         'daemon: failed to prepare workspace',
       );
       setStatus(sessionId, 'error');
-      sendForSession(envelope, 'session.ended', {
-        status: 'error',
-        error: 'failed to prepare session workspace',
-      });
+      // A CODED worktree error is user-fixable and its message is safe verbatim ("branch already
+      // exists: X"); anything else stays generic — git's own stderr may carry local paths.
+      const userMessage =
+        err instanceof WorktreeError && err.code !== undefined
+          ? err.message
+          : 'failed to prepare session workspace';
+      sendForSession(envelope, 'session.ended', { status: 'error', error: userMessage });
       return FAILED;
     }
   }

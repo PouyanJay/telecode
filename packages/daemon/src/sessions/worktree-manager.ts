@@ -45,11 +45,20 @@ export interface WorktreeBranchOptions {
   readonly branchName?: string;
 }
 
-/** Raised when git fails to prepare a worktree, with the underlying error chained as `cause`. */
+/**
+ * Raised when git fails to prepare a worktree, with the underlying error chained as `cause`. A `code`
+ * marks the user-fixable cases (Phase B) so the launch can answer with the message verbatim; uncoded
+ * errors stay generic on the wire (git's own stderr may leak paths).
+ */
 export class WorktreeError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
+  readonly code?: 'branch-exists' | 'base-not-found';
+  constructor(
+    message: string,
+    options?: { cause?: unknown; code?: 'branch-exists' | 'base-not-found' },
+  ) {
+    super(message, { ...(options?.cause !== undefined ? { cause: options.cause } : {}) });
     this.name = 'WorktreeError';
+    if (options?.code !== undefined) this.code = options.code;
   }
 }
 
@@ -80,7 +89,23 @@ export function createGitWorktreeManager(options: GitWorktreeManagerOptions): Wo
         // try the next form
       }
     }
-    throw new WorktreeError(`base branch not found: ${baseBranch}`);
+    throw new WorktreeError(`base branch not found: ${baseBranch}`, { code: 'base-not-found' });
+  }
+
+  async function branchExists(repoPath: string, branch: string): Promise<boolean> {
+    try {
+      await run('git', [
+        '-C',
+        repoPath,
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `refs/heads/${branch}`,
+      ]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   return {
@@ -99,6 +124,12 @@ export function createGitWorktreeManager(options: GitWorktreeManagerOptions): Wo
       const repo = resolve(repoPath);
       const base =
         options?.baseBranch !== undefined ? await resolveBase(repo, options.baseBranch) : 'HEAD';
+      // A user-chosen name that already exists must fail with ITS OWN story before git's — the git
+      // failure for this case buries the cause in stderr. (Racing creators still hit the git error
+      // below; that residue stays generic.)
+      if (options?.branchName !== undefined && (await branchExists(repo, branch))) {
+        throw new WorktreeError(`branch already exists: ${branch}`, { code: 'branch-exists' });
+      }
       await mkdir(worktreesRoot, { recursive: true });
       try {
         // `worktree add -b <branch> <path> <base>`: new branch off the chosen base (default: HEAD),

@@ -143,7 +143,8 @@ describe('daemon: a git worktree per session (Task 6)', () => {
     expect(await readFile(join(wtA, 'agent-was-here.txt'), 'utf8')).toBe('work on A');
     expect(await exists(join(repoPath, 'agent-was-here.txt'))).toBe(false);
     const { stdout: branchA } = await run('git', ['-C', wtA, 'rev-parse', '--abbrev-ref', 'HEAD']);
-    expect(branchA.trim()).toBe(`telecode/${sidA.slice(0, 8)}`);
+    // Auto names are prompt slugs since Phase B — readable in `git branch`, still id-suffixed.
+    expect(branchA.trim()).toBe(`telecode/work-on-a-${sidA.slice(0, 8)}`);
 
     // Session B — its own isolated worktree.
     const sidB = randomUUID();
@@ -234,6 +235,38 @@ describe('daemon: a git worktree per session (Task 6)', () => {
     );
 
     expect((ended.payload as { status: string }).status).toBe('error');
+    expect(runs).toHaveLength(0);
+  });
+
+  it('a colliding launch branch name ends the session with the human story, agent never runs (T3)', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const repo = await makeRepo();
+    await run('git', ['-C', repo, 'branch', 'feat/taken']);
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot, logger: silent });
+    const runs: RecordedRun[] = [];
+    const relay = await startDaemon(userId, deviceId, recordingAdapter(runs), {
+      worktreeManager: manager,
+      defaultRepoPath: repo,
+    });
+
+    const sid = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sid,
+        payload: { prompt: 'work here', branchName: 'feat/taken' },
+      }),
+    );
+    const ended = await relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.session_id === sid,
+    );
+    const payload = ended.payload as { status: string; error?: string };
+    expect(payload.status).toBe('error');
+    expect(payload.error).toContain('branch already exists: feat/taken');
     expect(runs).toHaveLength(0);
   });
 });

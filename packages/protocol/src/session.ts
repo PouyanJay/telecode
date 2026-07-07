@@ -61,6 +61,7 @@ const gitBranchNameSchema = z
   .max(256)
   .refine(
     (name) =>
+      // eslint-disable-next-line no-control-regex -- excluding control chars IS the point here
       !/[\s~^:?*[\\\x00-\x1f\x7f]/.test(name) &&
       !name.includes('..') &&
       !name.includes('@{') &&

@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createGitWorktreeManager } from './worktree-manager';
+import { createGitWorktreeManager, WorktreeError } from './worktree-manager';
 
 const run = promisify(execFile);
 
@@ -150,6 +150,37 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
 
     expect(worktree.branch).toBe('feat/from-remote');
     expect(await exists(join(worktree.path, 'develop-only.txt'))).toBe(true);
+  });
+
+  it('a colliding branch name fails with a coded, human-readable error (branch-launch T3)', async () => {
+    const repo = await makeRepo();
+    await run('git', ['-C', repo, 'branch', 'taken']);
+    const root = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot: root });
+
+    const attempt = manager.ensureWorktree(randomUUID(), repo, { branchName: 'taken' });
+    const err = await attempt.then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    expect(err).toBeInstanceOf(WorktreeError);
+    expect((err as WorktreeError).code).toBe('branch-exists');
+    expect((err as WorktreeError).message).toContain('taken');
+  });
+
+  it('a missing base fails with a coded, human-readable error', async () => {
+    const repo = await makeRepo();
+    const root = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot: root });
+
+    const attempt = manager.ensureWorktree(randomUUID(), repo, { baseBranch: 'no-such-branch' });
+    const err = await attempt.then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    expect(err).toBeInstanceOf(WorktreeError);
+    expect((err as WorktreeError).code).toBe('base-not-found');
+    expect((err as WorktreeError).message).toContain('no-such-branch');
   });
 
   it('surfaces a clear error when the repo path is not a git repository', async () => {
