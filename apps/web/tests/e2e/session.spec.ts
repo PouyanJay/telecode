@@ -126,7 +126,11 @@ test('the launched session appears in the dashboard list with live status', asyn
 
   // An awaiting session surfaces at the top of the dashboard as a needs-you inbox card (approval
   // reliability T6): named ask, the session title linking in, and the inline decision actions.
-  const card = page.getByRole('article', { name: 'APPROVAL NEEDED' });
+  // Scoped to THIS spec's session — the dashboard is shared, stateful backend across the file, so
+  // "the one awaiting card" must never be a global-singleton assumption.
+  const card = page
+    .getByRole('article', { name: 'APPROVAL NEEDED' })
+    .filter({ hasText: 'Add a hello line to the README' });
   await expect(card).toBeVisible();
   await expect(card.getByRole('link', { name: /Add a hello line to the README/ })).toBeVisible();
   await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible();

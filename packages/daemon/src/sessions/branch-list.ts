@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+
+import { MAX_REPO_BRANCHES } from '@telecode/protocol';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -18,8 +20,6 @@ export interface RepoBranches {
 export type BranchLister = (repoPath: string) => Promise<RepoBranches>;
 
 const GIT_TIMEOUT_MS = 3_000;
-/** Matches the wire schema's list bound — the sealed payload must never exceed what receivers accept. */
-const MAX_BRANCHES = 500;
 
 export function createGitBranchLister(): BranchLister {
   return async (repoPath) => {
@@ -33,7 +33,7 @@ export function createGitBranchLister(): BranchLister {
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line !== '')
-      .slice(0, MAX_BRANCHES);
+      .slice(0, MAX_REPO_BRANCHES);
     let defaultBranch: string | undefined;
     try {
       const head = await run('git', ['-C', repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'], {

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { repoPathSegmentSchema } from '@telecode/protocol';
 import { z } from 'zod';
 
 import { type AuthService } from '../auth/auth-service';
@@ -50,22 +51,12 @@ export function registerRepoListRoute(
 }
 
 /**
- * A GitHub-valid owner/name path segment — same rules as the launch payload's repo ref (protocol
- * `repoPathSegmentSchema`): these flow into the GitHub API URL, so they are constrained at the boundary.
+ * Owner/name flow into the GitHub API URL, so they are constrained at the boundary — the SAME rule
+ * as the launch payload's repo ref (imported, so the two can never drift).
  */
 const repoParamsSchema = z.object({
-  owner: z
-    .string()
-    .min(1)
-    .max(100)
-    .regex(/^[A-Za-z0-9._-]+$/)
-    .refine((value) => value !== '.' && value !== '..'),
-  name: z
-    .string()
-    .min(1)
-    .max(100)
-    .regex(/^[A-Za-z0-9._-]+$/)
-    .refine((value) => value !== '.' && value !== '..'),
+  owner: repoPathSegmentSchema,
+  name: repoPathSegmentSchema,
 });
 
 /**

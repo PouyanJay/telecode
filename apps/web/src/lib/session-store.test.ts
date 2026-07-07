@@ -6,6 +6,7 @@ import {
   sealPayload,
   type AdoptSettings,
   type AdoptStatePayload,
+  type RepoBranchesStatePayload,
   type SessionLaunchPayload,
 } from '@telecode/protocol';
 import { get } from 'svelte/store';
@@ -27,7 +28,9 @@ import {
   launch,
   overlayMissingMetas,
   renameSession,
+  repoBranches,
   requestAdoptConfig,
+  requestRepoBranches,
   resetSessionTitle,
   resumeAsNew,
   seedSessionMetas,
@@ -50,6 +53,8 @@ const userId = 'user-1';
 const deviceId = 'device-1';
 
 /** A fake relay connection that records launch/subscribe calls and lets the test emit inbound frames. */
+let branchRequests = 0;
+
 function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
   const resumed: { sessionId: string; payload: { prompt: string; clientRef?: string } }[] = [];
@@ -59,10 +64,12 @@ function makeFakeConnection() {
   const adoptConfigs: (AdoptSettings | undefined)[] = [];
   let emit: (envelope: ReturnType<typeof makeEnvelope>) => void = () => undefined;
   let emitAdoptState: (state: AdoptStatePayload) => void = () => undefined;
+  let emitRepoBranches: (state: RepoBranchesStatePayload) => void = () => undefined;
   let fireReconnect: () => void = () => undefined;
   const create = (options: RelayConnectionOptions): RelayConnection => {
     emit = options.onEvent;
     emitAdoptState = (state) => options.onAdoptState?.(state);
+    emitRepoBranches = (state) => options.onRepoBranches?.(state);
     fireReconnect = () => options.onReconnect?.();
     options.onStatus('connected');
     return {
@@ -75,7 +82,9 @@ function makeFakeConnection() {
       answerHandover: (sessionId, payload) => handovers.push({ sessionId, payload }),
       control: () => undefined,
       sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
-      sendRepoBranchesRequest: () => undefined,
+      sendRepoBranchesRequest: () => {
+        branchRequests += 1;
+      },
       sendAdoptConfig: (set) => adoptConfigs.push(set),
       close: () => undefined,
     };
@@ -91,6 +100,10 @@ function makeFakeConnection() {
     /** Simulate the daemon's sealed adopt.state reply (after the relay-client opens it). */
     adoptStateReply(state: AdoptStatePayload) {
       emitAdoptState(state);
+    },
+    /** Simulate the daemon's sealed repo.branches.state reply (branch-launch Phase B). */
+    repoBranchesReply(state: RepoBranchesStatePayload) {
+      emitRepoBranches(state);
     },
     /** Simulate the daemon raising an adopted-session question on a session. */
     question(sessionId: string, requestId: string) {
@@ -166,6 +179,7 @@ function makeFakeConnection() {
 }
 
 beforeEach(() => {
+  branchRequests = 0;
   vi.useFakeTimers();
 });
 
@@ -323,6 +337,34 @@ describe('session-store launch correlation (Task 11)', () => {
       hooksInstalled: false,
       events: [],
     });
+  });
+
+  it('requests + surfaces the default repo branches per device, cleared on disconnect (Phase B)', () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+
+    requestRepoBranches(deviceId);
+    expect(branchRequests).toBe(1);
+
+    // The daemon's sealed repo.branches.state reply lands under ITS device.
+    expect(get(repoBranches).get(deviceId)).toBeUndefined();
+    fake.repoBranchesReply({
+      available: true,
+      branches: ['main', 'develop'],
+      defaultBranch: 'main',
+    });
+    expect(get(repoBranches).get(deviceId)).toEqual({
+      available: true,
+      branches: ['main', 'develop'],
+      defaultBranch: 'main',
+    });
+
+    // Full teardown clears it — a later sign-in must never see another account's branch list.
+    disconnect();
+    expect(get(repoBranches).size).toBe(0);
   });
 
   it('a late frame for a timed-out launch never mis-resolves a later launch', async () => {

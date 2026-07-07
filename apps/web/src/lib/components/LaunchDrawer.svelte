@@ -6,7 +6,7 @@
 
   import PermissionModeField from '$lib/components/PermissionModeField.svelte';
   import { buildLaunchDeviceOptions, defaultLaunchDeviceId } from '$lib/launch-device';
-  import { branchPickerModel, type GithubBranchFetch } from '$lib/launch-branches';
+  import { buildBranchPickerModel, type GithubBranchFetch } from '$lib/launch-branches';
   import { launchRepo } from '$lib/launch-repo';
   import type { RelayDevice, RelayRepo } from '$lib/server/relay-api';
   import {
@@ -104,7 +104,7 @@
   });
 
   const picker = $derived(
-    branchPickerModel({
+    buildBranchPickerModel({
       repo: selectedRepo,
       github: githubFetch,
       local: $repoBranches.get(selectedDeviceId),

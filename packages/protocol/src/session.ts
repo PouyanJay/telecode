@@ -28,7 +28,7 @@ export type PermissionModeName = z.infer<typeof permissionModeSchema>;
  * (`~/.telecode/repos/<owner>/<name>`), so it is constrained to GitHub-valid characters and may not be a
  * traversal segment (`.`/`..`) — validated at the wire boundary so a crafted launch can't escape the cache.
  */
-const repoPathSegmentSchema = z
+export const repoPathSegmentSchema = z
   .string()
   .min(1)
   .max(100)
@@ -199,9 +199,13 @@ export type RepoBranchesRequestPayload = z.infer<typeof repoBranchesRequestPaylo
  * default repo configured (the drawer then offers no local base choice). Bounded like the launch's
  * branch fields; the daemon caps the list before sealing.
  */
+/** The most branches one `repo.branches.state` carries — shared so the daemon's cap and the wire
+ * bound can never drift. */
+export const MAX_REPO_BRANCHES = 500;
+
 export const repoBranchesStatePayloadSchema = z.object({
   available: z.boolean(),
-  branches: z.array(z.string().min(1).max(256)).max(500),
+  branches: z.array(z.string().min(1).max(256)).max(MAX_REPO_BRANCHES),
   defaultBranch: z.string().min(1).max(256).optional(),
 });
 export type RepoBranchesStatePayload = z.infer<typeof repoBranchesStatePayloadSchema>;

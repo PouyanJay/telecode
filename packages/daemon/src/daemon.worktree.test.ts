@@ -238,6 +238,40 @@ describe('daemon: a git worktree per session (Task 6)', () => {
     expect(runs).toHaveLength(0);
   });
 
+  it('an INVALID launch branch name is rejected at the daemon boundary — no git, no agent', async () => {
+    // The zod parse is the real defense for this field: branch names reach git argv positionally,
+    // where a leading dash would read as an option — the schema must refuse it before any work.
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const repo = await makeRepo();
+    const worktreesRoot = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot, logger: silent });
+    const runs: RecordedRun[] = [];
+    const relay = await startDaemon(userId, deviceId, recordingAdapter(runs), {
+      worktreeManager: manager,
+      defaultRepoPath: repo,
+    });
+
+    const sid = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId,
+        deviceId,
+        sessionId: sid,
+        payload: { prompt: 'x', branchName: '-evil-flag' },
+      }),
+    );
+    const ended = await relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.session_id === sid,
+    );
+    const payload = ended.payload as { status: string; error?: string };
+    expect(payload.status).toBe('error');
+    expect(payload.error).toBe('invalid launch payload');
+    expect(runs).toHaveLength(0); // the agent never ran…
+    expect(await exists(join(worktreesRoot, sid))).toBe(false); // …and no worktree was ever cut
+  });
+
   it('a colliding launch branch name ends the session with the human story, agent never runs (T3)', async () => {
     const userId = randomUUID();
     const deviceId = randomUUID();

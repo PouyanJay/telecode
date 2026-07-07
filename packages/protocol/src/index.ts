@@ -70,7 +70,9 @@ export type {
 export {
   base64KeySchema,
   permissionModeSchema,
+  repoPathSegmentSchema,
   sessionRepoSchema,
+  MAX_REPO_BRANCHES,
   sessionLaunchPayloadSchema,
   diffStatSchema,
   sessionResumeNewPayloadSchema,
@@ -102,6 +104,7 @@ export {
   agentToolUsePayloadSchema,
   SESSION_END_STATUSES,
   isSessionEndStatus,
+  isValidGitBranchName,
   sessionEndedPayloadSchema,
   sessionKeyPayloadSchema,
   agentPermissionRequestPayloadSchema,
@@ -169,4 +172,3 @@ export type {
 } from './session';
 
 export { firstRealPromptText, isInjectedPrompt } from './prompt';
-export { isValidGitBranchName } from './session';

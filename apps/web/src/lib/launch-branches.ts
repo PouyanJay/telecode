@@ -24,7 +24,7 @@ export interface GithubBranchFetch {
   readonly branches: readonly string[];
 }
 
-export function branchPickerModel(input: {
+export function buildBranchPickerModel(input: {
   /** The selected GitHub repo, or null for "no repo — default workspace". */
   readonly repo: RelayRepo | null;
   /** The drawer's fetch state for the selected GitHub repo's branches. */
