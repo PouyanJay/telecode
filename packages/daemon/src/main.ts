@@ -23,6 +23,7 @@ import { selectServiceManager } from './service/select-service-manager';
 import { runServiceCli } from './service/service-cli';
 import { acquireSingleInstanceLock } from './single-instance-lock';
 import { createGitBranchReader } from './adopt/git-branch';
+import { createGitBranchLister } from './sessions/branch-list';
 import { createGitRepoManager } from './sessions/repo-manager';
 import { createSessionStore } from './sessions/session-store';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
@@ -312,6 +313,7 @@ function buildDaemon(creds: StoredCredentials): Daemon {
     repoManager,
     sessionStore,
     readGitBranch: createGitBranchReader(),
+    listRepoBranches: createGitBranchLister(),
     // Gate timeout override (ms); unset → the daemon's 30-minute default, <= 0 disables.
     ...(gateTimeoutOverrideMs !== undefined ? { gateTimeoutMs: gateTimeoutOverrideMs } : {}),
     ...(defaultRepoPath ? { defaultRepoPath } : {}),

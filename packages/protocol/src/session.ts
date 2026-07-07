@@ -183,6 +183,23 @@ export const adoptStatePayloadSchema = adoptSettingsSchema.extend({
 });
 export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
 
+/** Payload for `repo.branches` (web → daemon): ask for the default repo's branches (Phase B). */
+export const repoBranchesRequestPayloadSchema = z.object({});
+export type RepoBranchesRequestPayload = z.infer<typeof repoBranchesRequestPayloadSchema>;
+
+/**
+ * Payload for `repo.branches.state` (daemon → web, sealed to the requester): the DEFAULT repo's
+ * local branches for the launch drawer's base picker. `available: false` = this daemon has no
+ * default repo configured (the drawer then offers no local base choice). Bounded like the launch's
+ * branch fields; the daemon caps the list before sealing.
+ */
+export const repoBranchesStatePayloadSchema = z.object({
+  available: z.boolean(),
+  branches: z.array(z.string().min(1).max(256)).max(500),
+  defaultBranch: z.string().min(1).max(256).optional(),
+});
+export type RepoBranchesStatePayload = z.infer<typeof repoBranchesStatePayloadSchema>;
+
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
   'starting',

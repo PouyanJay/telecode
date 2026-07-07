@@ -39,6 +39,7 @@ import {
   type SessionHistoryPayload,
   type SessionLaunchPayload,
   type SessionMetaPayload,
+  type RepoBranchesStatePayload,
   type SessionOrigin,
   type SessionStatusName,
 } from '@telecode/protocol';
@@ -64,6 +65,7 @@ import { buildQuestionDenyReason } from './adopt/question-deny-reason';
 import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import { type BranchReader } from './adopt/git-branch';
+import { type BranchLister } from './sessions/branch-list';
 import {
   type AgentAdapter,
   type AgentRunOptions,
@@ -203,6 +205,11 @@ export interface DaemonOptions {
    * minimal setups). Launched sessions get theirs from the worktree manager instead.
    */
   readonly readGitBranch?: BranchReader;
+  /**
+   * Lists the DEFAULT repo's branches for the launch drawer's base picker (`repo.branches`, Phase B).
+   * Injected at the composition root; omitted → the daemon answers unavailable.
+   */
+  readonly listRepoBranches?: BranchLister;
   readonly logger?: Logger;
 }
 
@@ -1603,6 +1610,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
         await handleAdoptConfig(envelope);
         return;
       }
+      case 'repo.branches': {
+        await handleRepoBranches(envelope);
+        return;
+      }
       case 'viewer.presence': {
         // Relay tells us whether any browser is watching this channel (the mirror of device.presence). We
         // hold it so the adopted-session gate only blocks for a remote approval while an operator is present.
@@ -1912,6 +1923,47 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return JSON.stringify(
         makeEnvelope({
           type: 'adopt.state',
+          userId: options.userId,
+          deviceId: options.deviceId,
+          payload: fields.payload,
+          nonce: fields.nonce,
+        }),
+      );
+    });
+  }
+
+  /**
+   * Answer `repo.branches` (branch-launch Phase B): the DEFAULT repo's local branches for the base
+   * picker, sealed to the requesting browser exactly like adopt.state — branch names are workspace
+   * content and never reach the relay in the clear. No default repo / listing failure → unavailable
+   * (fail-soft; the drawer simply offers no local base choice). Names are never logged.
+   */
+  async function handleRepoBranches(envelope: Envelope): Promise<void> {
+    const browserPublicKey = envelope.sender_public_key;
+    let state: RepoBranchesStatePayload = { available: false, branches: [] };
+    if (defaultRepoPath !== undefined && options.listRepoBranches !== undefined) {
+      try {
+        const listed = await options.listRepoBranches(defaultRepoPath);
+        state = {
+          available: true,
+          branches: listed.branches,
+          ...(listed.defaultBranch !== undefined ? { defaultBranch: listed.defaultBranch } : {}),
+        };
+      } catch (err) {
+        log.warn(
+          { err, deviceId: options.deviceId },
+          'daemon: could not list default repo branches',
+        );
+      }
+    }
+    enqueueSend(async () => {
+      const fields: { payload: unknown; nonce: string } =
+        cipher.enabled && browserPublicKey !== undefined
+          ? await cipher.sealToBrowser(browserPublicKey, state)
+          : { payload: state, nonce: '' };
+      return JSON.stringify(
+        makeEnvelope({
+          type: 'repo.branches.state',
           userId: options.userId,
           deviceId: options.deviceId,
           payload: fields.payload,
