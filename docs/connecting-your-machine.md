@@ -37,7 +37,7 @@ flowchart TB
     subgraph cloud["Relay — a meeting point"]
         R["Multiplexer<br/>keyed by (user, device)"]
     end
-    B["🌐 Browser / PWA"] -->|"dials OUT · WSS"| R
+    B["🌐 Browser"] -->|"dials OUT · WSS"| R
     D["💻 Daemon (your laptop)"] -->|"dials OUT · WSS"| R
     R -.->|"routes encrypted frames"| B
     R -.->|"between the two"| D

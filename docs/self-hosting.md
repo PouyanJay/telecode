@@ -69,11 +69,11 @@ The relay is the only publicly reachable piece, so it ships safe to leave runnin
   `npx @telecode/cli --relay-url wss://relay.example.com/ws` (or set `TELECODE_RELAY_URL`; the flag wins). The
   URL must be `ws://` or `wss://`. On first run it prints a pairing code; enter it in the web app to bind
   the device.
-- **Web app (the PWA):** set `PUBLIC_TELECODE_RELAY_URL` to the same relay, and — if you enabled push —
+- **Web app:** set `PUBLIC_TELECODE_RELAY_URL` to the same relay, and — if you enabled push —
   `PUBLIC_VAPID_KEY` to your `VAPID_PUBLIC_KEY`. GitHub OAuth (sign-in + the repo token) is configured in
   the web tier; the relay only stores the resulting token, encrypted, when `TOKEN_ENCRYPTION_KEY` is set.
 
-The web UI is deployed separately from this bundle (it is a static/SSR PWA, not part of the relay image).
+The web UI is deployed separately from this bundle (it is a SvelteKit app, not part of the relay image).
 For local use, run it with `pnpm --filter web dev` pointed at your relay.
 
 ## Notes
