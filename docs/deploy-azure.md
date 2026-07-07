@@ -2,7 +2,7 @@
 
 This is the production runbook for hosting telecode's control plane on **Azure Container Apps**:
 
-- **Web app** (`apps/web`, the SvelteKit PWA) → `https://app.telecode.io`
+- **Web app** (`apps/web`, the SvelteKit web app) → `https://app.telecode.io`
 - **Relay** (`apps/relay`, the Fastify + ws broker) → `wss://relay.telecode.io`
 
 **Postgres** is your **managed Supabase** (not provisioned here). The **marketing site** (`telecode.io`)

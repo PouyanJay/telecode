@@ -6,15 +6,15 @@
 
 **Launch, watch, and steer Claude Code agents on your own machine — from any browser.**
 
-The agents run on _your_ computer, where your code already is. A responsive web app — an installable PWA,
-no native app — lets you launch them, watch them work, and approve each consequential action from your
+The agents run on _your_ computer, where your code already is. A responsive, mobile-first web app — no
+native app — lets you launch them, watch them work, and approve each consequential action from your
 phone or another laptop. Session content is **end-to-end encrypted**, so the server in the middle only
 ever forwards ciphertext.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-e8a33d?style=flat-square)](LICENSE)
 [![npm: @telecode/cli](https://img.shields.io/npm/v/@telecode/cli?style=flat-square&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/@telecode/cli)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](packages/protocol)
-[![SvelteKit](https://img.shields.io/badge/SvelteKit-PWA-FF3E00?style=flat-square&logo=svelte&logoColor=white)](apps/web)
+[![SvelteKit](https://img.shields.io/badge/SvelteKit-web_app-FF3E00?style=flat-square&logo=svelte&logoColor=white)](apps/web)
 [![Fastify](https://img.shields.io/badge/Fastify-ws_relay-000000?style=flat-square&logo=fastify&logoColor=white)](apps/relay)
 [![Claude Agent SDK](https://img.shields.io/badge/Claude-Agent_SDK-D97757?style=flat-square&logo=anthropic&logoColor=white)](packages/daemon)
 [![End-to-end encrypted](https://img.shields.io/badge/end--to--end-encrypted-56a585?style=flat-square)](docs/end-to-end-encryption.md)
@@ -70,8 +70,8 @@ already is — your machine** — and the network in the middle is reduced to a 
 
 ## Architecture
 
-A small TypeScript monorepo: a SvelteKit PWA and a Claude-Agent-SDK daemon talk through a thin Fastify +
-`ws` relay, over one shared, zod-validated wire contract.
+A small TypeScript monorepo: a SvelteKit web app and a Claude-Agent-SDK daemon talk through a thin
+Fastify + `ws` relay, over one shared, zod-validated wire contract.
 
 ```mermaid
 flowchart LR
@@ -83,7 +83,7 @@ flowchart LR
     subgraph cloud["☁ Relay — runs anywhere"]
         R["Multiplexer<br/>ciphertext + routing only"]
     end
-    B["🌐 Browser / PWA<br/>encrypts + decrypts"]
+    B["🌐 Browser<br/>encrypts + decrypts"]
 
     B -->|"dials out · WSS"| R
     D -->|"dials out · WSS"| R
@@ -98,7 +98,7 @@ flowchart LR
 | ------------ | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | **Daemon**   | `packages/daemon` → `npx @telecode/cli` | Runs on your machine via the Claude Agent SDK; spawns and supervises agent sessions behind the human-in-the-loop approval gate. |
 | **Relay**    | `apps/relay` · Fastify + `ws`           | A stateless multiplexer + device/session registry. Forwards ciphertext, routes by `(user, device)`, never runs agents.          |
-| **Web**      | `apps/web` · SvelteKit PWA              | Launch sessions, watch the stream, approve tool calls, steer with follow-ups — from a phone or laptop.                          |
+| **Web**      | `apps/web` · SvelteKit                  | Launch sessions, watch the stream, approve tool calls, steer with follow-ups — from a phone or laptop.                          |
 | **Protocol** | `packages/protocol`                     | The shared wire contract: zod schemas (one validated `Envelope`) + the WebCrypto E2E helpers.                                   |
 | **UI**       | `packages/ui`                           | The shared design system — dark-first tokens + primitives.                                                                      |
 

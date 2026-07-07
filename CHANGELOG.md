@@ -111,8 +111,8 @@ First published release (`@telecode/cli` / `@telecode/protocol`).
 - **Launch & steer agents from the browser.** Start Claude Code agent sessions on a paired machine, watch
   output stream live, approve or reject each consequential tool call, and steer with follow-up messages —
   from a phone or another laptop.
-- **Installable PWA.** The web app installs to a phone home screen and supports web push for
-  awaiting-input alerts; this is the mobile experience (no native app).
+- **Mobile-first web app.** The web app is the mobile experience (no native app): responsive on a phone,
+  with web push for awaiting-input alerts.
 - **Multiple parallel sessions** with a dashboard that sorts blocked ("awaiting input") sessions to the
   top, plus reconnect that restores the session list and backfills transcripts.
 - **End-to-end encryption.** Prompts, output, and diffs are encrypted in the browser and the daemon
