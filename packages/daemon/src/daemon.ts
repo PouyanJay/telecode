@@ -195,6 +195,12 @@ export interface DaemonOptions {
     /** Hook `timeout` in seconds for the auto-install (AD-3 long timeout); default 3600 in installHooks. */
     readonly hookTimeoutSeconds?: number;
   };
+  /**
+   * Reads a workspace's current git branch (branch-visibility Phase A). Injected at the composition
+   * root (real `createGitBranchReader`); omitted → adopted sessions simply carry no branch (tests,
+   * minimal setups). Launched sessions get theirs from the worktree manager instead.
+   */
+  readonly readGitBranch?: (cwd: string) => Promise<string | undefined>;
   readonly logger?: Logger;
 }
 
@@ -1962,6 +1968,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
+   * Refresh an adopted session's branch from its cwd (branch-visibility Phase A) — fire-and-forget
+   * from hook handling so gating latency never waits on git. Re-emits the sealed meta ONLY on a
+   * change (including a change to unknown: a stale name is worse than none); the branch is content —
+   * sealed on the wire, never logged. No reader injected → adopted sessions carry no branch.
+   */
+  async function refreshAdoptedBranch(telecodeSessionId: string): Promise<void> {
+    if (options.readGitBranch === undefined) return;
+    const rec = sessionRecords.get(telecodeSessionId);
+    const cwd = rec?.cwd ?? rec?.meta?.cwd;
+    if (rec === undefined || cwd === undefined) return;
+    const branch = await options.readGitBranch(cwd);
+    if (branch === rec.meta?.branch) return;
+    emitSessionMeta(adoptedSource(telecodeSessionId), { branch });
+    persistSession(telecodeSessionId, rec);
+  }
+
+  /**
    * Refine an adopted session's DERIVED title to its first real user prompt once the mirror has captured
    * one (ux Phase 6 T5) — the cwd-basename is only the sensible default for a session adopted before any
    * prompt. A no-op for a user-renamed title (T6) or once already refined to the prompt.
@@ -2142,6 +2165,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
    */
   function handleNotificationHook(event: HookEvent): unknown {
     const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
+    // An idle cue is also a natural branch-refresh moment (the user may have just switched).
+    if (knownId !== undefined) void refreshAdoptedBranch(knownId);
     if (
       knownId !== undefined &&
       event.message !== undefined &&
@@ -2225,6 +2250,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     // Refine the derived title once a chat-only session (no PreToolUse) mirrors its first prompt (T5).
     refineAdoptedTitleFromPrompt(knownId);
+    void refreshAdoptedBranch(knownId);
     // A Stop proves the external conversation is alive: a restart's `needs_restart` guess for this
     // adopted session is disproven (chat-only turns fire no PreToolUse, so the revive must live
     // here too, not only on the tool path).
@@ -2389,6 +2415,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // Refine the derived title from the first real user prompt once the mirror has it (ux Phase 6 T5) —
     // a cwd-basename is only the sensible default until the conversation has content.
     refineAdoptedTitleFromPrompt(telecodeSessionId);
+    // Every hook event is a chance the terminal switched branches — refresh without blocking the gate.
+    void refreshAdoptedBranch(telecodeSessionId);
 
     if (event.hook_event_name === 'PreToolUse' && event.tool_name !== undefined) {
       // A new tool call proves the conversation continued locally — clear a stale takeover offer

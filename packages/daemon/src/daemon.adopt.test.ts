@@ -624,6 +624,150 @@ describe('daemon: adopted sessions end-to-end', () => {
   });
 });
 
+describe('daemon: adopted session branch (branch-visibility T2)', () => {
+  let relay: FakeRelay;
+  let daemon: Daemon;
+  let dir: string;
+  let socketPath: string;
+  // The injectable seam: tests steer what "git" reports; undefined = not a git repo / detached.
+  let currentBranch: string | undefined;
+  const branchReads: string[] = [];
+
+  beforeEach(async () => {
+    relay = await startFakeRelay(USER, DEVICE);
+    dir = await mkdtemp(join(tmpdir(), 'telecode-daemon-branch-'));
+    socketPath = join(dir, 'run', 'hook.sock');
+    currentBranch = undefined;
+    branchReads.length = 0;
+    daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+      readGitBranch: (cwd) => {
+        branchReads.push(cwd);
+        return Promise.resolve(currentBranch);
+      },
+    });
+    await daemon.start();
+    await markViewerPresent(relay, USER, DEVICE);
+  });
+
+  afterEach(async () => {
+    await daemon.stop();
+    await relay.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** Adopt via SessionStart (carries the cwd) and ack, so branch refreshes have a workspace to read. */
+  async function adoptWithCwd(): Promise<void> {
+    const start = hookRpc(socketPath, {
+      hook_event_name: 'SessionStart',
+      session_id: CLAUDE_SESSION,
+      cwd: '/Users/me/myrepo',
+      source: 'startup',
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await start;
+  }
+
+  /** Deterministic barrier: an echo round-trip drains anything the daemon already queued to send. */
+  async function echoBarrier(): Promise<void> {
+    relay.send(
+      makeEnvelope({ type: 'echo', userId: USER, deviceId: DEVICE, payload: { text: 'barrier' } }),
+    );
+    await relay.waitForFrame((e) => e.type === 'echo.reply');
+  }
+
+  it("carries the cwd's current branch in the adopted session's identity", async () => {
+    currentBranch = 'feature/login';
+    await adoptWithCwd();
+    const meta = sessionMetaPayloadSchema.parse(
+      (
+        await relay.waitForFrame(
+          (e) =>
+            e.type === 'session.meta' &&
+            e.session_id === TELECODE_SESSION &&
+            (e.payload as { branch?: string }).branch !== undefined,
+        )
+      ).payload,
+    );
+    expect(meta.branch).toBe('feature/login');
+    expect(meta.cwd).toBe('/Users/me/myrepo'); // the merged snapshot keeps the rest of the identity
+  });
+
+  it('re-emits when the branch changes, stays silent when it does not', async () => {
+    currentBranch = 'main';
+    await adoptWithCwd();
+    await relay.waitForFrame(
+      (e) => e.type === 'session.meta' && (e.payload as { branch?: string }).branch === 'main',
+    );
+
+    // Same branch on the next hook event → NO further branch-bearing meta. (The initial identity
+    // frame — title+cwd, no branch — is still buffered; the peek must only catch a SECOND 'main'
+    // snapshot, which is exactly what a spurious re-emit would send.)
+    let observed = false;
+    relay
+      .waitForFrame(
+        (e) => e.type === 'session.meta' && (e.payload as { branch?: string }).branch === 'main',
+      )
+      .then(
+        () => {
+          observed = true;
+        },
+        () => undefined,
+      );
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'idle',
+    });
+    await echoBarrier();
+    expect(observed).toBe(false);
+
+    // The user checks out another branch in the terminal → the next hook event refreshes it.
+    currentBranch = 'fix/pairing';
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'idle-again',
+    });
+    const changed = sessionMetaPayloadSchema.parse(
+      (
+        await relay.waitForFrame(
+          (e) =>
+            e.type === 'session.meta' &&
+            (e.payload as { branch?: string }).branch === 'fix/pairing',
+        )
+      ).payload,
+    );
+    expect(changed.branch).toBe('fix/pairing');
+  });
+
+  it('emits no branch for a non-git workspace (reader yields unknown)', async () => {
+    currentBranch = undefined;
+    await adoptWithCwd();
+    await echoBarrier();
+    // The identity frames sent so far (cwd-derived title) must carry NO branch key.
+    let observed = false;
+    relay
+      .waitForFrame(
+        (e) => e.type === 'session.meta' && (e.payload as { branch?: string }).branch !== undefined,
+      )
+      .then(
+        () => {
+          observed = true;
+        },
+        () => undefined,
+      );
+    await echoBarrier();
+    expect(observed).toBe(false);
+    expect(branchReads.length).toBeGreaterThan(0); // the seam WAS consulted with the session cwd
+    expect(branchReads[0]).toBe('/Users/me/myrepo');
+  });
+});
+
 describe('daemon: adopted gate defers to the local prompt when no browser is watching', () => {
   it('defers a consequential tool ({}) instead of blocking on a remote approval nobody can give', async () => {
     const relay = await startFakeRelay(USER, DEVICE);
