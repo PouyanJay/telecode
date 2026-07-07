@@ -62,6 +62,7 @@ import { preToolUseOutput } from './adopt/pretooluse-output';
 import { buildQuestionDenyReason } from './adopt/question-deny-reason';
 import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
+import { type BranchReader } from './adopt/git-branch';
 import {
   type AgentAdapter,
   type AgentRunOptions,
@@ -200,7 +201,7 @@ export interface DaemonOptions {
    * root (real `createGitBranchReader`); omitted → adopted sessions simply carry no branch (tests,
    * minimal setups). Launched sessions get theirs from the worktree manager instead.
    */
-  readonly readGitBranch?: (cwd: string) => Promise<string | undefined>;
+  readonly readGitBranch?: BranchReader;
   readonly logger?: Logger;
 }
 
@@ -1975,12 +1976,29 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * change (including a change to unknown: a stale name is worse than none); the branch is content —
    * sealed on the wire, never logged. No reader injected → adopted sessions carry no branch.
    */
+  // Mirrors sessionMetaPayloadSchema's branch bound — the daemon must never emit what receivers reject.
+  const MAX_BRANCH_CHARS = 256;
+
   async function refreshAdoptedBranch(telecodeSessionId: string): Promise<void> {
     if (options.readGitBranch === undefined) return;
     const rec = sessionRecords.get(telecodeSessionId);
     const cwd = rec?.cwd ?? rec?.meta?.cwd;
     if (rec === undefined || cwd === undefined) return;
-    const branch = await options.readGitBranch(cwd);
+    let branch: string | undefined;
+    try {
+      branch = await options.readGitBranch(cwd);
+    } catch (err) {
+      // Fire-and-forget caller — a throwing reader must degrade to "unknown", never an unhandled
+      // rejection. (The branch itself stays out of this log line: content is sealed-only.)
+      log.warn(
+        { err, deviceId: options.deviceId, sessionId: telecodeSessionId },
+        'daemon: branch refresh failed',
+      );
+      return;
+    }
+    // Guard the wire bound HERE, against any injected reader: a name the schema would reject must
+    // degrade to unknown — an invalid field would sink the whole merged snapshot at every receiver.
+    if (branch !== undefined && branch.length > MAX_BRANCH_CHARS) branch = undefined;
     if (branch === rec.meta?.branch) return;
     emitSessionMeta(adoptedSource(telecodeSessionId), { branch });
     persistSession(telecodeSessionId, rec);

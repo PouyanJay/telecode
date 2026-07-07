@@ -117,6 +117,7 @@ describe('daemon: free-form handover & resume', () => {
     agentAdapter: AgentAdapter,
     keyPair?: { publicKey: string; privateKey: string },
     sessionStore?: SessionStore,
+    extras: Partial<Parameters<typeof createDaemon>[0]> = {},
   ): Promise<void> {
     daemon = createDaemon({
       relayUrl: relay.url,
@@ -126,6 +127,7 @@ describe('daemon: free-form handover & resume', () => {
       adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
       ...(keyPair ? { keyPair } : {}),
       ...(sessionStore ? { sessionStore } : {}),
+      ...extras,
     });
     await daemon.start();
   }
@@ -681,5 +683,59 @@ describe('daemon: free-form handover & resume', () => {
     const payload = reconciled.payload as { status: string; entries: { kind: string }[] };
     expect(payload.status).toBe('running');
     expect(payload.entries.some((entry) => entry.kind === 'handover')).toBe(false);
+  });
+
+  it("the fork inherits the adopted parent's branch (branch-visibility T3)", async () => {
+    await start(
+      createFakeAgentAdapter([{ type: 'message', text: 'Continuing.' }], {
+        sessionId: 'fork-branch-sdk',
+      }),
+      undefined,
+      undefined,
+      { readGitBranch: () => Promise.resolve('feature/db-choice') },
+    );
+    await adopt(relay, socketPath);
+
+    // The Stop both refreshes the parent's branch and offers the handover.
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      last_assistant_message: 'Which database should we use for the app?',
+    });
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    const { requestId } = offer.payload as { requestId: string };
+    expect(await stop).toEqual({});
+
+    relay.send(
+      makeEnvelope({
+        type: 'handover.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: PARENT_SESSION,
+        payload: { requestId, answerText: 'Use Postgres.' },
+      }),
+    );
+    const chained = await relay.waitForFrame((e) => e.type === 'session.chained');
+    relay.send(
+      makeEnvelope({
+        type: 'session.chained',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: CHILD_SESSION,
+        payload: {
+          clientRef: (chained.payload as { clientRef: string }).clientRef,
+          parentSessionId: PARENT_SESSION,
+        },
+      }),
+    );
+
+    // The fork keeps working in the parent's checkout — its sealed identity names the SAME branch.
+    const childMeta = sessionMetaPayloadSchema.parse(
+      (await relay.waitForFrame((e) => e.type === 'session.meta' && e.session_id === CHILD_SESSION))
+        .payload,
+    );
+    expect(childMeta.branch).toBe('feature/db-choice');
+    expect(childMeta.cwd).toBe('/repo');
   });
 });

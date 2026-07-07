@@ -22,9 +22,9 @@ import { offerBackgroundService } from './service/offer-background-service';
 import { selectServiceManager } from './service/select-service-manager';
 import { runServiceCli } from './service/service-cli';
 import { acquireSingleInstanceLock } from './single-instance-lock';
+import { createGitBranchReader } from './adopt/git-branch';
 import { createGitRepoManager } from './sessions/repo-manager';
 import { createSessionStore } from './sessions/session-store';
-import { createGitBranchReader } from './adopt/git-branch';
 import { createGitWorktreeManager } from './sessions/worktree-manager';
 
 /**

@@ -745,6 +745,56 @@ describe('daemon: adopted session branch (branch-visibility T2)', () => {
     expect(changed.branch).toBe('fix/pairing');
   });
 
+  it('clears the branch when the workspace stops resolving to one (known → unknown)', async () => {
+    currentBranch = 'main';
+    await adoptWithCwd();
+    await relay.waitForFrame(
+      (e) => e.type === 'session.meta' && (e.payload as { branch?: string }).branch === 'main',
+    );
+
+    // Detached HEAD / repo gone: the next hook event must actively CLEAR it — a stale name is worse
+    // than none. The merged snapshot drops the key entirely (JSON serialization omits undefined).
+    currentBranch = undefined;
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'went detached',
+    });
+    const cleared = sessionMetaPayloadSchema.parse(
+      (
+        await relay.waitForFrame(
+          (e) =>
+            e.type === 'session.meta' &&
+            e.session_id === TELECODE_SESSION &&
+            (e.payload as { branch?: string }).branch === undefined &&
+            (e.payload as { cwd?: string }).cwd !== undefined,
+        )
+      ).payload,
+    );
+    expect(cleared.branch).toBeUndefined();
+    expect('branch' in (cleared as Record<string, unknown>)).toBe(false); // dropped, not null-ish
+    expect(cleared.cwd).toBe('/Users/me/myrepo'); // the rest of the snapshot is intact
+  });
+
+  it('treats a name beyond the wire bound as unknown (never emits what the schema rejects)', async () => {
+    currentBranch = 'x'.repeat(300);
+    await adoptWithCwd();
+    await echoBarrier();
+    let observed = false;
+    relay
+      .waitForFrame(
+        (e) => e.type === 'session.meta' && (e.payload as { branch?: string }).branch !== undefined,
+      )
+      .then(
+        () => {
+          observed = true;
+        },
+        () => undefined,
+      );
+    await echoBarrier();
+    expect(observed).toBe(false);
+  });
+
   it('emits no branch for a non-git workspace (reader yields unknown)', async () => {
     currentBranch = undefined;
     await adoptWithCwd();

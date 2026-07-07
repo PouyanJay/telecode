@@ -6,11 +6,11 @@ import { execFile } from 'node:child_process';
  * tests never spawn git. A branch name is workspace CONTENT — callers keep it sealed on the wire
  * and out of logs (AD-6 lineage).
  */
-export type GitBranchReader = (cwd: string) => Promise<string | undefined>;
+export type BranchReader = (cwd: string) => Promise<string | undefined>;
 
 const GIT_TIMEOUT_MS = 2_000;
 
-export function createGitBranchReader(): GitBranchReader {
+export function createGitBranchReader(): BranchReader {
   return (cwd) =>
     new Promise((resolve) => {
       // Array args, no shell — the cwd comes from hook events (user-controlled input).
