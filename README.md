@@ -20,6 +20,7 @@ ever forwards ciphertext.
 [![End-to-end encrypted](https://img.shields.io/badge/end--to--end-encrypted-56a585?style=flat-square)](docs/end-to-end-encryption.md)
 
 [Why](#why-its-built-this-way) ·
+[What you can do](#what-you-can-do) ·
 [Architecture](#architecture) ·
 [How it connects](#how-it-connects) ·
 [Quick start](#quick-start) ·
@@ -47,6 +48,25 @@ already is — your machine** — and the network in the middle is reduced to a 
 | **End-to-end encrypted**            | Prompts, output, diffs, and transcripts are encrypted in the browser and the daemon. The relay sees only routing metadata.         |
 | **You hold the gate**               | Every consequential tool call pauses for your approval before it runs.                                                             |
 | **Open & self-hostable**            | Run the whole thing yourself; the relay is the only piece that could live elsewhere, and even then it sees only ciphertext.        |
+
+## What you can do
+
+- **Launch agents from anywhere** — pick the machine, the repository, the base branch, and the permission
+  mode; describe the task; watch it stream.
+- **A branch per session** — parallel sessions each get their own git worktree and branch. Review the
+  session's real diff in the **Changes** panel, then **push it and open a PR** — from your phone.
+  → [Branches, changes & PRs](docs/branches-and-changes.md)
+- **Hold the gate** — every consequential tool call pauses for you: approve, reject, or reject with a note
+  telling the agent what to do instead.
+- **Adopt your terminal sessions** — Claude Code sessions you start locally show up too: watch them,
+  answer their questions, approve their actions remotely, and take one over when you leave your desk.
+  → [Adopted sessions](docs/adopted-sessions.md)
+- **Run more than one machine** — pair several devices; telecode shows honest per-device presence, lets
+  you pick where each session runs, and routes approvals across all of them.
+- **Set it and forget it** — an install-once background service (launchd/systemd) keeps the daemon
+  running; sessions survive daemon restarts, and reopening the app is a reconnect, never a restart.
+- **Get pinged, not glued** — web push notifies you the moment a session needs your input (routing
+  metadata only — never content).
 
 ## Architecture
 
@@ -111,10 +131,13 @@ Then:
 
 1. The daemon prints a **pairing code**.
 2. Open the web app, **sign in**, and enter the code to bind this machine to your account.
-3. **Launch a session**, then approve actions as they come and steer with follow-up messages.
+3. Accept the daemon's offer to install itself as a **background service** (starts at login, restarts on
+   crash) — or keep it in a terminal.
+4. **Launch a session** — optionally picking a repo and base branch — then approve actions as they come,
+   steer with follow-ups, and push the session's branch for a PR when you're happy.
 
 Check a machine's setup any time with **`telecode doctor`** (Node version, API key, pairing, relay
-reachability).
+reachability, background service, session adoption).
 
 → Full walkthrough: **[docs/getting-started.md](docs/getting-started.md)**
 
@@ -136,15 +159,17 @@ Found a vulnerability? Please report it privately — see the [Security Policy](
 
 Full docs live in **[docs/](docs/README.md)** — start there for the index.
 
-| Doc                                                        | Read it for                                             |
-| ---------------------------------------------------------- | ------------------------------------------------------- |
-| **[Getting started](docs/getting-started.md)**             | Install, pair, and run your first session               |
-| [Connecting your machine](docs/connecting-your-machine.md) | Secure connection + how we know it's you (diagrams)     |
-| [End-to-end encryption](docs/end-to-end-encryption.md)     | How the relay only ever sees ciphertext (diagrams)      |
-| [Threat model](docs/threat-model.md)                       | What each part can and cannot see, and how to verify it |
-| [Reconnecting & offline](docs/reconnect-and-offline.md)    | What happens on reload, network drops, and sleep        |
-| [Self-hosting the relay](docs/self-hosting.md)             | Run your own relay with Docker                          |
-| [Deploying to Azure](docs/deploy-azure.md)                 | Production runbook (Container Apps + Supabase)          |
+| Doc                                                        | Read it for                                                |
+| ---------------------------------------------------------- | ---------------------------------------------------------- |
+| **[Getting started](docs/getting-started.md)**             | Install, pair, and run your first session                  |
+| [Branches, changes & PRs](docs/branches-and-changes.md)    | The branch-per-session model: review, fork, push, PR       |
+| [Adopted sessions](docs/adopted-sessions.md)               | Steering terminal-started Claude Code sessions remotely    |
+| [Connecting your machine](docs/connecting-your-machine.md) | Secure connection + how we know it's you (diagrams)        |
+| [End-to-end encryption](docs/end-to-end-encryption.md)     | How the relay only ever sees ciphertext (diagrams)         |
+| [Threat model](docs/threat-model.md)                       | What each part can and cannot see, and how to verify it    |
+| [Reconnecting & offline](docs/reconnect-and-offline.md)    | What happens on reload, network drops, sleep, and restarts |
+| [Self-hosting the relay](docs/self-hosting.md)             | Run your own relay with Docker                             |
+| [Deploying to Azure](docs/deploy-azure.md)                 | Production runbook (Container Apps + Supabase)             |
 
 ## Contributing
 

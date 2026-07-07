@@ -10,10 +10,15 @@ authored in **Mermaid** and render on GitHub.
 
 ## Use it
 
-- **[Getting started](getting-started.md)** — install the daemon, pair a machine, and run your first
-  session, with `telecode doctor` for preflight.
+- **[Getting started](getting-started.md)** — install the daemon, pair a machine, keep it running in the
+  background, and launch your first session, with `telecode doctor` for preflight.
+- **[Branches, changes & PRs](branches-and-changes.md)** — every launched session works on its own
+  branch: review the real diff, switch or fork branches, push, and open a PR from the browser.
+- **[Adopted sessions](adopted-sessions.md)** — Claude Code sessions you start in a terminal appear in
+  telecode automatically: watch them, answer their questions, and approve their tool calls remotely.
 - **[Reconnecting & offline behavior](reconnect-and-offline.md)** — why reopening is a _reconnect_ (never
-  a restart), how network drops and laptop sleep/wake are handled, and what a powered-off machine can't do.
+  a restart), how network drops, laptop sleep/wake, and daemon restarts are handled, and what a
+  powered-off machine can't do.
 
 ## Understand it
 

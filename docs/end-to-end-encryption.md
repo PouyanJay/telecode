@@ -130,7 +130,8 @@ content key (a blob it has no key to open).
 
 If you open the same session in a second browser tab or on your phone, the daemon simply wraps the same
 content key for that browser's public key too — so one session can be watched from several places, each
-decrypting locally.
+decrypting locally. The key is (re)delivered on every **subscribe**, not just at launch, so a browser
+that arrives late to a session can always decrypt it.
 
 ---
 
@@ -165,20 +166,23 @@ A few details worth knowing:
 - One encrypted frame **fans out** to every browser watching the session — the relay copies the same
   ciphertext to each subscriber; each decrypts it locally.
 - A couple of fields stay in cleartext **on purpose**, because the relay needs them to route and to show
-  a session list without decrypting anything: the message `type`, the lifecycle `status`
-  (`running` / `awaiting_input` / `done` / `error`), and the routing ids. Never the content.
+  a session list without decrypting anything: the message `type`, the lifecycle `status` (`running`,
+  `awaiting_input`, `done`, …), and the routing ids. Never the content — and not the session's
+  **identity** either: the title, working directory, and branch a session displays travel as **sealed
+  metadata** under the same content key, stored by the relay as an opaque blob.
 
 ---
 
 ## What the relay sees — and never sees
 
-| The relay **sees** (routing metadata)                  | The relay **never sees**                        |
-| ------------------------------------------------------ | ----------------------------------------------- |
-| That a session exists; its id, owning user, and device | Your prompts                                    |
-| Message `type` and lifecycle `status`                  | The agent's output, messages, and diffs         |
-| Timing and approximate message sizes                   | Tool names and tool inputs                      |
-| Public keys (public by definition)                     | The session transcript                          |
-| The _wrapped_ content key (a blob it can't open)       | Any private key, or the per-session content key |
+| The relay **sees** (routing metadata)                  | The relay **never sees**                          |
+| ------------------------------------------------------ | ------------------------------------------------- |
+| That a session exists; its id, owning user, and device | Your prompts                                      |
+| Message `type` and lifecycle `status`                  | The agent's output, messages, and diffs           |
+| Timing and approximate message sizes                   | Tool names and tool inputs                        |
+| Public keys (public by definition)                     | The session transcript                            |
+| The _wrapped_ content key (a blob it can't open)       | Session titles, working directories, branch names |
+|                                                        | Any private key, or the per-session content key   |
 
 That metadata exposure is **real and not hidden in v1** — see the threat model. If you don't want a
 third party to see even that, **[run your own relay](self-hosting.md)**; then the only party that sees

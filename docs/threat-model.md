@@ -33,7 +33,9 @@ The handshake is **ECDH on X25519 → HKDF-SHA256 → AES-256-GCM**, via the pla
   reuses the same identity (no re-handshake).
 - On launch, the browser and daemon derive a shared key by ECDH (each side's private key + the other's
   public key) and run it through HKDF. The daemon mints a per-session symmetric **content key** (AES-GCM)
-  and delivers it wrapped under that derived key to the browser (`session.key`).
+  and delivers it wrapped under that derived key to the browser (`session.key`). The key is also
+  (re)delivered whenever a browser **subscribes** to the session, so a tab that arrives late — or another
+  of your devices — can always decrypt.
 - Every subsequent session message — in both directions — is encrypted under the content key with
   AES-256-GCM (the wire `nonce` is the 12-byte GCM IV). One encrypted frame fans out to every browser tab
   watching the session.
@@ -42,18 +44,29 @@ The handshake is **ECDH on X25519 → HKDF-SHA256 → AES-256-GCM**, via the pla
 
 ## What the relay can and cannot see
 
-| The relay **sees** (routing metadata)                                | The relay **never sees**                       |
-| -------------------------------------------------------------------- | ---------------------------------------------- |
-| That a session exists; its id, owning user + device                  | Your prompts                                   |
-| Timing and approximate message sizes                                 | The agent's output, messages, diffs            |
-| Message `type` (e.g. `agent.message`, `session.ended`)               | Tool names and tool inputs                     |
-| Lifecycle `status` (`running` / `awaiting_input` / `done` / `error`) | The session transcript                         |
-| Public keys (they are public by definition)                          | Any private key or the per-session content key |
+| The relay **sees** (routing metadata)                                                                                                 | The relay **never sees**                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| That a session exists; its id, owning user + device                                                                                   | Your prompts                                                                |
+| Timing and approximate message sizes                                                                                                  | The agent's output, messages, diffs                                         |
+| Message `type` (e.g. `agent.message`, `session.ended`)                                                                                | Tool names and tool inputs                                                  |
+| Lifecycle `status` (`starting` / `running` / `awaiting_input` / `done` / `error` / `offline_paused` / `turn_limit` / `needs_restart`) | The session transcript                                                      |
+| Your account identity from sign-in (email, name) + each device's hostname and OS                                                      | Session **titles**, working directories, and branch names (sealed metadata) |
+| Public keys (they are public by definition)                                                                                           | Any private key or the per-session content key                              |
 
-**Honest caveat:** this metadata exposure is real and is _not_ encrypted in v1 — full metadata privacy
-(hiding existence, timing, and sizes) is out of scope. If you need to remove even that exposure to a third
-party, **run your own relay** (see the self-hosting guide); then the only party that sees the metadata is
-you.
+Session identity — the title, working directory, repo, and branch a session shows — travels as **sealed
+metadata** under the same per-session key as content, so the relay stores it as an opaque blob. Web push
+notifications likewise carry only a fixed "a session needs your input" string plus the session id — never
+prompt or code text.
+
+**Honest caveats:** the routing metadata above is real and is _not_ encrypted in v1 — full metadata
+privacy (hiding existence, timing, and sizes) is out of scope; note that the message _type_ alone reveals
+the shape of activity (an approval was requested, a question asked). Two narrower ones: sessions created
+before sealed metadata shipped may retain their plaintext title in the registry database; and if you
+connect **GitHub**, the repo/branch pickers for GitHub repos are served by the relay via the GitHub API
+(it holds that OAuth token server-side, encrypted at rest) — so those repo and branch names are visible to
+it, unlike the daemon-side listing, which is end-to-end sealed. If you need to remove all of this exposure
+to a third party, **run your own relay** (see the self-hosting guide); then the only party that sees the
+metadata is you.
 
 ## Verifying it yourself
 
@@ -88,5 +101,6 @@ The guarantee is enforced by tests and is observable in the relay's own logs.
   remains the authoritative source and reseeds the transcript on resubscribe.
 - **A powered-off laptop cannot run agents.** Execution is local by design; if the daemon is offline, the
   session list still renders from the registry but the session is paused until the laptop reconnects. A
-  fully restarted daemon loses the in-memory transcript of a running session — see
+  turn that was in flight when the daemon died is lost (its process was doing the work), though session
+  transcripts persist across daemon restarts — see
   [reconnect-and-offline.md](./reconnect-and-offline.md).
