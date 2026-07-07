@@ -55,6 +55,18 @@ const ADOPT_ANNOUNCE_REF = 'auto-adopt';
 const DEFAULT_INPUT = { path: 'README.md', content: 'hello from telecode' };
 // The gate's rough ±lines (mockup §01-4), mirrored like the real daemon computes for Write/Edit.
 const DEFAULT_DIFF_STAT = { added: 1, removed: 0 };
+// The branch-diff summary (Phase C) every launched/subscribed session reports: one counted file and
+// one binary (null counts → the rail's honest "—"), so specs can assert both renderings.
+const SESSION_CHANGES_SUMMARY = {
+  baseBranch: 'main',
+  files: [
+    { path: 'README.md', additions: 2, deletions: 0 },
+    { path: 'assets/logo.png', additions: null, deletions: null },
+  ],
+  totalAdditions: 2,
+  totalDeletions: 0,
+  truncated: false,
+};
 
 /**
  * Launch prompt that triggers the chained-thread dance (ux Phase 3): the daemon ends the trigger
@@ -333,6 +345,13 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       );
     }
 
+    // Branch-diff summary (Phase C): the real daemon computes this from the worktree and re-emits it
+    // between turns; this fake compresses time and reports the "agent work" up front — cleartext in
+    // the default mode, like every frame here (the sealed path is the daemon package's crypto tests).
+    if (launch.success) {
+      send('session.changes', SESSION_CHANGES_SUMMARY, sid);
+    }
+
     if (launch.success && launch.data.prompt.startsWith(TURN_LIMIT_PROMPT)) {
       // The run stops early on its turn budget: NOT done, NOT an error — and a follow-up continues it.
       rec.transcript.push({ kind: 'message', text: 'Ran out of turns mid-task' });
@@ -454,6 +473,8 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
         : { status: 'offline_paused', entries: [] },
       sid,
     );
+    // Reopen freshness (Phase C): the real daemon recomputes the branch diff on subscribe.
+    if (rec !== undefined) send('session.changes', SESSION_CHANGES_SUMMARY, sid);
   }
 }
 

@@ -68,6 +68,7 @@ import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import { type BranchReader } from './adopt/git-branch';
 import { type BranchLister } from './sessions/branch-list';
+import { type WorkspaceChangesReader } from './sessions/workspace-changes';
 import {
   type AgentAdapter,
   type AgentRunOptions,
@@ -212,6 +213,12 @@ export interface DaemonOptions {
    * Injected at the composition root; omitted → the daemon answers unavailable.
    */
   readonly listRepoBranches?: BranchLister;
+  /**
+   * Computes a launched session's branch-diff summary vs its base for the sealed `session.changes`
+   * frame (branch-actions, Phase C). Injected at the composition root (real `createGitChangesReader`);
+   * omitted → the Changes panel simply never populates (tests, minimal setups).
+   */
+  readonly readWorkspaceChanges?: WorkspaceChangesReader;
   readonly logger?: Logger;
 }
 
@@ -350,6 +357,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
     claudeSessionId?: string;
     /** The worktree/working directory the session runs in — persisted so a restored follow-up reuses it. */
     cwd?: string;
+    /**
+     * The RESOLVED ref this launched session's branch was cut from (branch-actions, Phase C) — what
+     * `session.changes` diffs against. Workspace content like `meta.branch`: sealed-only, never logged.
+     */
+    baseBranch?: string;
+    /**
+     * The parent repo the worktree was cut from (Phase C) — where reaping removes the worktree/branch
+     * and where a PR push resolves its remote. A local path: sealed-only territory, never logged.
+     */
+    repoPath?: string;
   }
   const sessionRecords = new Map<string, SessionRecord>();
 
@@ -412,6 +429,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
           origin: rec.origin,
           claudeSessionId: rec.claudeSessionId,
           cwd: rec.cwd,
+          baseBranch: rec.baseBranch,
+          repoPath: rec.repoPath,
         }),
       });
     })().catch((err: unknown) => {
@@ -453,6 +472,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
             origin: persisted.origin,
             claudeSessionId: persisted.claudeSessionId,
             cwd: persisted.cwd,
+            baseBranch: persisted.baseBranch,
+            repoPath: persisted.repoPath,
           }),
         });
         // Restore the session's content key (ux Phase 6 T3) so a subscribe re-delivers the SAME key and
@@ -570,6 +591,42 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const rec = recordFor(sessionId);
     rec.meta = { ...rec.meta, ...patch };
     sendForSession(source, 'session.meta', { ...rec.meta, ts: now() });
+  }
+
+  /**
+   * Compute and emit the session's branch-diff summary as a sealed `session.changes` frame
+   * (branch-actions, Phase C). Fire-and-forget like the adopted-branch refresh: it needs a launched
+   * session's worktree + recorded base and an injected reader — anything missing (adopted session,
+   * daemon-cwd session, reader failure) just means the panel doesn't update. Never fails a session.
+   */
+  function emitSessionChanges(source: Envelope): void {
+    const sessionId = source.session_id;
+    const reader = options.readWorkspaceChanges;
+    if (sessionId === undefined || reader === undefined) return;
+    const rec = sessionRecords.get(sessionId);
+    // Live map first, persisted record second — the same pair follow-up turns trust for their cwd.
+    const cwd = sessionCwds.get(sessionId) ?? rec?.cwd;
+    const base = rec?.baseBranch;
+    if (rec === undefined || cwd === undefined || base === undefined) return;
+    void (async () => {
+      try {
+        const summary = await reader(cwd, base);
+        if (summary === undefined) return;
+        sendForSession(source, 'session.changes', { baseBranch: base, ...summary, ts: now() });
+      } catch (err) {
+        // A throwing reader must never take a session down with it. Never log the error object —
+        // a git/exec failure embeds its command line (worktree path, branch names) in the message,
+        // and those are sealed-only workspace content.
+        log.warn(
+          {
+            deviceId: options.deviceId,
+            sessionId,
+            errName: err instanceof Error ? err.name : 'unknown',
+          },
+          'daemon: changes read failed',
+        );
+      }
+    })();
   }
 
   /** Emit an updated `session.meta` the first time a turn reveals the model (ux Phase 6 T5) — only on change. */
@@ -1042,6 +1099,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
         activeRuns.delete(sessionId);
         sessionAborts.delete(sessionId);
       }
+      // Between-turns freshness (Phase C): the turn's agent work just changed the branch's drift —
+      // recompute the Changes summary on EVERY way out (done/turn_limit/error/interrupt alike; the
+      // helper no-ops for sessions without a worktree+base). Fire-and-forget, after the lifecycle
+      // frame above is already queued.
+      emitSessionChanges(envelope);
     }
   }
 
@@ -1091,7 +1153,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
         branchName: launch.branchName ?? deriveBranchName(launch.prompt, sessionId),
       });
       sessionCwds.set(sessionId, worktree.path);
-      recordFor(sessionId).cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
+      const rec = recordFor(sessionId);
+      rec.cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
+      rec.repoPath = resolved.path; // where reap/push run later (Phase C)
+      // The cut point, kept for the Changes panel's diff (Phase C). A reused worktree reports no
+      // base (unknowable from git); the record keeps whatever the original cut stored.
+      if (worktree.baseBranch !== undefined) rec.baseBranch = worktree.baseBranch;
       // Log owner/name + branch only — never the clone URL or local paths (kept out of log sinks).
       log.info(
         {
@@ -1184,6 +1251,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
         ...(workspace.branch !== undefined ? { branch: workspace.branch } : {}),
         permissionMode: recordFor(envelope.session_id).permissionMode,
       });
+      // Seed the Changes panel (Phase C): an honest "nothing yet" beats a skeleton that never fills.
+      emitSessionChanges(envelope);
     }
     await runTurn(envelope, launch.data.prompt, { ...(cwd !== undefined ? { cwd } : {}) });
   }
@@ -1511,6 +1580,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
           sendForSession(envelope, 'session.meta', { ...rec.meta, ts: now() });
         }
         sendForSession(envelope, 'session.history', historyPayloadFor(sessionId));
+        // Reopen freshness (Phase C): recompute the branch-diff summary so the Changes panel shows
+        // the branch's CURRENT drift, not whatever was last broadcast before the tab went away.
+        emitSessionChanges(envelope);
         return;
       }
       case 'permission.decision': {

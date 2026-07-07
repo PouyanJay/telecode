@@ -83,6 +83,12 @@ export const MESSAGE_TYPES = [
   // forwards/replays it; only browsers holding the session key can read it (invariant #5 — the registry
   // never sees plaintext metadata for a sealed session).
   'session.meta',
+  // sealed branch-diff summary (daemon -> relay -> web, branch-workflow Phase C): the launched
+  // session's working-tree diff vs its base branch (files, ±N), encrypted under the per-session
+  // content key exactly like `session.meta`. The daemon emits it after workspace prep, on subscribe,
+  // and between turns; the relay only ever forwards/replays the opaque blob (invariant #5 — file
+  // paths and counts are workspace content the relay must never see).
+  'session.changes',
   // session rename override (relay -> web, ux Phase 6 T6): the user's title override, broadcast after a
   // `PATCH /me/sessions/:id`. Kept SEPARATE from `session.meta` (the daemon-owned identity) so the two
   // never race — the browser merges override-wins. A SET carries the sealed `{ title }` ciphertext; a

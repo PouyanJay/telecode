@@ -36,6 +36,7 @@ import {
   type SealedMetaDecryptor,
   type SessionMetaMap,
 } from './session-meta';
+import { applyChangesFrame, type SessionChangesMap } from './session-changes';
 import {
   applyTitleFrame,
   overlayMissingTitles,
@@ -104,6 +105,9 @@ const repoBranchesMap = writable<ReadonlyMap<string, RepoBranchesStatePayload>>(
 // Decrypted session metadata (ux Phase 6), keyed by session id: live `session.meta` frames merged
 // over the registry's persisted blobs (seeded on load). Titles here beat every other title source.
 const sessionMetaMap = writable<SessionMetaMap>(new Map());
+// Decrypted branch-diff summaries (branch-actions Phase C), keyed by session id: latest-wins
+// `session.changes` snapshots feeding the rail's CHANGES panel.
+const sessionChangesMap = writable<SessionChangesMap>(new Map());
 // The user's rename overrides (ux Phase 6 T6), keyed by session id: live `session.title` frames over
 // the registry's persisted `sealed_title` blobs. Kept SEPARATE from the meta map so the override always
 // wins on display — a later derived title from the daemon can never clobber a rename.
@@ -127,6 +131,10 @@ export const sessionDevices: Readable<ReadonlyMap<string, string>> = {
 };
 /** Decrypted session metadata (ux Phase 6) for titles and session-view context. */
 export const sessionMetas: Readable<SessionMetaMap> = { subscribe: sessionMetaMap.subscribe };
+/** Decrypted branch-diff summaries (Phase C) for the session rail's CHANGES panel. */
+export const sessionChanges: Readable<SessionChangesMap> = {
+  subscribe: sessionChangesMap.subscribe,
+};
 /** The user's rename overrides (ux Phase 6 T6) — the highest-precedence title source (override-wins). */
 export const sessionTitleOverrides: Readable<SessionTitleMap> = {
   subscribe: sessionTitleOverrideMap.subscribe,
@@ -231,6 +239,11 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
   if (envelope.type === 'session.title') {
     // The user's rename override (ux Phase 6 T6): its own map, kept apart from meta so it wins on display.
     sessionTitleOverrideMap.update((map) => applyTitleFrame(map, envelope));
+    return;
+  }
+  if (envelope.type === 'session.changes') {
+    // Branch-diff summary (Phase C): its own map, not transcript — the rail reads it directly.
+    sessionChangesMap.update((map) => applyChangesFrame(map, envelope));
     return;
   }
   sessionMap.update((map) => foldSessionFrame(map, envelope));
@@ -811,6 +824,7 @@ function forgetSession(sessionId: string): void {
   };
   sessionMap.update(drop);
   sessionMetaMap.update(drop);
+  sessionChangesMap.update(drop);
   sessionTitleOverrideMap.update(drop);
   sessionDeviceMap.update(drop);
 }

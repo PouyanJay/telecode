@@ -1,6 +1,7 @@
+import type { SessionChangesPayload } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { summarizeChanges } from './changes';
+import { changesView, summarizeChanges } from './changes';
 import type { DecisionState, TranscriptEntry } from './session';
 
 /** A permission gate entry. Fixed ids keep tests independent — the summary never asserts on them. */
@@ -66,5 +67,55 @@ describe('summarizeChanges', () => {
     const summary = summarizeChanges([gate('Bash', { command: 'ls' }, 'pending')]);
     expect(summary.files).toEqual([]);
     expect(summary.pending).toBe(1);
+  });
+});
+
+/**
+ * `changesView` (branch-actions T1): the rail's single source for the CHANGES section. A sealed
+ * branch-diff summary from the daemon is authoritative when present — even when EMPTY, because for a
+ * launched session "no drift vs base" is the truth, and gate-derived counts would double-report.
+ * Without one (adopted sessions, older daemons), the gate-derived summary stays the honest fallback.
+ */
+describe('changesView', () => {
+  const branchSummary: SessionChangesPayload = {
+    baseBranch: 'origin/main',
+    files: [
+      { path: 'src/app.ts', additions: 5, deletions: 2 },
+      { path: 'assets/logo.png', additions: null, deletions: null },
+    ],
+    totalAdditions: 5,
+    totalDeletions: 2,
+    truncated: false,
+  };
+
+  it('prefers the sealed branch diff and carries its base + null counts through', () => {
+    const view = changesView(branchSummary, [gate('Edit', EDIT, 'approved')]);
+    expect(view.source).toBe('branch');
+    expect(view.baseBranch).toBe('origin/main');
+    expect(view.files).toEqual(branchSummary.files);
+    expect(view.additions).toBe(5);
+    expect(view.deletions).toBe(2);
+    expect(view.pending).toBe(0);
+  });
+
+  it('treats an EMPTY branch diff as authoritative (never falls back to gate counts)', () => {
+    const empty: SessionChangesPayload = {
+      baseBranch: 'main',
+      files: [],
+      totalAdditions: 0,
+      totalDeletions: 0,
+      truncated: false,
+    };
+    const view = changesView(empty, [gate('Edit', EDIT, 'approved')]);
+    expect(view.source).toBe('branch');
+    expect(view.files).toEqual([]);
+  });
+
+  it('falls back to the gate-derived summary when no branch diff exists', () => {
+    const view = changesView(undefined, [gate('Edit', EDIT, 'pending')]);
+    expect(view.source).toBe('gates');
+    expect(view.files).toEqual([{ path: 'src/a.ts', additions: 1, deletions: 1 }]);
+    expect(view.pending).toBe(1);
+    expect(view.baseBranch).toBeUndefined();
   });
 });

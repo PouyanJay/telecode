@@ -379,6 +379,45 @@ export const sessionMetaPayloadSchema = z.object({
 });
 export type SessionMetaPayload = z.infer<typeof sessionMetaPayloadSchema>;
 
+/** The most files one `session.changes` frame carries — the daemon clips the list and flags
+ * `truncated` (totals stay accurate over the FULL diff), so one pathological diff can't bloat the
+ * sealed frame. Shared so the daemon's clip and the wire bound can never drift. */
+export const MAX_CHANGED_FILES = 200;
+
+/** The longest repo-relative file path one changed-file row carries. */
+export const MAX_CHANGED_FILE_PATH_CHARS = 512;
+
+/**
+ * One changed file in a `session.changes` summary. `additions`/`deletions` are `null` when a line
+ * count is unknowable — a binary file (git numstat `-`) or an untracked file git hasn't diffed —
+ * so the UI can render an honest "—" instead of a fake 0.
+ */
+export const changedFileSchema = z.object({
+  path: z.string().min(1).max(MAX_CHANGED_FILE_PATH_CHARS),
+  additions: z.number().int().nonnegative().nullable(),
+  deletions: z.number().int().nonnegative().nullable(),
+});
+export type ChangedFile = z.infer<typeof changedFileSchema>;
+
+/**
+ * Payload for `session.changes` (daemon → relay → web, branch-workflow Phase C): the launched
+ * session's diff vs the base branch it was cut from — working tree included, so uncommitted agent
+ * work shows up. Sealed under the per-session content key like {@link sessionMetaPayloadSchema};
+ * file paths are workspace content the relay must never see. `baseBranch` is the RESOLVED base ref
+ * the worktree was actually cut from (e.g. `origin/main`), so the panel can label "vs <base>"
+ * truthfully.
+ */
+export const sessionChangesPayloadSchema = z.object({
+  baseBranch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS),
+  files: z.array(changedFileSchema).max(MAX_CHANGED_FILES),
+  /** Totals over the FULL diff — accurate even when `files` is clipped to {@link MAX_CHANGED_FILES}. */
+  totalAdditions: z.number().int().nonnegative(),
+  totalDeletions: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  ts: entryTimestampSchema.optional(),
+});
+export type SessionChangesPayload = z.infer<typeof sessionChangesPayloadSchema>;
+
 /**
  * Payload for `session.title` (relay → web, ux Phase 6 T6): the user's rename override, kept in a blob
  * SEPARATE from `session.meta` (the daemon-owned identity) so the two never race — the browser merges

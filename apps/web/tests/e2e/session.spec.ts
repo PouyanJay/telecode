@@ -80,6 +80,14 @@ test('launch from the dashboard, stream on the session view, approve the gated t
   await expect(rail.getByText('Branch', { exact: true })).toBeVisible();
   await expect(rail.getByText(/^telecode\/[0-9a-f-]{36}$/)).toBeVisible();
   await expect(page.locator('header.shead').getByText(/telecode\/[0-9a-f-]{6}/)).toBeVisible();
+
+  // Changes panel (Phase C): the daemon's sealed branch-diff summary renders real rows — a counted
+  // file with its ± stats, a binary file's honest "—" (never a fake 0) — labeled with its base.
+  await expect(rail.getByText('vs main')).toBeVisible();
+  await expect(rail.getByText('README.md')).toBeVisible();
+  await expect(rail.getByText('+2').first()).toBeVisible();
+  await expect(rail.getByText('assets/logo.png')).toBeVisible();
+  await expect(rail.getByText('—').first()).toBeVisible();
 });
 
 test('launch cuts a named branch from a picked base (branch-launch Phase B)', async ({ page }) => {

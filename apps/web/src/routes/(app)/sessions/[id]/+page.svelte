@@ -40,6 +40,7 @@
     resumeAsNew,
     sendControl,
     sendUserMessage,
+    sessionChanges,
     sessionDevices,
     sessionMetas,
     sessionTitleOverrides,
@@ -451,6 +452,7 @@
         deviceName={device?.name ?? null}
         connection={$connectionState}
         meta={$sessionMetas.get(sessionId)}
+        changes={$sessionChanges.get(sessionId)}
       />
     {/if}
   </div>

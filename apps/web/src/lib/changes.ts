@@ -1,3 +1,5 @@
+import type { SessionChangesPayload } from '@telecode/protocol';
+
 import { buildFileDiff } from './diff';
 import type { TranscriptEntry } from './session';
 
@@ -55,4 +57,50 @@ export function summarizeChanges(entries: readonly TranscriptEntry[]): ChangesSu
 
   const files = [...byPath.entries()].map(([path, totals]) => ({ path, ...totals }));
   return { files, additions, deletions, pending };
+}
+
+/**
+ * What the rail's CHANGES section renders, from either source. Counts are `null` when unknowable
+ * (binary/untracked files in a branch diff) — rendered as "—", never a fake 0.
+ */
+export interface ChangesView {
+  /** `branch` = the daemon's sealed diff vs the session's base; `gates` = the approval-gate fallback. */
+  readonly source: 'branch' | 'gates';
+  readonly files: readonly {
+    readonly path: string;
+    readonly additions: number | null;
+    readonly deletions: number | null;
+  }[];
+  readonly additions: number;
+  readonly deletions: number;
+  /** Gate-derived only: proposed-but-not-yet-written count (a branch diff has no notion of pending). */
+  readonly pending: number;
+  /** Branch-diff only: the resolved base ref the diff is against ("vs <base>"). */
+  readonly baseBranch?: string;
+  /** Branch-diff only: the file list was clipped on the daemon (totals still cover the full diff). */
+  readonly truncated: boolean;
+}
+
+/**
+ * The CHANGES section's single source (branch-actions Phase C). A sealed branch-diff summary is
+ * authoritative whenever the daemon sent one — even empty: for a launched session, "no drift vs
+ * base" is the truth, and layering gate counts on top would double-report the same edits. Without
+ * one (adopted sessions, older daemons) the gate-derived summary stays the honest fallback.
+ */
+export function changesView(
+  summary: SessionChangesPayload | undefined,
+  entries: readonly TranscriptEntry[],
+): ChangesView {
+  if (summary !== undefined) {
+    return {
+      source: 'branch',
+      files: summary.files,
+      additions: summary.totalAdditions,
+      deletions: summary.totalDeletions,
+      pending: 0,
+      baseBranch: summary.baseBranch,
+      truncated: summary.truncated,
+    };
+  }
+  return { source: 'gates', ...summarizeChanges(entries), truncated: false };
 }

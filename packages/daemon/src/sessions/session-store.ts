@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import {
   base64KeySchema,
+  MAX_BRANCH_NAME_CHARS,
   permissionModeSchema,
   sessionHistoryEntrySchema,
   sessionMetaPayloadSchema,
@@ -44,6 +45,12 @@ const persistedSessionSchema = z.object({
   claudeSessionId: z.string().min(1).max(256).optional(),
   // The session's working directory — persisted so a restored follow-up runs in the same worktree.
   cwd: z.string().min(1).max(1024).optional(),
+  // The RESOLVED ref the session branch was cut from (branch-actions Phase C) — persisted so the
+  // Changes panel still diffs against the true base after a daemon restart. A ref name or commit id.
+  baseBranch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS).optional(),
+  // The parent repo the worktree was cut from (Phase C) — worktree removal and branch deletion run
+  // here at reap time, and the PR push resolves its remote. Bounded like `cwd`.
+  repoPath: z.string().min(1).max(1024).optional(),
 });
 
 /** Derived from the schema so a new persisted field is declared once (the schema is the source of truth). */
