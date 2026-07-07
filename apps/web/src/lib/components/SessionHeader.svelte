@@ -16,6 +16,7 @@
     title,
     deviceName,
     cwd = null,
+    branch = null,
     sessionId,
     status,
     isBusy,
@@ -36,6 +37,8 @@
     deviceName: string | null;
     /** The session's working directory (from its sealed metadata) — provenance in the header line. */
     cwd?: string | null;
+    /** The workspace's git branch (sealed meta) — which line of work this session is on. */
+    branch?: string | null;
     sessionId: string;
     status: SessionStatus;
     isBusy: boolean;
@@ -70,6 +73,7 @@
     <p class="path mono">
       {#if deviceName}<span class="dev">{deviceName}</span> · {/if}
       {#if cwd}<span class="cwd" title={cwd}>{cwd}</span> · {/if}
+      {#if branch}<span class="branch" title={branch}>{branch}</span> · {/if}
       <span class="sid">{sessionId.slice(0, 12)}</span>
     </p>
   </div>
@@ -144,7 +148,16 @@
   .dev {
     color: var(--text-secondary);
   }
-  /* The cwd shares the device's tone; capped so a deep path can't push the session id out of view. */
+  /* cwd and branch share the device's tone; capped so neither can push the session id out of view. */
+  .branch {
+    color: var(--text-secondary);
+    display: inline-block;
+    max-width: 20ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
   .cwd {
     color: var(--text-secondary);
     display: inline-block;

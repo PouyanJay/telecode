@@ -22,7 +22,7 @@
     session: SessionState;
     deviceName: string | null;
     connection: ConnectionState;
-    /** Decrypted session metadata (ux Phase 6): the model that ran it + its working directory. */
+    /** Decrypted session metadata (ux Phase 6): model, working directory, and git branch. */
     meta?: SessionMetaPayload | undefined;
   } = $props();
 
@@ -54,6 +54,12 @@
       <div class="meta hairline-b">
         <span class="meta-key">Directory</span>
         <span class="meta-val mono" title={meta.cwd}>{meta.cwd}</span>
+      </div>
+    {/if}
+    {#if meta?.branch}
+      <div class="meta hairline-b">
+        <span class="meta-key">Branch</span>
+        <span class="meta-val mono" title={meta.branch}>{meta.branch}</span>
       </div>
     {/if}
     <div class="meta">

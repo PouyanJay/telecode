@@ -309,7 +309,12 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     // Session identity (ux Phase 6): the real daemon derives a title from the first prompt and emits
     // sealed metadata; this cleartext fake mirrors the shape so specs can assert titles after reloads.
     if (launch.success) {
-      send('session.meta', { title: launch.data.prompt, titleSource: 'derived' }, sid);
+      // Branch mirrors the real daemon's worktree naming so specs can assert the header/rail rows.
+      send(
+        'session.meta',
+        { title: launch.data.prompt, titleSource: 'derived', branch: `telecode/${sid}` },
+        sid,
+      );
     }
 
     if (launch.success && launch.data.prompt.startsWith(TURN_LIMIT_PROMPT)) {

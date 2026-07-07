@@ -315,6 +315,7 @@
     title={sessionTitle}
     deviceName={device?.name ?? null}
     cwd={$sessionMetas.get(sessionId)?.cwd ?? null}
+    branch={$sessionMetas.get(sessionId)?.branch ?? null}
     {sessionId}
     status={session.status}
     {isBusy}
