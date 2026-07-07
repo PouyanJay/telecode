@@ -631,6 +631,7 @@ describe('daemon: adopted session branch (branch-visibility T2)', () => {
   let socketPath: string;
   // The injectable seam: tests steer what "git" reports; undefined = not a git repo / detached.
   let currentBranch: string | undefined;
+  let throwOnRead = false;
   const branchReads: string[] = [];
 
   beforeEach(async () => {
@@ -638,6 +639,7 @@ describe('daemon: adopted session branch (branch-visibility T2)', () => {
     dir = await mkdtemp(join(tmpdir(), 'telecode-daemon-branch-'));
     socketPath = join(dir, 'run', 'hook.sock');
     currentBranch = undefined;
+    throwOnRead = false;
     branchReads.length = 0;
     daemon = createDaemon({
       relayUrl: relay.url,
@@ -647,6 +649,7 @@ describe('daemon: adopted session branch (branch-visibility T2)', () => {
       adopt: { socketPath, ackTimeoutMs: 2000 },
       readGitBranch: (cwd) => {
         branchReads.push(cwd);
+        if (throwOnRead) return Promise.reject(new Error('git exploded'));
         return Promise.resolve(currentBranch);
       },
     });
@@ -672,7 +675,12 @@ describe('daemon: adopted session branch (branch-visibility T2)', () => {
     await start;
   }
 
-  /** Deterministic barrier: an echo round-trip drains anything the daemon already queued to send. */
+  /**
+   * Deterministic barrier: an echo round-trip drains anything the daemon already queued to send.
+   * Sound because this describe's daemon runs WITHOUT a keypair — the meta emit chain is then pure
+   * microtask, so it always lands before the echo (a macrotask) is even processed. Do not reuse
+   * under a cipher-enabled daemon: WebCrypto sealing may hop the threadpool and break the ordering.
+   */
   async function echoBarrier(): Promise<void> {
     relay.send(
       makeEnvelope({ type: 'echo', userId: USER, deviceId: DEVICE, payload: { text: 'barrier' } }),
@@ -743,6 +751,35 @@ describe('daemon: adopted session branch (branch-visibility T2)', () => {
       ).payload,
     );
     expect(changed.branch).toBe('fix/pairing');
+  });
+
+  it('a THROWING reader degrades to no branch — never an unhandled rejection', async () => {
+    // The seam's type does not promise "never rejects"; the daemon's guard must make it so.
+    currentBranch = 'main';
+    await adoptWithCwd();
+    await relay.waitForFrame(
+      (e) => e.type === 'session.meta' && (e.payload as { branch?: string }).branch === 'main',
+    );
+    throwOnRead = true;
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'reader breaks',
+    });
+    await echoBarrier();
+    // Still alive and serving (the rejection was contained); the next healthy read works again.
+    throwOnRead = false;
+    currentBranch = 'fix/after-crash';
+    await hookRpc(socketPath, {
+      hook_event_name: 'Notification',
+      session_id: CLAUDE_SESSION,
+      message: 'reader healed',
+    });
+    await relay.waitForFrame(
+      (e) =>
+        e.type === 'session.meta' &&
+        (e.payload as { branch?: string }).branch === 'fix/after-crash',
+    );
   });
 
   it('clears the branch when the workspace stops resolving to one (known → unknown)', async () => {
