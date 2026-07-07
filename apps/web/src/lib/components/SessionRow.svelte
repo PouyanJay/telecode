@@ -208,9 +208,6 @@
     .titlecell {
       grid-area: title;
     }
-    .title {
-      white-space: normal;
-    }
     .chev {
       display: none;
     }
