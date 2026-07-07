@@ -73,6 +73,13 @@ test('launch from the dashboard, stream on the session view, approve the gated t
   await expect(page.getByText('APPROVED')).toBeVisible();
   await expect(page.getByText('Finished')).toBeVisible();
   await expect(page.getByLabel('Session details').getByText('COMPLETED')).toBeVisible();
+
+  // Branch visibility (Phase A): the sealed identity's branch shows in the rail's SESSION facts and
+  // in the header meta line — mono, real value from the (fake) daemon's worktree naming.
+  const rail = page.getByLabel('Session details');
+  await expect(rail.getByText('Branch', { exact: true })).toBeVisible();
+  await expect(rail.getByText(/^telecode\/[0-9a-f-]{36}$/)).toBeVisible();
+  await expect(page.locator('header.shead').getByText(/telecode\/[0-9a-f-]{6}/)).toBeVisible();
 });
 
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {

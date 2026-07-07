@@ -1505,6 +1505,7 @@ describe('daemon: adopted session survives a restart without a duplicate card (s
         title: '<local-command-caveat>Caveat: the messages below were generated…',
         titleSource: 'derived',
         cwd: '/repo',
+        branch: 'feature/persisted', // restart persistence variant: the branch rides the same record
       },
       origin: 'external',
       claudeSessionId: CLAUDE_SESSION,
@@ -1536,6 +1537,7 @@ describe('daemon: adopted session survives a restart without a duplicate card (s
     expect(meta.title).toBe('polish the landing page hero and ship it to production…');
     expect(meta.titleSource).toBe('derived');
     expect(meta.cwd).toBe('/repo'); // the rest of the restored identity is preserved
+    expect(meta.branch).toBe('feature/persisted'); // …including the branch (survives restarts)
 
     // And the correction is persisted — the next restart re-derives nothing (no re-emit loop).
     await vi.waitFor(
