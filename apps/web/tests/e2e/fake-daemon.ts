@@ -171,7 +171,12 @@ interface SessionRecord {
 }
 const records = new Map<string, SessionRecord>();
 // Resume-as-new continuations awaiting their relay `session.chained` ACK, by announce clientRef (T8).
-const pendingResumes = new Map<string, { prompt: string; browserRef?: string }>();
+// `branchName`/`baseBranch` (branch-actions T5) mirror the real daemon's fork-onto-branch: the child's
+// meta reports the cut branch (chosen name, else a slug from the base) instead of inheriting.
+const pendingResumes = new Map<
+  string,
+  { prompt: string; browserRef?: string; baseBranch?: string; branchName?: string }
+>();
 
 function recordFor(sessionId: string): SessionRecord {
   let record = records.get(sessionId);
@@ -330,7 +335,22 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
         pendingResume.browserRef !== undefined ? { clientRef: pendingResume.browserRef } : {},
         sid,
       );
-      send('session.meta', { title: pendingResume.prompt, titleSource: 'derived' }, sid);
+      // Fork onto a chosen branch (T5): the child's identity reports ITS cut branch, mirroring
+      // the real daemon (chosen name wins; a bare base gets the deterministic fake slug).
+      const forkBranch =
+        pendingResume.branchName ??
+        (pendingResume.baseBranch !== undefined
+          ? `telecode/fork-of-${pendingResume.baseBranch}`
+          : undefined);
+      send(
+        'session.meta',
+        {
+          title: pendingResume.prompt,
+          titleSource: 'derived',
+          ...(forkBranch !== undefined ? { branch: forkBranch } : {}),
+        },
+        sid,
+      );
       rec.transcript.push({ kind: 'message', text: 'Picking up where we left off' });
       send('agent.message', { text: 'Picking up where we left off' }, sid);
       rec.status = 'done';
@@ -445,6 +465,8 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     pendingResumes.set(ref, {
       prompt: resume.data.prompt,
       ...(resume.data.clientRef !== undefined ? { browserRef: resume.data.clientRef } : {}),
+      ...(resume.data.baseBranch !== undefined ? { baseBranch: resume.data.baseBranch } : {}),
+      ...(resume.data.branchName !== undefined ? { branchName: resume.data.branchName } : {}),
     });
     send('session.chained', { clientRef: ref, parentSessionId: sid });
     return;

@@ -119,6 +119,14 @@ export type SessionLaunchPayload = z.infer<typeof sessionLaunchPayloadSchema>;
 export const sessionResumeNewPayloadSchema = z.object({
   prompt: z.string().min(1),
   clientRef: z.string().min(1).optional(),
+  /**
+   * Fork onto a chosen branch (branch-actions T5): cut the CHILD a fresh worktree from this base
+   * (default: the parent's own branch, so the fork continues from the parent's code state) with
+   * this name (default: the telecode auto-name). Omitting BOTH keeps the pre-T5 behavior — the
+   * child inherits the parent's worktree. Validated like the launch's fields (they reach git argv).
+   */
+  baseBranch: gitBranchNameSchema.optional(),
+  branchName: gitBranchNameSchema.optional(),
 });
 export type SessionResumeNewPayload = z.infer<typeof sessionResumeNewPayloadSchema>;
 

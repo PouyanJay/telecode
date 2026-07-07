@@ -1341,9 +1341,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * logged). Sealed like a launch (box-sealed to the daemon) — never under the parent's content key,
    * which a needs_restart parent may no longer have anywhere (AD-17).
    */
-  async function unsealResumeNewRequest(
-    envelope: Envelope,
-  ): Promise<{ parentId: string; prompt: string; clientRef?: string } | undefined> {
+  async function unsealResumeNewRequest(envelope: Envelope): Promise<
+    | {
+        parentId: string;
+        prompt: string;
+        clientRef?: string;
+        baseBranch?: string;
+        branchName?: string;
+      }
+    | undefined
+  > {
     let rawPayload: unknown = envelope.payload;
     if (cipher.enabled && envelope.sender_public_key !== undefined) {
       try {
@@ -1368,6 +1375,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
       parentId: envelope.session_id,
       prompt: parsed.data.prompt,
       ...(parsed.data.clientRef !== undefined ? { clientRef: parsed.data.clientRef } : {}),
+      ...(parsed.data.baseBranch !== undefined ? { baseBranch: parsed.data.baseBranch } : {}),
+      ...(parsed.data.branchName !== undefined ? { branchName: parsed.data.branchName } : {}),
     };
   }
 
@@ -1457,23 +1466,27 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return;
     }
     const permissionMode = parent?.permissionMode ?? 'default';
-    const cwd = sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd;
+    const inheritedCwd = sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd;
     // The child runs where the parent ran, so it also IS the parent's repo and branch — a worktree
     // cwd alone can't say so (it ends in the parent's session id, not the repo or branch name).
     const repo = parent?.meta?.repo;
     const branch = parent?.meta?.branch;
+    // Fork onto a chosen branch (branch-actions T5): either field means the child gets its OWN
+    // worktree instead of inheriting the parent's — cwd/branch then come from the cut, not the
+    // parent, so they are deliberately left out of the minting patch (no wrong-value flash).
+    const wantsOwnWorktree = request.baseBranch !== undefined || request.branchName !== undefined;
     const minted = await mintChainedChild({
       parentSessionId: parentId,
       permissionMode,
       metaPatch: {
         ...resolveLaunchTitle(undefined, prompt),
-        ...(cwd !== undefined ? { cwd } : {}),
+        ...(inheritedCwd !== undefined && !wantsOwnWorktree ? { cwd: inheritedCwd } : {}),
         ...(repo !== undefined ? { repo } : {}),
-        ...(branch !== undefined ? { branch } : {}),
+        ...(branch !== undefined && !wantsOwnWorktree ? { branch } : {}),
         permissionMode,
       },
       firstTurnText: prompt,
-      ...(cwd !== undefined ? { cwd } : {}),
+      ...(inheritedCwd !== undefined && !wantsOwnWorktree ? { cwd: inheritedCwd } : {}),
       ...(request.clientRef !== undefined ? { startedClientRef: request.clientRef } : {}),
       // The acting browser must decrypt the started frame's clientRef to pair + navigate — deliver
       // the child's key to the pubkey the (sealed) request announced.
@@ -1482,6 +1495,20 @@ export function createDaemon(options: DaemonOptions): Daemon {
         : {}),
     });
     if (!minted) return;
+    let cwd = inheritedCwd;
+    if (wantsOwnWorktree) {
+      const forkCwd = await prepareForkWorkspace({
+        childId: minted.childId,
+        source: minted.source,
+        repoPath: parent?.repoPath,
+        // The default base is the parent's OWN branch — the fork continues its code state.
+        baseBranch: request.baseBranch ?? branch,
+        branchName: request.branchName,
+        prompt,
+      });
+      if (forkCwd === undefined) return; // the child already failed cleanly
+      cwd = forkCwd;
+    }
     // The resume id survives on the record for launched AND adopted parents (T4); fall back to the
     // in-memory map. Absent → fresh launch, still linked.
     const resume = parent?.claudeSessionId ?? sdkSessions.get(parentId);
@@ -1499,6 +1526,61 @@ export function createDaemon(options: DaemonOptions): Daemon {
       // A fork that can't actually resume falls back to a fresh run seeded with the same prompt.
       ...(resume !== undefined ? { resume, forkSession: true, resumeFallbackPrompt: prompt } : {}),
     });
+  }
+
+  /**
+   * Cut a resume-as-new child its OWN worktree (branch-actions T5): from the requested base
+   * (default: the parent's branch), with the requested name (default: the auto slug). Returns the
+   * child's cwd, or `undefined` after failing the child cleanly — a minted child must never sit
+   * at `running` with a workspace it doesn't have (same contract as a launch's prepareWorkspace).
+   */
+  async function prepareForkWorkspace(params: {
+    childId: string;
+    source: Envelope;
+    repoPath: string | undefined;
+    baseBranch: string | undefined;
+    branchName: string | undefined;
+    prompt: string;
+  }): Promise<string | undefined> {
+    const failChild = (message: string): undefined => {
+      setStatus(params.childId, 'error');
+      sendForSession(params.source, 'session.ended', { status: 'error', error: message });
+      return undefined;
+    };
+    if (!worktreeManager || params.repoPath === undefined) {
+      // No repo to cut from (a parent this daemon only half-remembers, or no worktree manager).
+      return failChild('cannot fork onto a branch: the original repo is not available here');
+    }
+    try {
+      const worktree = await worktreeManager.ensureWorktree(params.childId, params.repoPath, {
+        ...(params.baseBranch !== undefined ? { baseBranch: params.baseBranch } : {}),
+        branchName: params.branchName ?? deriveBranchName(params.prompt, params.childId),
+      });
+      const rec = recordFor(params.childId);
+      sessionCwds.set(params.childId, worktree.path);
+      rec.cwd = worktree.path;
+      rec.repoPath = params.repoPath;
+      if (worktree.baseBranch !== undefined) rec.baseBranch = worktree.baseBranch;
+      emitSessionMeta(params.source, { cwd: worktree.path, branch: worktree.branch });
+      emitSessionChanges(params.source);
+      return worktree.path;
+    } catch (err) {
+      // Coded worktree errors are user-fixable and safe verbatim; anything else stays generic
+      // (git stderr can carry local paths). Log the shape only, never the branch names.
+      log.warn(
+        {
+          deviceId: options.deviceId,
+          sessionId: params.childId,
+          errName: err instanceof Error ? err.name : 'unknown',
+        },
+        'daemon: failed to prepare fork workspace',
+      );
+      return failChild(
+        err instanceof WorktreeError && err.code !== undefined
+          ? err.message
+          : 'failed to prepare session workspace',
+      );
+    }
   }
 
   async function handleFrame(raw: Buffer, onReady: () => void): Promise<void> {

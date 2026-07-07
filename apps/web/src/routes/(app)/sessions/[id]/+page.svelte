@@ -14,6 +14,7 @@
   import SegmentDivider from '$lib/components/SegmentDivider.svelte';
   import SessionHeader from '$lib/components/SessionHeader.svelte';
   import SessionNotice from '$lib/components/SessionNotice.svelte';
+  import ForkBranchPicker from '$lib/components/ForkBranchPicker.svelte';
   import SessionRail from '$lib/components/SessionRail.svelte';
   import Transcript from '$lib/components/Transcript.svelte';
   import { initialSessionState, type SessionState } from '$lib/session';
@@ -289,12 +290,20 @@
   const resumeNotice =
     'This session can’t continue here. Your next message starts a new linked session ' +
     'that picks up where it left off.';
+  // Fork onto a chosen branch (branch-actions T5): the picker's current choice + validity. An
+  // invalid custom name BLOCKS the send with an honest story — never a silent fallback.
+  let forkBranch = $state<{ baseBranch: string; branchName?: string } | undefined>(undefined);
+  let forkBranchValid = $state(true);
 
   async function submitResumeAsNew(text: string): Promise<void> {
+    if (!forkBranchValid) {
+      resumeError = 'Fix the new branch name first — it isn’t a valid git branch name.';
+      return;
+    }
     resumeError = null;
     resuming = true;
     try {
-      const childId = await resumeAsNew(sessionId, text);
+      const childId = await resumeAsNew(sessionId, text, forkBranch);
       await goto(`/sessions/${childId}`, { invalidateAll: true });
     } catch (err) {
       resumeError = err instanceof Error ? err.message : 'Could not resume. Please try again.';
@@ -470,6 +479,16 @@
             <!-- Resume-as-new (T8): the honest affordance for a session that CANNOT continue in
                  place. Standing (no dismiss) — it reads for as long as the state does. -->
             <SessionNotice tone="warning" message={resumeNotice} />
+            <!-- Fork onto a chosen branch (branch-actions T5): off = inherit the parent worktree. -->
+            <ForkBranchPicker
+              {sessionId}
+              parentBranch={$sessionMetas.get(sessionId)?.branch}
+              disabled={resuming}
+              onchange={(choice, valid) => {
+                forkBranch = choice;
+                forkBranchValid = valid;
+              }}
+            />
           {/if}
           {#if resumeError}
             <SessionNotice
@@ -484,6 +503,9 @@
             placeholder={resumeMode
               ? 'Continue this work in a new session…'
               : 'Send a follow-up instruction…'}
+            disabledReason={resumeMode && !forkBranchValid
+              ? 'Fix the new branch name first — it isn’t a valid git branch name.'
+              : undefined}
             onsend={submitPrompt}
           />
         </div>

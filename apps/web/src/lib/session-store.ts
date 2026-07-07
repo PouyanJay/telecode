@@ -710,8 +710,14 @@ export function launch(payload: SessionLaunchPayload, deviceId?: string): Promis
  * Continue a TERMINAL session as a NEW linked one (ux Phase 6 T8): sends `session.resume_new` on the
  * PARENT's channel; the daemon forks (or fresh-launches) a `session.chained` child whose
  * `session.started` echoes our clientRef — resolves with the child id so the caller can navigate.
+ * With a branch choice (branch-actions T5) the child gets its OWN worktree, cut from `baseBranch`
+ * (default: the parent's branch) with `branchName` (default: the auto slug).
  */
-export function resumeAsNew(parentSessionId: string, prompt: string): Promise<string> {
+export function resumeAsNew(
+  parentSessionId: string,
+  prompt: string,
+  branch?: { baseBranch?: string; branchName?: string },
+): Promise<string> {
   const deviceId = routedDeviceId(parentSessionId);
   const conn = deviceId !== undefined ? connections.get(deviceId) : undefined;
   if (deviceId === undefined || !conn) {
@@ -723,7 +729,12 @@ export function resumeAsNew(parentSessionId: string, prompt: string): Promise<st
     deviceId,
     'Resume timed out — is the device online?',
   );
-  conn.resumeNew(parentSessionId, { prompt, clientRef });
+  conn.resumeNew(parentSessionId, {
+    prompt,
+    clientRef,
+    ...(branch?.baseBranch !== undefined ? { baseBranch: branch.baseBranch } : {}),
+    ...(branch?.branchName !== undefined ? { branchName: branch.branchName } : {}),
+  });
   return started;
 }
 
