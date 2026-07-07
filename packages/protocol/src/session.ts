@@ -309,6 +309,12 @@ export const sessionMetaPayloadSchema = z.object({
    * optional: old peers simply never see it.
    */
   repo: z.string().min(1).max(512).optional(),
+  /**
+   * The git branch the session's workspace is on — the worktree branch for a launched session, the
+   * cwd's current branch for an adopted one (live-refreshed). Workspace content: sealed-only, like
+   * everything here. Additive optional: old peers simply never see it.
+   */
+  branch: z.string().min(1).max(256).optional(),
   model: z.string().min(1).max(128).optional(),
   permissionMode: permissionModeSchema.optional(),
   ts: entryTimestampSchema.optional(),

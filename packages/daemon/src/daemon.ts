@@ -1061,7 +1061,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
   async function prepareWorkspace(
     envelope: Envelope,
     launch: SessionLaunchPayload,
-  ): Promise<{ cwd?: string; repo?: string } | typeof FAILED> {
+  ): Promise<{ cwd?: string; repo?: string; branch?: string } | typeof FAILED> {
     const sessionId = envelope.session_id;
     if (!worktreeManager || sessionId === undefined) return {};
     try {
@@ -1080,7 +1080,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         },
         'daemon: session workspace ready',
       );
-      return { cwd: worktree.path, repo: resolved.repo };
+      return { cwd: worktree.path, repo: resolved.repo, branch: worktree.branch };
     } catch (err) {
       log.error(
         { err, deviceId: options.deviceId, sessionId },
@@ -1156,6 +1156,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         ...resolveLaunchTitle(launch.data.title, launch.data.prompt),
         ...(cwd !== undefined ? { cwd } : {}),
         ...(workspace.repo !== undefined ? { repo: workspace.repo } : {}),
+        ...(workspace.branch !== undefined ? { branch: workspace.branch } : {}),
         permissionMode: recordFor(envelope.session_id).permissionMode,
       });
     }

@@ -137,6 +137,8 @@ describe('daemon session.meta on launch (session-identity T1)', () => {
     // The worktree cwd ends in the session id, so the repo identity travels separately: the local
     // checkout's folder name here (the card's repo tag must never be a UUID).
     expect(meta.repo).toBe('app');
+    // Which line of work: the session's worktree branch rides the same sealed identity (Phase A).
+    expect(meta.branch).toBe(`telecode/${ids.sessionId}`);
   });
 
   it('carries owner/name as the repo identity for a cloned launch repo', async () => {

@@ -21,10 +21,12 @@ describe('sessionMetaPayloadSchema', () => {
       cwd: '/Users/me/dev/app',
       model: 'claude-sonnet-5',
       permissionMode: 'default',
+      branch: 'telecode/fix-login-8f2a',
       ts: 1_751_700_000_000,
     });
     expect(parsed.title).toBe('fix the login bug');
     expect(parsed.titleSource).toBe('derived');
+    expect(parsed.branch).toBe('telecode/fix-login-8f2a');
   });
 
   it('accepts a partial update (every field optional)', () => {
@@ -42,6 +44,8 @@ describe('sessionMetaPayloadSchema', () => {
     expect(sessionMetaPayloadSchema.safeParse({ permissionMode: 'yolo' }).success).toBe(false);
     expect(sessionMetaPayloadSchema.safeParse({ cwd: 'x'.repeat(1025) }).success).toBe(false);
     expect(sessionMetaPayloadSchema.safeParse({ ts: -1 }).success).toBe(false);
+    expect(sessionMetaPayloadSchema.safeParse({ branch: '' }).success).toBe(false);
+    expect(sessionMetaPayloadSchema.safeParse({ branch: 'x'.repeat(257) }).success).toBe(false);
   });
 
   it('round-trips sealed under a content key inside a valid envelope', async () => {
