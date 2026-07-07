@@ -2,6 +2,7 @@
   import type { SessionChangesPayload, SessionMetaPayload } from '@telecode/protocol';
 
   import BranchSwitcher from '$lib/components/BranchSwitcher.svelte';
+  import PushPanel from '$lib/components/PushPanel.svelte';
   import { changesView } from '$lib/changes';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionState } from '$lib/session';
@@ -21,6 +22,7 @@
     meta,
     changes,
     canSwitchBranch = false,
+    canPushBranch = false,
   }: {
     session: SessionState;
     deviceName: string | null;
@@ -31,6 +33,8 @@
     changes?: SessionChangesPayload | undefined;
     /** Between-turns switch offer (Phase C T4): launched + settled + device reachable. */
     canSwitchBranch?: boolean;
+    /** Open-PR offer (Phase C T6): launched + between turns + device reachable. */
+    canPushBranch?: boolean;
   } = $props();
 
   const display = $derived(SESSION_DISPLAY[session.status]);
@@ -114,6 +118,9 @@
       {#if view.pending > 0}
         <p class="pending mono">{view.pending} pending · not yet written to disk</p>
       {/if}
+    {/if}
+    {#if canPushBranch && session.sessionId}
+      <PushPanel sessionId={session.sessionId} />
     {/if}
   </section>
 

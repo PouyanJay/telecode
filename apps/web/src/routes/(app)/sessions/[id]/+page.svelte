@@ -155,6 +155,16 @@
       connected,
   );
 
+  // Open PR (branch-actions T6): pushing shares the switch's between-turns shape — launched with a
+  // known branch, never mid-turn — plus the same liveness facts. Terminal-but-followable included.
+  const pushOffered = $derived(
+    (registryRow?.origin ?? 'launched') === 'launched' &&
+      !isBusy &&
+      $sessionMetas.get(sessionId)?.branch !== undefined &&
+      sessionDeviceOnline &&
+      connected,
+  );
+
   // Worktree reaping (branch-actions T3): deleting a LAUNCHED session can also remove its worktree
   // + branch — but only its own daemon can do that, so the offer exists only while it's reachable.
   // Adopted sessions never get the offer: their checkout is the user's own, not telecode's.
@@ -520,6 +530,7 @@
         meta={$sessionMetas.get(sessionId)}
         changes={$sessionChanges.get(sessionId)}
         canSwitchBranch={switchOffered}
+        canPushBranch={pushOffered}
       />
     {/if}
   </div>

@@ -118,6 +118,11 @@ export interface RelayConnection {
    */
   switchBranch(sessionId: string, branch: string): void;
   /**
+   * Push the session branch to origin with the laptop's own git credentials (branch-actions T6).
+   * Sealed under the session content key; the daemon settles it with `session.push.state`.
+   */
+  pushBranch(sessionId: string): void;
+  /**
    * Ask the daemon to remove a launched session's worktree + branch (the delete flow's opt-in,
    * branch-actions T3). Box-sealed like `adopt.config`; the envelope carries the session id as
    * routing metadata so an offline device answers with an honest `relay.error`. The sealed reply
@@ -464,6 +469,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     },
     switchBranch(sessionId: string, branch: string): void {
       enqueueSend(() => sessionFrame('session.branch.switch', sessionId, { branch }));
+    },
+    pushBranch(sessionId: string): void {
+      enqueueSend(() => sessionFrame('session.push', sessionId, {}));
     },
     sendWorkspaceReap(sessionId: string): void {
       enqueueSend(async () => {

@@ -48,6 +48,8 @@ import {
   type WorkspaceReapStatePayload,
   sessionBranchSwitchPayloadSchema,
   type SessionBranchStatePayload,
+  sessionPushRequestPayloadSchema,
+  type SessionPushStatePayload,
 } from '@telecode/protocol';
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
@@ -72,6 +74,7 @@ import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import { type BranchReader } from './adopt/git-branch';
 import { type BranchLister } from './sessions/branch-list';
+import { parseGithubRemote, type BranchPusher } from './sessions/branch-push';
 import { type BranchSwitcher } from './sessions/branch-switcher';
 import { type WorkspaceChangesReader } from './sessions/workspace-changes';
 import { type WorkspaceReaper } from './sessions/workspace-reaper';
@@ -237,6 +240,12 @@ export interface DaemonOptions {
    * `createGitBranchSwitcher`); omitted → every switch answers `not-launched`.
    */
   readonly switchBranch?: BranchSwitcher;
+  /**
+   * Pushes a launched session's branch to origin with the laptop's own git credentials
+   * (`session.push`, branch-actions T6). Injected at the composition root (real
+   * `createGitBranchPusher`); omitted → every push answers `not-launched`.
+   */
+  readonly pushBranch?: BranchPusher;
   readonly logger?: Logger;
 }
 
@@ -1796,6 +1805,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
         await handleBranchSwitch(envelope);
         return;
       }
+      case 'session.push': {
+        await handleSessionPush(envelope);
+        return;
+      }
       case 'viewer.presence': {
         // Relay tells us whether any browser is watching this channel (the mirror of device.presence). We
         // hold it so the adopted-session gate only blocks for a remote approval while an operator is present.
@@ -2247,6 +2260,74 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // On success `rec.baseBranch` is deliberately untouched (AD-6): the launch base stays the
     // Changes panel's diff anchor, and the panel's "vs <base>" label keeps that honest.
     return result.ok ? { ok: true, branch } : result;
+  }
+
+  /**
+   * Answer `session.push` (branch-actions T6): push the session branch to origin with the
+   * LAPTOP'S OWN git credentials — telecode adds none, and the relay's GitHub token never
+   * travels. The sealed reply carries what the BROWSER needs to open the PR page itself
+   * (branch, compare-base name, owner/name for a github.com origin).
+   */
+  async function handleSessionPush(envelope: Envelope): Promise<void> {
+    const sessionId = envelope.session_id;
+    if (sessionId === undefined) return;
+    const parsed = sessionPushRequestPayloadSchema.safeParse(await readSessionPayload(envelope));
+    if (!parsed.success) {
+      log.warn({ deviceId: options.deviceId, sessionId }, 'daemon: dropped invalid session.push');
+      return;
+    }
+    const state = await pushOutcome(sessionId);
+    // Outcome code only — branch names and remote URLs are sealed workspace content, never logged.
+    log.info(
+      {
+        deviceId: options.deviceId,
+        sessionId,
+        ok: state.ok,
+        ...(state.ok ? {} : { code: state.code }),
+      },
+      'daemon: session push answered',
+    );
+    sendForSession(envelope, 'session.push.state', state);
+  }
+
+  /** The push decision for one session — every refusal is a coded, retellable story. */
+  async function pushOutcome(sessionId: string): Promise<SessionPushStatePayload> {
+    const rec = sessionRecords.get(sessionId);
+    const cwd = sessionCwds.get(sessionId) ?? rec?.cwd;
+    const branch = rec?.meta?.branch;
+    if (
+      rec === undefined ||
+      isAdoptedSession(rec) || // adopted checkouts publish on the user's own terms, never telecode's
+      options.pushBranch === undefined ||
+      cwd === undefined ||
+      rec.repoPath === undefined ||
+      branch === undefined
+    ) {
+      return { ok: false, code: 'not-launched' };
+    }
+    // Never publish a state the agent is mid-way through writing.
+    if (activeRuns.has(sessionId)) return { ok: false, code: 'mid-turn' };
+    const result = await options.pushBranch(cwd, branch);
+    if (!result.ok) return result;
+    const githubRepo = parseGithubRemote(result.remoteUrl);
+    const base = compareBaseName(rec.baseBranch);
+    return {
+      ok: true,
+      branch,
+      ...(base !== undefined ? { base } : {}),
+      ...(githubRepo !== undefined ? { githubRepo } : {}),
+    };
+  }
+
+  /**
+   * The base NAME a compare URL wants: the recorded cut ref with any remote prefix stripped —
+   * and nothing at all when the base is a bare commit id (a detached-HEAD cut has no name a
+   * compare page could use; the browser then links the plain new-PR page instead).
+   */
+  function compareBaseName(baseRef: string | undefined): string | undefined {
+    if (baseRef === undefined) return undefined;
+    const name = baseRef.replace(/^origin\//, '');
+    return /^[0-9a-f]{7,40}$/i.test(name) ? undefined : name;
   }
 
   /**

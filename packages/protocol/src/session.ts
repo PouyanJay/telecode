@@ -312,6 +312,46 @@ export const sessionBranchStatePayloadSchema = z.union([
 ]);
 export type SessionBranchStatePayload = z.infer<typeof sessionBranchStatePayloadSchema>;
 
+/** Payload for `session.push` (web → daemon, branch-actions T6): push the session branch to origin. */
+export const sessionPushRequestPayloadSchema = z.object({});
+export type SessionPushRequestPayload = z.infer<typeof sessionPushRequestPayloadSchema>;
+
+/**
+ * Why a push was refused: not a telecode-launched worktree session (`not-launched`), a turn is in
+ * flight (`mid-turn` — never publish a state the agent is mid-way through writing), the repo has no
+ * `origin` (`no-remote`), the laptop's own git credentials were refused (`auth`), the remote
+ * refused the ref (`rejected` — non-fast-forward), the push ran out of time (`timeout`), or git
+ * failed some other way (`failed` — generic; stderr can carry local paths and never travels).
+ */
+export const PUSH_FAILURE_CODES = [
+  'not-launched',
+  'mid-turn',
+  'no-remote',
+  'auth',
+  'rejected',
+  'timeout',
+  'failed',
+] as const;
+export const pushFailureCodeSchema = z.enum(PUSH_FAILURE_CODES);
+export type PushFailureCode = z.infer<typeof pushFailureCodeSchema>;
+
+/**
+ * Payload for `session.push.state` (daemon → web, sealed under the session content key): how the
+ * push settled. Success names the pushed branch, the base NAME a compare URL wants (remote prefix
+ * stripped; absent when the base is a bare commit id), and `owner/name` when origin is a
+ * github.com remote — from these the BROWSER builds and opens the PR page itself.
+ */
+export const sessionPushStatePayloadSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    branch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS),
+    base: z.string().min(1).max(MAX_BRANCH_NAME_CHARS).optional(),
+    githubRepo: z.string().min(1).max(256).optional(),
+  }),
+  z.object({ ok: z.literal(false), code: pushFailureCodeSchema }),
+]);
+export type SessionPushStatePayload = z.infer<typeof sessionPushStatePayloadSchema>;
+
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [
   'starting',

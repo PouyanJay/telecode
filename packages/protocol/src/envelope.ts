@@ -72,6 +72,14 @@ export const MESSAGE_TYPES = [
   // settles the ask (ok + the branch, or a coded refusal — mid-turn, dirty, …).
   'session.branch.switch',
   'session.branch.state',
+  // Open PR, push leg (branch-actions T6), session-scoped and sealed like the switch: the daemon
+  // pushes the session branch to origin WITH THE LAPTOP'S OWN GIT CREDENTIALS (the relay's GitHub
+  // token never travels, per the plan) and answers `session.push.state` — ok with the pushed
+  // branch/base (+ owner/name when origin is a github.com remote, so the BROWSER can open the PR
+  // page under the user's own signed-in account), or a coded refusal. No GitHub API call happens
+  // anywhere outside the user's browser.
+  'session.push',
+  'session.push.state',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).

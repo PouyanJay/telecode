@@ -11,7 +11,9 @@ import {
   type PermissionDecisionPayload,
   type QuestionAnswerPayload,
   sessionBranchStatePayloadSchema,
+  sessionPushStatePayloadSchema,
   type BranchSwitchFailureCode,
+  type PushFailureCode,
   type SessionControlAction,
   type SessionLaunchPayload,
   type SessionRenameBody,
@@ -262,6 +264,10 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
     settleBranchSwitchFrame(envelope);
     return;
   }
+  if (envelope.type === 'session.push.state') {
+    settlePushFrame(envelope);
+    return;
+  }
   if (envelope.type === 'relay.error' && settleOfflineDeviceAsk(envelope)) {
     return;
   }
@@ -285,6 +291,17 @@ function settleBranchSwitchFrame(envelope: Envelope): void {
   );
 }
 
+/** The push verdict (Phase C T6): settles the asking control with the daemon's own answer. */
+function settlePushFrame(envelope: Envelope): void {
+  if (envelope.session_id === undefined) return;
+  const parsed = sessionPushStatePayloadSchema.safeParse(envelope.payload);
+  if (!parsed.success) return;
+  pushAsks.settle(
+    envelope.session_id,
+    parsed.data.ok ? parsed.data : { ok: false, reason: parsed.data.code },
+  );
+}
+
 /**
  * A device-ask that reached an offline device (Phase C): settle the waiting flow honestly instead
  * of letting it time out. Returns whether the error was consumed — every other `relay.error`
@@ -300,6 +317,10 @@ function settleOfflineDeviceAsk(envelope: Envelope): boolean {
   }
   if (parsed.data.regarding === 'session.branch.switch') {
     switchAsks.settle(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+    return true;
+  }
+  if (parsed.data.regarding === 'session.push') {
+    pushAsks.settle(envelope.session_id, { ok: false, reason: 'daemon-offline' });
     return true;
   }
   return false;
@@ -925,6 +946,8 @@ export type BranchSwitchOutcome =
 type UnstartableOutcome = { ok: false; reason: 'no-connection' };
 
 const DEVICE_RPC_TIMEOUT_MS = 15_000;
+// A push crosses the network (the daemon's own git timeout is 30s) — give it headroom on top.
+const PUSH_RPC_TIMEOUT_MS = 45_000;
 
 /**
  * One in-flight ask per session, settled by exactly one of: the daemon's sealed verdict, the
@@ -933,7 +956,10 @@ const DEVICE_RPC_TIMEOUT_MS = 15_000;
  * ask for the same session SUPERSEDES the first (settled `no-connection`, timer cleared) so a
  * stale timeout can never fire into the new ask's slot.
  */
-function createPendingAsks<TOutcome extends { ok: boolean }>(timeoutOutcome: TOutcome) {
+function createPendingAsks<TOutcome extends { ok: boolean }>(
+  timeoutOutcome: TOutcome,
+  timeoutMs: number = DEVICE_RPC_TIMEOUT_MS,
+) {
   const pending = new Map<
     string,
     {
@@ -953,7 +979,7 @@ function createPendingAsks<TOutcome extends { ok: boolean }>(timeoutOutcome: TOu
   function start(sessionId: string, send: () => void): Promise<TOutcome | UnstartableOutcome> {
     settle(sessionId, { ok: false, reason: 'no-connection' }); // supersede any stale ask
     return new Promise((resolve) => {
-      const timer = setTimeout(() => settle(sessionId, timeoutOutcome), DEVICE_RPC_TIMEOUT_MS);
+      const timer = setTimeout(() => settle(sessionId, timeoutOutcome), timeoutMs);
       pending.set(sessionId, { resolve, timer });
       send();
     });
@@ -995,6 +1021,30 @@ export function switchSessionBranch(
   const connection = connectionFor(sessionId);
   if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
   return switchAsks.start(sessionId, () => connection.switchBranch(sessionId, branch));
+}
+
+/** How a push request settled (branch-actions T6) — every failure is a retellable reason. */
+export type SessionPushOutcome =
+  | { ok: true; branch: string; base?: string; githubRepo?: string }
+  | {
+      ok: false;
+      reason: PushFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
+    };
+
+const pushAsks = createPendingAsks<SessionPushOutcome>(
+  { ok: false, reason: 'timeout' },
+  PUSH_RPC_TIMEOUT_MS,
+);
+
+/**
+ * Ask the session's device to push its branch to origin (the Open-PR flow's push leg,
+ * branch-actions T6). The push runs with the LAPTOP'S own git credentials; the resolved outcome
+ * carries what the browser needs to build the PR link itself.
+ */
+export function pushSessionBranch(sessionId: string): Promise<SessionPushOutcome> {
+  const connection = connectionFor(sessionId);
+  if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
+  return pushAsks.start(sessionId, () => connection.pushBranch(sessionId));
 }
 
 /** Ask the session's device for its repo's branch list (T4); lands in {@link sessionBranches}. */
@@ -1095,6 +1145,7 @@ export function disconnect(): void {
   // Session-keyed device asks settle now (no-connection) — nothing waits into the signed-out void.
   reapAsks.drain();
   switchAsks.drain();
+  pushAsks.drain();
   for (const connection of connections.values()) connection.close();
   connections.clear();
   deviceChannelMap.set(new Map());

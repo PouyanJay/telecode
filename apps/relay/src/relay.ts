@@ -191,6 +191,8 @@ const UNDELIVERABLE_REPLY_TYPES: ReadonlySet<string> = new Set([
   'workspace.reap',
   // The between-turns branch switch (Phase C T4): session-scoped like session.control.
   'session.branch.switch',
+  // The Open-PR push leg (Phase C T6): a push clicked into an offline device un-spins honestly.
+  'session.push',
 ]);
 
 /**

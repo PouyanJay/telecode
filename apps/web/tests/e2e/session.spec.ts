@@ -160,6 +160,38 @@ test('a refused switch tells its coded story inline and changes nothing (T4)', a
   await expect(rail.getByText(/^telecode\/[0-9a-f-]{36}$/)).toBeVisible();
 });
 
+test('push for a PR: the rail pushes, then links the GitHub compare page (T6)', async ({
+  page,
+}) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Prepare the pull request');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Push branch for a PR' }).click();
+
+  // The (fake) daemon pushed and named the github repo — the panel renders a REAL link the user
+  // opens in their own signed-in browser (no token anywhere outside it).
+  const link = rail.getByRole('link', { name: /Open a pull request on GitHub/ });
+  await expect(link).toBeVisible();
+  const href = await link.getAttribute('href');
+  expect(href).toMatch(/^https:\/\/github\.com\/acme\/app\/compare\/main\.\.\.telecode\//);
+  expect(href).toContain('quick_pull=1');
+});
+
+test('a refused push tells its coded story and publishes nothing (T6)', async ({ page }) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'reject the push please');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Push branch for a PR' }).click();
+  await expect(rail.getByText(/The remote refused the branch/)).toBeVisible();
+  await expect(rail.getByRole('link', { name: /Open a pull request/ })).toHaveCount(0);
+});
+
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {
   await signIn(page);
   await launchFromDashboard(page, 'Add a hello line to the README');

@@ -17,6 +17,7 @@ import {
   disconnect,
   ensureConnections,
   launch,
+  pushSessionBranch,
   reapWorkspace,
   requestAdoptConfig,
   seedSessionDevices,
@@ -48,6 +49,7 @@ interface FakeConn {
   readonly adoptConfigs: unknown[];
   readonly reaps: string[];
   readonly switches: { sessionId: string; branch: string }[];
+  readonly pushes: string[];
   closed: boolean;
   emit(envelope: Envelope): void;
   emitAdoptState(state: AdoptStatePayload): void;
@@ -69,6 +71,7 @@ function makeFakePool() {
       adoptConfigs: [],
       reaps: [],
       switches: [],
+      pushes: [],
       closed: false,
       emit: (envelope) => options.onEvent(envelope),
       emitAdoptState: (state) => options.onAdoptState?.(state),
@@ -91,6 +94,7 @@ function makeFakePool() {
       sendRepoBranchesRequest: () => undefined,
       sendWorkspaceReap: (sessionId) => conn.reaps.push(sessionId),
       switchBranch: (sessionId, branch) => conn.switches.push({ sessionId, branch }),
+      pushBranch: (sessionId) => conn.pushes.push(sessionId),
       sendAdoptConfig: (set) => conn.adoptConfigs.push(set),
       close: () => {
         conn.closed = true;
@@ -559,5 +563,87 @@ describe('switchSessionBranch (branch-actions T4)', () => {
       .get('device-a')!
       .emit(branchState('device-a', 'sess-sw-twice', { ok: true, branch: 'feat/two' }));
     await expect(second).resolves.toEqual({ ok: true, branch: 'feat/two' });
+  });
+});
+
+/**
+ * Push for a PR (branch-actions T6): the third consumer of the shared ask machinery — routed to
+ * the session's own device, settled by the daemon's sealed verdict (which carries the PR-link
+ * facts) or the honest failure stories.
+ */
+describe('pushSessionBranch (branch-actions T6)', () => {
+  function pushState(deviceId: string, sessionId: string, payload: unknown): Envelope {
+    return makeEnvelope({ type: 'session.push.state', userId, deviceId, sessionId, payload });
+  }
+
+  it('sends the push on the session own device and resolves the PR-link facts', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A, DEVICE_B], options, pool.create);
+    seedSessionDevices([{ id: 'sess-push', deviceId: 'device-a' }]);
+
+    const outcome = pushSessionBranch('sess-push');
+    const connA = pool.byDevice.get('device-a')!;
+    expect(connA.pushes).toEqual(['sess-push']);
+    expect(pool.byDevice.get('device-b')!.pushes).toEqual([]);
+
+    connA.emit(
+      pushState('device-a', 'sess-push', {
+        ok: true,
+        branch: 'telecode/fix-ab12',
+        base: 'main',
+        githubRepo: 'acme/app',
+      }),
+    );
+    await expect(outcome).resolves.toEqual({
+      ok: true,
+      branch: 'telecode/fix-ab12',
+      base: 'main',
+      githubRepo: 'acme/app',
+    });
+  });
+
+  it('resolves the daemon coded refusal as-is', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([{ id: 'sess-push-auth', deviceId: 'device-a' }]);
+
+    const outcome = pushSessionBranch('sess-push-auth');
+    pool.byDevice
+      .get('device-a')!
+      .emit(pushState('device-a', 'sess-push-auth', { ok: false, code: 'auth' }));
+    await expect(outcome).resolves.toEqual({ ok: false, reason: 'auth' });
+  });
+
+  it('resolves daemon-offline from the relay honest error and times out on silence (45s window)', async () => {
+    const pool = makeFakePool();
+    connectDevices([DEVICE_A], options, pool.create);
+    seedSessionDevices([
+      { id: 'sess-push-offline', deviceId: 'device-a' },
+      { id: 'sess-push-silent', deviceId: 'device-a' },
+    ]);
+
+    const offline = pushSessionBranch('sess-push-offline');
+    pool.byDevice.get('device-a')!.emit(
+      makeEnvelope({
+        type: 'relay.error',
+        userId,
+        deviceId: 'device-a',
+        sessionId: 'sess-push-offline',
+        payload: { code: 'device_offline', regarding: 'session.push' },
+      }),
+    );
+    await expect(offline).resolves.toEqual({ ok: false, reason: 'daemon-offline' });
+
+    const silent = pushSessionBranch('sess-push-silent');
+    // A push gets MORE time than the 15s device-RPC default — the daemon's own git timeout is 30s.
+    vi.advanceTimersByTime(15_000);
+    let settled = false;
+    void silent.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    vi.advanceTimersByTime(30_000);
+    await expect(silent).resolves.toEqual({ ok: false, reason: 'timeout' });
   });
 });

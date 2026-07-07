@@ -88,6 +88,8 @@ const DIRTY_WORKTREE_PROMPT = 'leave the worktree dirty';
 // Switch behavior (Phase C T4): a session launched with this prompt refuses every branch switch
 // with `checked-out-elsewhere` — the refusal an e2e spec can drive into the rail's inline story.
 const HELD_BRANCH_PROMPT = 'hold the branch elsewhere';
+// Push behavior (Phase C T6): a session launched with this prompt answers `rejected` to session.push.
+const REJECT_PUSH_PROMPT = 'reject the push';
 const CHAIN_PARENT_REF = 'chain-parent';
 const CHAIN_CHILD_REF = 'chain-child';
 // Overridable so the spec can use a per-run unique title — earlier runs' chains persist in the
@@ -513,6 +515,28 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     if (gate?.kind === 'permission') gate.decision = 'deny';
     rec.status = 'done';
     send('session.ended', { status: 'done' }, sid);
+    return;
+  }
+
+  // Open-PR push leg (Phase C T6): answer like the real daemon against a github.com origin —
+  // the pushed branch + base + owner/name the browser builds the PR link from. The magic-prompt
+  // session answers `rejected` so specs can drive a refusal into the panel.
+  if (envelope.type === 'session.push') {
+    const target = records.get(sid);
+    if (target === undefined) {
+      send('session.push.state', { ok: false, code: 'not-launched' }, sid);
+      return;
+    }
+    const rejected = target.transcript.some(
+      (entry) => entry.kind === 'user' && entry.text.startsWith(REJECT_PUSH_PROMPT),
+    );
+    send(
+      'session.push.state',
+      rejected
+        ? { ok: false, code: 'rejected' }
+        : { ok: true, branch: `telecode/${sid}`, base: 'main', githubRepo: 'acme/app' },
+      sid,
+    );
     return;
   }
 
