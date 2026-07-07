@@ -132,7 +132,7 @@
             <ul class="devices" role="list">
               {#each data.revokedDevices as device (device.id)}
                 <li class="row revoked-row hairline-b">
-                  <Pill label="REVOKED" tone="danger" />
+                  <span class="pillcell"><Pill label="REVOKED" tone="danger" /></span>
                   <div class="id">
                     <span class="name" title={device.name}>{device.name}</span>
                     <span class="did mono">
@@ -333,6 +333,10 @@
   .reauth-cell {
     justify-self: end;
   }
+  .pillcell {
+    display: inline-flex;
+    align-items: center;
+  }
   .reauth-help {
     grid-column: 1 / -1;
     padding: var(--space-3);
@@ -472,8 +476,33 @@
     .row {
       grid-template-columns: 10px minmax(0, 1fr) auto;
     }
+    /* The .row override above also matches .revoked-row (equal specificity, later in source) and
+       would cram the REVOKED pill into the 10px dot column, overlapping the name. Stack instead:
+       state + action first, the identity on its own full-width line. */
+    .revoked-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        'pill reauth'
+        'id   id';
+    }
+    .pillcell {
+      grid-area: pill;
+    }
+    .revoked-row .id {
+      grid-area: id;
+    }
+    .reauth-cell {
+      grid-area: reauth;
+    }
     .seen {
       display: none;
+    }
+    /* Phone tap targets: the desktop-dense 26px row buttons must reach the 44px touch floor here. */
+    .row-btn {
+      display: inline-flex;
+      align-items: center;
+      min-height: 44px;
+      padding-block: 0;
     }
     .content {
       padding: var(--space-4);
