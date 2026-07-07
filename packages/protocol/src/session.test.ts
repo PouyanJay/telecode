@@ -347,6 +347,38 @@ describe('agentNoticePayloadSchema (adopted-session notifications, Journey 3)', 
   });
 });
 
+describe('sessionLaunchPayloadSchema: branch control (branch-launch Phase B)', () => {
+  it('accepts a base branch and a new branch name', () => {
+    const parsed = sessionLaunchPayloadSchema.parse({
+      prompt: 'build it',
+      baseBranch: 'develop',
+      branchName: 'feat/login-form',
+    });
+    expect(parsed.baseBranch).toBe('develop');
+    expect(parsed.branchName).toBe('feat/login-form');
+  });
+
+  it('both are optional (pre-Phase-B launches unchanged)', () => {
+    const parsed = sessionLaunchPayloadSchema.parse({ prompt: 'build it' });
+    expect(parsed.baseBranch).toBeUndefined();
+    expect(parsed.branchName).toBeUndefined();
+  });
+
+  it.each([
+    ['-evil-flag', 'leading dash (option injection)'],
+    ['a..b', 'ref traversal'],
+    ['has space', 'whitespace'],
+    ['bad~name', 'forbidden ref char'],
+    ['trailing/', 'trailing slash'],
+    ['name.lock', 'reserved suffix'],
+    ['', 'empty'],
+  ])('rejects %s (%s)', (name) => {
+    expect(sessionLaunchPayloadSchema.safeParse({ prompt: 'x', branchName: name }).success).toBe(
+      false,
+    );
+  });
+});
+
 describe('sessionLaunchPayloadSchema: repo selection (Task 8)', () => {
   it('parses a launch carrying a repo to clone on demand', () => {
     const parsed = sessionLaunchPayloadSchema.parse({

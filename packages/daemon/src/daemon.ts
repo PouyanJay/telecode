@@ -1074,7 +1074,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
     try {
       const resolved = await resolveSessionRepo(launch);
       if (resolved === undefined) return {};
-      const worktree = await worktreeManager.ensureWorktree(sessionId, resolved.path);
+      // Launch-chosen branch control (Phase B) — validated at the wire boundary by the launch schema.
+      const worktree = await worktreeManager.ensureWorktree(sessionId, resolved.path, {
+        ...(launch.baseBranch !== undefined ? { baseBranch: launch.baseBranch } : {}),
+        ...(launch.branchName !== undefined ? { branchName: launch.branchName } : {}),
+      });
       sessionCwds.set(sessionId, worktree.path);
       recordFor(sessionId).cwd = worktree.path; // persisted so a restored follow-up reuses it (T4)
       // Log owner/name + branch only — never the clone URL or local paths (kept out of log sinks).

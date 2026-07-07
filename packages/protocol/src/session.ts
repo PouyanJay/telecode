@@ -49,11 +49,38 @@ export const sessionRepoSchema = z.object({
 });
 export type SessionRepo = z.infer<typeof sessionRepoSchema>;
 
+/**
+ * A wire-provided git branch name (branch-launch Phase B). A conservative ref-name subset validated at
+ * the trust boundary — these reach `git` argv on the daemon (always via execFile array-args; this is
+ * defense on top): no whitespace/control chars, no `..`, none of git's forbidden ref characters, no
+ * leading `-` (option injection) or `/`, no trailing `/`, `.` or `.lock`.
+ */
+const gitBranchNameSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine(
+    (name) =>
+      !/[\s~^:?*[\\\x00-\x1f\x7f]/.test(name) &&
+      !name.includes('..') &&
+      !name.includes('@{') &&
+      !name.startsWith('-') &&
+      !name.startsWith('/') &&
+      !name.endsWith('/') &&
+      !name.endsWith('.') &&
+      !name.endsWith('.lock'),
+    { message: 'not a valid git branch name' },
+  );
+
 /** Payload for `session.launch` (web → daemon): parameters to start one new agent session. */
 export const sessionLaunchPayloadSchema = z.object({
   prompt: z.string().min(1),
   /** GitHub repo to clone-on-demand and run in; omitted runs in the daemon's configured/default cwd. */
   repo: sessionRepoSchema.optional(),
+  /** Existing branch to cut the session branch FROM (Phase B); omitted → the repo's HEAD. */
+  baseBranch: gitBranchNameSchema.optional(),
+  /** The new session branch's name (Phase B); omitted → the telecode auto-name. */
+  branchName: gitBranchNameSchema.optional(),
   /** Working directory for the session (single cwd in Phase 1; git worktrees in Phase 2). */
   cwd: z.string().min(1).optional(),
   permissionMode: permissionModeSchema.optional(),

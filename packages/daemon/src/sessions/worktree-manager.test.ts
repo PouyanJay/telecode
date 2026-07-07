@@ -105,6 +105,53 @@ describe('WorktreeManager: a git worktree per session off a local repo', () => {
     expect(await exists(join(repoPath, 'only-in-a.txt'))).toBe(false);
   });
 
+  it('cuts the worktree from a chosen base branch with a chosen name (branch-launch T1)', async () => {
+    const repo = await makeRepo();
+    // A second branch that diverges from main by one file — the proof the base was honored.
+    await run('git', ['-C', repo, 'checkout', '-q', '-b', 'develop']);
+    await writeFile(join(repo, 'develop-only.txt'), 'on develop\n');
+    await run('git', ['-C', repo, 'add', '.']);
+    await run('git', ['-C', repo, 'commit', '-q', '-m', 'develop work']);
+    await run('git', ['-C', repo, 'checkout', '-q', 'main']);
+
+    const root = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot: root });
+    const sessionId = randomUUID();
+    const worktree = await manager.ensureWorktree(sessionId, repo, {
+      baseBranch: 'develop',
+      branchName: 'feat/picked',
+    });
+
+    expect(worktree.branch).toBe('feat/picked');
+    const head = await run('git', ['-C', worktree.path, 'rev-parse', '--abbrev-ref', 'HEAD']);
+    expect(head.stdout.trim()).toBe('feat/picked');
+    expect(await exists(join(worktree.path, 'develop-only.txt'))).toBe(true); // base honored
+  });
+
+  it('resolves a base that only exists as a remote-tracking ref (fresh clones)', async () => {
+    const origin = await makeRepo();
+    await run('git', ['-C', origin, 'checkout', '-q', '-b', 'develop']);
+    await writeFile(join(origin, 'develop-only.txt'), 'on develop\n');
+    await run('git', ['-C', origin, 'add', '.']);
+    await run('git', ['-C', origin, 'commit', '-q', '-m', 'develop work']);
+    await run('git', ['-C', origin, 'checkout', '-q', 'main']);
+
+    // A clone has origin/develop but NO local develop — exactly a repo the daemon cloned on demand.
+    const cloneParent = await tempDir('telecode-clone-');
+    const clone = join(cloneParent, 'clone');
+    await run('git', ['clone', '-q', '--', origin, clone]);
+
+    const root = await tempDir('telecode-worktrees-');
+    const manager = createGitWorktreeManager({ worktreesRoot: root });
+    const worktree = await manager.ensureWorktree(randomUUID(), clone, {
+      baseBranch: 'develop',
+      branchName: 'feat/from-remote',
+    });
+
+    expect(worktree.branch).toBe('feat/from-remote');
+    expect(await exists(join(worktree.path, 'develop-only.txt'))).toBe(true);
+  });
+
   it('surfaces a clear error when the repo path is not a git repository', async () => {
     const repoPath = await tempDir('telecode-not-a-repo-');
     const worktreesRoot = await tempDir('telecode-worktrees-');
