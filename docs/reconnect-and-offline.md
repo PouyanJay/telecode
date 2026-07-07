@@ -28,8 +28,11 @@ This covers flaky Wi-Fi, switching networks, and — via a heartbeat that detect
 ## When your machine goes offline
 
 If the daemon disconnects (the laptop slept, lost the network, or the daemon stopped), sessions on that
-device are shown as **`OFFLINE / PAUSED`** rather than implying they died. The session list still renders
-from the registry. As soon as the machine reconnects, the browser resubscribes and the sessions resume.
+device are shown as **`PAUSED · OFFLINE`** rather than implying they died, and opening one says honestly
+that it runs on a machine that isn't connected right now. The session list still renders from the
+registry. As soon as the machine reconnects, the browser resubscribes and the sessions resume. (A session
+whose device was **revoked** says that, too — its live transcript is unreachable until the device
+re-authorizes.)
 
 ## Instant history on the same device
 
@@ -41,15 +44,21 @@ _used_ by the page to decrypt while you're on the origin, but it can never be re
 session (it still cannot read them), so a reopen shows recent activity immediately even while the daemon
 is mid-reconnect.
 
-## What does _not_ survive
+## A daemon restart is survivable too
 
-Execution is local by design, and that has one honest cost:
+The daemon persists each session — transcript, status, identity, and its encryption key — to disk on your
+machine (`~/.telecode/sessions`, readable only by your user). If the daemon process stops (reboot, quit,
+crash, upgrade), the next start **restores your sessions**: history is back, an idle launched session can
+simply be sent the next instruction, and the registry self-reconciles so nothing lingers as a phantom.
 
-- **A powered-off or fully-restarted daemon.** If the daemon process stops (reboot, quit, crash), the
-  in-memory transcript for a running session is gone — the work was happening on that machine. The session
-  list still shows the session from the registry, but it can't be resumed until you launch again. Surviving
-  a fully powered-off laptop would require handing execution off elsewhere, which telecode deliberately
-  does not do.
+What does _not_ survive, honestly:
 
-In short: brief drops, reloads, and sleep/wake are transparent; only the machine itself going away ends a
-running session.
+- **A turn that was mid-flight when the process died.** The agent's work was happening in that process;
+  the session comes back as **`NEEDS RESTART`**, and your next message continues the conversation as a
+  new linked session rather than pretending nothing happened.
+- **A powered-off laptop can't compute.** Sessions on it are paused until it's back. Surviving a
+  powered-off machine would require handing execution off elsewhere, which telecode deliberately does not
+  do.
+
+In short: brief drops, reloads, sleep/wake, and even daemon restarts keep your work; only a turn actively
+running at the moment the machine (or daemon) dies is cut short.

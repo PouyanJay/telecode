@@ -1,13 +1,110 @@
 # Changelog
 
 All notable changes to telecode are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reaches its first published release.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor bumps may contain breaking
+changes).
 
-telecode is pre-1.0 and ships from `main`. Until the first tagged/published release, everything below sits
-under **Unreleased**; versioned sections will be added as releases are cut.
+Versions below are releases of the **`@telecode/cli`** npm package (the daemon — the thing you install).
+The web app and relay deploy continuously from `main`; changes that live purely in the web app or relay
+are listed under the CLI release they accompanied.
 
-## [Unreleased]
+## [0.6.0] — 2026-07-07
+
+The branch workflow release: every launched session works on its own branch, and you can review, switch,
+fork, and ship that work from the browser. See [docs/branches-and-changes.md](docs/branches-and-changes.md).
+
+### Added
+
+- **A branch per session.** Launching a session in a repository cuts a dedicated git worktree and branch,
+  so parallel sessions never trample each other. Branch names are readable auto-slugs derived from the
+  task, or set your own; pick any base branch to start from (fetched live, end-to-end encrypted in
+  transit).
+- **Session branch visibility.** The session header and the session rail show which branch (and repo)
+  each session is on.
+- **Real Changes panel.** The Changes tab shows the session branch's actual diff against its base —
+  reviewable from your phone, not just a transcript of edits.
+- **Between-turns branch switch** for launched sessions, while the agent is idle.
+- **Fork onto a branch.** Resume-as-new can fork a past session's conversation onto a fresh branch of
+  your choosing.
+- **Push & open a PR.** Push the session branch to the origin and jump straight to the pull-request page.
+- **Reap on delete.** Deleting a session can also remove its worktree and branch (with safety checks).
+
+Adopted (locally started) sessions are observers of your own checkout, so branch switch and push are
+deliberately refused for them.
+
+## [0.5.0] – [0.5.6] — 2026-07-06 / 2026-07-07
+
+The session-identity and multi-device era: sessions got real names, history that survives restarts, and
+honest per-device presence.
+
+### Added
+
+- **Session titles, end-to-end sealed.** Sessions get quality titles (with the repo tagged), backfilled
+  for restored sessions — and titles are encrypted like content, so the relay can't read them.
+- **Rename, resume-as-new, and housekeeping.** Rename sessions, resume a finished one as a new session
+  that keeps the conversation, and clean up old sessions in bulk.
+- **Restart persistence.** A daemon restart no longer strands its sessions: transcripts are restored and
+  the registry self-reconciles instead of accumulating phantom rows.
+- **Multi-device, for real** (web + relay). Per-device live presence, a device picker at launch, device
+  chips and deep links on the board, per-device adoption settings, and honest `DEVICE OFFLINE` /
+  `REVOKED` placeholders instead of an infinite "reconnecting" state. Approvals work across devices.
+- **Clearer statuses.** The lifecycle status a session shows now distinguishes what the agent is doing
+  rather than collapsing everything into "running".
+
+### Fixed
+
+- Mobile polish across the board views.
+- A latent transport wedge where frames sent before the hello handshake completed could freeze a
+  connection's send chain.
+
+## [0.4.0] – [0.4.7] — 2026-07-04 / 2026-07-06
+
+Hardening of adoption, approvals, and the device lifecycle.
+
+### Added
+
+- **Threads & lineage** (0.4.6). Chained sessions display their lineage, with a "continuation" pill
+  linking a resumed session back to its ancestor.
+- **Revoke → re-authorize lifecycle** (0.4.7). Revoking a device now cleanly ends its sessions; a revoked
+  daemon auto-re-pairs **preserving its identity**, so history survives re-authorization. Revoked devices
+  are listed with a re-authorize flow.
+- **Auto re-pair on a revoked token** (0.4.0). A daemon whose device token was revoked stops looping on
+  auth errors and prints a fresh pairing code instead (one human approval re-grants it).
+
+### Fixed
+
+- **Adoption safety** (0.4.1–0.4.4): adopted sessions honor their own permission mode (bypass/auto modes
+  are never gated) and only gate when a browser is actually watching; the transcript mirrors on every
+  agent stop, not just handovers; daemon restarts reconcile the session registry so phantom sessions
+  can't accumulate.
+- **Approval reliability** (0.4.5): fixed a key-delivery race where a browser that subscribed at the
+  wrong moment couldn't decrypt — and its approval decisions were silently dropped, leaving the gate
+  stuck. The session key is now (re)delivered on subscribe.
+- Concurrent approvals resolve the request you actually clicked, not the first pending one.
+
+## [0.3.0] — 2026-07-04
+
+### Added
+
+- **Background service.** `telecode service install|uninstall|start|stop|status|logs` — an install-once
+  login service (launchd on macOS, systemd user unit on Linux) that keeps the daemon running in the
+  background and restarts it on crash. First run offers to set it up. Windows is a documented
+  fast-follow.
+
+## [0.2.0] — 2026-07-03
+
+### Added
+
+- **Adopted sessions.** Claude Code sessions you start locally in a terminal appear in telecode
+  automatically: watch the mirrored transcript live, answer the agent's questions, and approve or deny
+  tool calls from the browser — including structured deny feedback and a free-form handover that resumes
+  the conversation as a telecode session. Hooks install automatically; a web toggle (and
+  `TELECODE_ADOPT=0`) turns adoption off.
+
+## [0.1.0] — 2026-06-28
+
+First published release (`@telecode/cli` / `@telecode/protocol`).
 
 ### Added
 
@@ -47,4 +144,11 @@ under **Unreleased**; versioned sections will be added as releases are cut.
 
 - Licensed under **AGPL-3.0**.
 
-[unreleased]: https://github.com/PouyanJay/telecode/commits/main
+[0.6.0]: https://www.npmjs.com/package/@telecode/cli/v/0.6.0
+[0.5.0]: https://www.npmjs.com/package/@telecode/cli/v/0.5.0
+[0.5.6]: https://www.npmjs.com/package/@telecode/cli/v/0.5.6
+[0.4.0]: https://www.npmjs.com/package/@telecode/cli/v/0.4.0
+[0.4.7]: https://www.npmjs.com/package/@telecode/cli/v/0.4.7
+[0.3.0]: https://www.npmjs.com/package/@telecode/cli/v/0.3.0
+[0.2.0]: https://www.npmjs.com/package/@telecode/cli/v/0.2.0
+[0.1.0]: https://www.npmjs.com/package/@telecode/cli/v/0.1.0
