@@ -2,13 +2,19 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { Button, Drawer } from '@telecode/ui';
-  import type { PermissionModeName } from '@telecode/protocol';
+  import { isValidGitBranchName, type PermissionModeName } from '@telecode/protocol';
 
   import PermissionModeField from '$lib/components/PermissionModeField.svelte';
   import { buildLaunchDeviceOptions, defaultLaunchDeviceId } from '$lib/launch-device';
+  import { branchPickerModel, type GithubBranchFetch } from '$lib/launch-branches';
   import { launchRepo } from '$lib/launch-repo';
   import type { RelayDevice, RelayRepo } from '$lib/server/relay-api';
-  import { launch, type DeviceChannelState } from '$lib/session-store';
+  import {
+    launch,
+    repoBranches,
+    requestRepoBranches,
+    type DeviceChannelState,
+  } from '$lib/session-store';
   import { DEFAULT_PERMISSION_MODE, readPermissionMode } from '$lib/settings';
 
   /**
@@ -41,6 +47,10 @@
   let mode = $state<PermissionModeName>(DEFAULT_PERMISSION_MODE);
   let launching = $state(false);
   let launchError = $state<string | null>(null);
+  // Branch control (Phase B): which base to cut from + an optional custom session-branch name.
+  let baseBranch = $state('');
+  let branchName = $state('');
+  let githubFetch = $state<GithubBranchFetch>({ state: 'idle', branches: [] });
 
   const deviceOptions = $derived(buildLaunchDeviceOptions(devices, channels));
   const selectedDevice = $derived(
@@ -61,10 +71,63 @@
     }
   });
 
+  const selectedRepo = $derived(
+    repos.find((repo) => String(repo.id) === selectedRepoId) ?? null,
+  );
+
+  // Fetch the selected GitHub repo's branches (relay-proxied); "no repo" asks the launch device's
+  // daemon for its default repo's branches over the sealed round-trip instead.
+  $effect(() => {
+    if (!open || !browser) return;
+    const repo = selectedRepo;
+    if (repo === null) {
+      githubFetch = { state: 'idle', branches: [] };
+      if (selectedDeviceId) requestRepoBranches(selectedDeviceId);
+      return;
+    }
+    let stale = false;
+    githubFetch = { state: 'loading', branches: [] };
+    void fetch(
+      `/api/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/branches`,
+    )
+      .then(async (res) => {
+        if (!res.ok) throw new Error('branch listing failed');
+        const body = (await res.json()) as { branches: string[] };
+        if (!stale) githubFetch = { state: 'loaded', branches: body.branches };
+      })
+      .catch(() => {
+        if (!stale) githubFetch = { state: 'error', branches: [] };
+      });
+    return () => {
+      stale = true;
+    };
+  });
+
+  const picker = $derived(
+    branchPickerModel({
+      repo: selectedRepo,
+      github: githubFetch,
+      local: $repoBranches.get(selectedDeviceId),
+    }),
+  );
+
+  // Pre-select the source's default whenever the picker (re)becomes ready; keep an operator's pick
+  // only while it remains a real option of the CURRENT source.
+  $effect(() => {
+    if (picker.status !== 'ready') return;
+    if (!picker.branches.includes(baseBranch)) {
+      baseBranch = picker.defaultBranch ?? picker.branches[0] ?? '';
+    }
+  });
+
+  const branchNameInvalid = $derived(
+    branchName.trim() !== '' && !isValidGitBranchName(branchName.trim()),
+  );
+
   async function onLaunch(event: Event): Promise<void> {
     event.preventDefault();
     const text = prompt.trim();
-    if (!text || launching || !selectedDevice) return;
+    if (!text || launching || !selectedDevice || branchNameInvalid) return;
     launching = true;
     launchError = null;
     try {
@@ -75,12 +138,15 @@
           permissionMode: mode,
           ...(title.trim() ? { title: title.trim() } : {}),
           ...(repo ? { repo } : {}),
+          ...(picker.status === 'ready' && baseBranch !== '' ? { baseBranch } : {}),
+          ...(branchName.trim() !== '' ? { branchName: branchName.trim() } : {}),
         },
         selectedDevice.id,
       );
       open = false;
       prompt = '';
       title = '';
+      branchName = '';
       await goto(`/sessions/${id}`);
     } catch (err) {
       launchError = err instanceof Error ? err.message : 'Launch failed.';
@@ -159,6 +225,49 @@
           default workspace until then.
         </p>
       {/if}
+
+      {#if picker.status === 'loading'}
+        <p class="note" role="status">Loading branches…</p>
+      {:else if picker.status === 'error'}
+        <p class="note note-error" role="status">
+          Couldn’t list branches — the session will start from the repo’s default.
+        </p>
+      {:else if picker.status === 'ready'}
+        <div class="field">
+          <label class="label" for="launch-base">Base branch</label>
+          <div class="select-wrap">
+            <select id="launch-base" class="select" bind:value={baseBranch}>
+              {#each picker.branches as branch (branch)}
+                <option value={branch}>{branch}</option>
+              {/each}
+            </select>
+            {@render chevron()}
+          </div>
+          <p class="hint">The session works on its own new branch, cut from this one.</p>
+        </div>
+      {/if}
+
+      <div class="field">
+        <label class="label" for="launch-branch-name">
+          New branch name <span class="optional">optional</span>
+        </label>
+        <input
+          id="launch-branch-name"
+          class="input"
+          type="text"
+          bind:value={branchName}
+          placeholder="auto: telecode/task-slug-id"
+          autocomplete="off"
+          spellcheck="false"
+          aria-invalid={branchNameInvalid}
+          aria-describedby={branchNameInvalid ? 'launch-branch-name-error' : undefined}
+        />
+        {#if branchNameInvalid}
+          <p class="hint hint-error" id="launch-branch-name-error">
+            Not a valid git branch name (no spaces, “..”, or a leading “-”).
+          </p>
+        {/if}
+      </div>
 
       <PermissionModeField bind:value={mode} />
 
@@ -295,6 +404,48 @@
     font-size: var(--text-xs);
     color: var(--text-muted);
     line-height: var(--lh-base);
+  }
+  .note-error {
+    color: var(--danger);
+  }
+  /* The custom branch-name input: same control chrome as .select, mono because it is machine data. */
+  .input {
+    width: 100%;
+    height: 38px;
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+  .input::placeholder {
+    color: var(--text-muted);
+  }
+  .input:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .input[aria-invalid='true'] {
+    border-color: var(--danger);
+  }
+  .hint {
+    margin: var(--space-1) 0 0;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    line-height: var(--lh-xs);
+  }
+  .hint-error {
+    color: var(--danger);
+  }
+  .optional {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-left: var(--space-1);
   }
   .error {
     margin: 0;

@@ -1,0 +1,77 @@
+import { describe, expect, it } from 'vitest';
+
+import { branchPickerModel } from './launch-branches';
+import type { RelayRepo } from './server/relay-api';
+
+const REPO: RelayRepo = {
+  id: 1,
+  fullName: 'me/telecode',
+  name: 'telecode',
+  owner: 'me',
+  private: false,
+  defaultBranch: 'main',
+  cloneUrl: 'https://example.com/me/telecode.git',
+};
+
+const IDLE = { state: 'idle', branches: [] } as const;
+
+describe('branchPickerModel', () => {
+  it('a selected GitHub repo: loading while the fetch runs, ready with ITS default once loaded', () => {
+    expect(branchPickerModel({ repo: REPO, github: IDLE, local: undefined })).toEqual({
+      status: 'loading',
+    });
+    expect(
+      branchPickerModel({
+        repo: REPO,
+        github: { state: 'loaded', branches: ['main', 'develop'] },
+        local: undefined,
+      }),
+    ).toEqual({ status: 'ready', branches: ['main', 'develop'], defaultBranch: 'main' });
+  });
+
+  it('a failed GitHub fetch shows the error state (recoverable, never a silent empty)', () => {
+    expect(
+      branchPickerModel({ repo: REPO, github: { state: 'error', branches: [] }, local: undefined }),
+    ).toEqual({ status: 'error' });
+  });
+
+  it('no repo: ready from the sealed local reply with the checked-out default', () => {
+    expect(
+      branchPickerModel({
+        repo: null,
+        github: IDLE,
+        local: { available: true, branches: ['main', 'fix/x'], defaultBranch: 'main' },
+      }),
+    ).toEqual({ status: 'ready', branches: ['main', 'fix/x'], defaultBranch: 'main' });
+  });
+
+  it('no repo: hidden while no reply, when unavailable, or when the repo has no branches', () => {
+    expect(branchPickerModel({ repo: null, github: IDLE, local: undefined })).toEqual({
+      status: 'hidden',
+    });
+    expect(
+      branchPickerModel({
+        repo: null,
+        github: IDLE,
+        local: { available: false, branches: [] },
+      }),
+    ).toEqual({ status: 'hidden' });
+    expect(
+      branchPickerModel({
+        repo: null,
+        github: IDLE,
+        local: { available: true, branches: [] },
+      }),
+    ).toEqual({ status: 'hidden' });
+  });
+
+  it('a detached local default yields null (the picker just pre-selects nothing)', () => {
+    expect(
+      branchPickerModel({
+        repo: null,
+        github: IDLE,
+        local: { available: true, branches: ['main'] },
+      }),
+    ).toEqual({ status: 'ready', branches: ['main'], defaultBranch: null });
+  });
+});

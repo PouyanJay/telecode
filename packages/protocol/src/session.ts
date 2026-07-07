@@ -73,6 +73,12 @@ const gitBranchNameSchema = z
     { message: 'not a valid git branch name' },
   );
 
+/** Whether a string is launch-safe as a git branch name — the drawer's inline validation shares the
+ * exact wire rule so the two can never disagree. */
+export function isValidGitBranchName(name: string): boolean {
+  return gitBranchNameSchema.safeParse(name).success;
+}
+
 /** Payload for `session.launch` (web → daemon): parameters to start one new agent session. */
 export const sessionLaunchPayloadSchema = z.object({
   prompt: z.string().min(1),

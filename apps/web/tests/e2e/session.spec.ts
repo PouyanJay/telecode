@@ -82,6 +82,39 @@ test('launch from the dashboard, stream on the session view, approve the gated t
   await expect(page.locator('header.shead').getByText(/telecode\/[0-9a-f-]{6}/)).toBeVisible();
 });
 
+test('launch cuts a named branch from a picked base (branch-launch Phase B)', async ({ page }) => {
+  await signIn(page);
+  await page.getByRole('button', { name: 'Launch session' }).first().click();
+
+  // The base picker filled from the daemon round-trip (fake daemon: main/develop/feat/existing),
+  // pre-selected to the checked-out default.
+  const base = page.getByLabel('Base branch');
+  await expect(base).toBeVisible({ timeout: 10_000 });
+  await expect(base).toHaveValue('main');
+  await base.selectOption('develop');
+
+  // An invalid custom name blocks with an inline story; a valid one rides the launch.
+  const name = page.getByLabel(/New branch name/);
+  await name.fill('bad name');
+  await expect(page.getByText('Not a valid git branch name', { exact: false })).toBeVisible();
+  await name.fill('feat/e2e-pick');
+  await expect(page.getByText('Not a valid git branch name', { exact: false })).not.toBeVisible();
+
+  await page.getByLabel('First instruction').fill('work on the picked branch');
+  await page.getByRole('button', { name: /Launch on/ }).click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
+
+  // The session's sealed identity reports the CHOSEN branch (payload → daemon → meta → rail).
+  await expect(page.getByLabel('Session details').getByText('feat/e2e-pick')).toBeVisible({
+    timeout: 10_000,
+  });
+
+  // Settle the gate the fake daemon raises so this session doesn't linger awaiting (later specs
+  // assert exactly ONE needs-you card for their own launch).
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+});
+
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {
   await signIn(page);
   await launchFromDashboard(page, 'Add a hello line to the README');

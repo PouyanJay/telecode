@@ -169,3 +169,4 @@ export type {
 } from './session';
 
 export { firstRealPromptText, isInjectedPrompt } from './prompt';
+export { isValidGitBranchName } from './session';

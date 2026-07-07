@@ -75,6 +75,7 @@ function makeFakeConnection() {
       answerHandover: (sessionId, payload) => handovers.push({ sessionId, payload }),
       control: () => undefined,
       sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
+      sendRepoBranchesRequest: () => undefined,
       sendAdoptConfig: (set) => adoptConfigs.push(set),
       close: () => undefined,
     };
@@ -534,6 +535,7 @@ describe('session rename (ux Phase 6 T6)', () => {
           control: () => undefined,
           sealTitle: async () => null,
           sendAdoptConfig: () => undefined,
+          sendRepoBranchesRequest: () => undefined,
           close: () => undefined,
         };
       },

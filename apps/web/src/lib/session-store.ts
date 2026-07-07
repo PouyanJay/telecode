@@ -4,6 +4,7 @@ import {
   sessionStartedPayloadSchema,
   type AdoptSettings,
   type AdoptStatePayload,
+  type RepoBranchesStatePayload,
   type Envelope,
   type HandoverAnswerPayload,
   type PermissionDecisionPayload,
@@ -99,6 +100,7 @@ const sessionDeviceMap = writable<ReadonlyMap<string, string>>(new Map());
 // id and updated from that channel's sealed `adopt.state` frames. A device is absent until the
 // Settings page requests its policy (or its daemon replies).
 const adoptStatesMap = writable<ReadonlyMap<string, AdoptStatePayload>>(new Map());
+const repoBranchesMap = writable<ReadonlyMap<string, RepoBranchesStatePayload>>(new Map());
 // Decrypted session metadata (ux Phase 6), keyed by session id: live `session.meta` frames merged
 // over the registry's persisted blobs (seeded on load). Titles here beat every other title source.
 const sessionMetaMap = writable<SessionMetaMap>(new Map());
@@ -149,6 +151,11 @@ export const connectionState: Readable<ConnectionState> = derived(deviceChannelM
 /** Each device daemon's adoption policy for the Settings UI, keyed by device id (Journey 3 / ux Phase 5). */
 export const adoptStates: Readable<ReadonlyMap<string, AdoptStatePayload>> = {
   subscribe: adoptStatesMap.subscribe,
+};
+
+/** Per-device default-repo branches (sealed `repo.branches.state`) for the launch drawer (Phase B). */
+export const repoBranches: Readable<ReadonlyMap<string, RepoBranchesStatePayload>> = {
+  subscribe: repoBranchesMap.subscribe,
 };
 
 function updateChannel(deviceId: string, patch: Partial<DeviceChannelState>): void {
@@ -328,6 +335,12 @@ function closeChannelsNotIn(wanted: ReadonlySet<string>): void {
       next.delete(deviceId);
       return next;
     });
+    repoBranchesMap.update((states) => {
+      if (!states.has(deviceId)) return states;
+      const next = new Map(states);
+      next.delete(deviceId);
+      return next;
+    });
   }
 }
 
@@ -349,6 +362,8 @@ function dialDeviceChannel(
     onReconnect: () => reattachSessions(device.id),
     onAdoptState: (state) =>
       adoptStatesMap.update((states) => new Map(states).set(device.id, state)),
+    onRepoBranches: (state) =>
+      repoBranchesMap.update((states) => new Map(states).set(device.id, state)),
   });
   connections.set(device.id, connection);
 }
@@ -880,6 +895,11 @@ export function setAdoptConfig(deviceId: string, settings: AdoptSettings): void 
   connections.get(deviceId)?.sendAdoptConfig(settings);
 }
 
+/** Ask ONE device's daemon for its default repo's branches; the reply lands on {@link repoBranches}. */
+export function requestRepoBranches(deviceId: string): void {
+  connections.get(deviceId)?.sendRepoBranchesRequest();
+}
+
 /** Close every pooled connection and reject in-flight launches (only on full teardown, e.g. sign-out). */
 export function disconnect(): void {
   for (const pending of pendingLaunches.splice(0)) {
@@ -893,6 +913,7 @@ export function disconnect(): void {
   // registry and backfills transcripts, so nothing stale should linger across a disconnect.
   sessionMap.set(new Map());
   adoptStatesMap.set(new Map());
+  repoBranchesMap.set(new Map());
   sessionMetaMap.set(new Map());
   sessionTitleOverrideMap.set(new Map());
 }

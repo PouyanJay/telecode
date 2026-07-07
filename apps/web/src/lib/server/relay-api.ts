@@ -502,6 +502,23 @@ export async function listRepos(sessionToken: string): Promise<RepoList> {
   };
 }
 
+/** One repo's branch names for the base picker (Phase B). Not-connected/failed → empty, degrade clean. */
+export async function listRepoBranches(
+  sessionToken: string,
+  owner: string,
+  name: string,
+): Promise<{ connected: boolean; branches: string[] }> {
+  const res = await fetch(
+    `${RELAY_HTTP_URL}/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/branches`,
+    { headers: { authorization: `Bearer ${sessionToken}` } },
+  );
+  if (!res.ok) {
+    return { connected: false, branches: [] };
+  }
+  const body = (await res.json()) as { connected: boolean; branches: string[] };
+  return { connected: body.connected, branches: body.branches };
+}
+
 /**
  * Register the browser's push subscription with the relay (session-token authed). The `subscription` is
  * the browser's `PushSubscription.toJSON()` (`{ endpoint, keys: { p256dh, auth } }`). Resolves true on
