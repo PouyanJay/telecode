@@ -67,7 +67,10 @@ interface RunCall {
   cwd?: string;
 }
 
-async function startDaemon(adapter: AgentAdapter): Promise<{
+async function startDaemon(
+  adapter: AgentAdapter,
+  extras: Partial<Parameters<typeof createDaemon>[0]> = {},
+): Promise<{
   relay: FakeRelay;
   userId: string;
   deviceId: string;
@@ -82,6 +85,7 @@ async function startDaemon(adapter: AgentAdapter): Promise<{
     deviceId,
     agentAdapter: adapter,
     logger: silent,
+    ...extras,
   });
   daemons.push(daemon);
   await daemon.start();
@@ -181,6 +185,40 @@ async function expectNoFrame(
 }
 
 describe('daemon resume-as-new (session-identity T8)', () => {
+  it("the child inherits the parent's workspace identity — branch and repo (branch-visibility T3)", async () => {
+    const ids = await startDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'done' }], { sessionId: 'sdk-branchy' }),
+      {
+        worktreeManager: {
+          ensureWorktree: (sessionId: string) =>
+            Promise.resolve({ path: `/worktrees/${sessionId}`, branch: `telecode/${sessionId}` }),
+        },
+        defaultRepoPath: '/repos/app',
+      },
+    );
+    const { relay } = ids;
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    await launchToEnd(relay, ids, parentId, 'build the feature');
+    // The parent's own identity carries its worktree branch (T1) — consume it so the child's is next.
+    const parentMeta = sessionMetaPayloadSchema.parse(
+      (await relay.waitForFrame(ofType('session.meta', parentId))).payload,
+    );
+    expect(parentMeta.branch).toBe(`telecode/${parentId}`);
+
+    sendResumeNew(relay, ids, parentId, { prompt: 'continue it' });
+    await ackChained(relay, ids, childId);
+
+    // The child runs in the parent's worktree, so it IS on the parent's branch and repo — the sealed
+    // identity must say so (a worktree cwd alone can never name either).
+    const childMeta = sessionMetaPayloadSchema.parse(
+      (await relay.waitForFrame(ofType('session.meta', childId))).payload,
+    );
+    expect(childMeta.branch).toBe(`telecode/${parentId}`);
+    expect(childMeta.repo).toBe('app');
+    expect(childMeta.cwd).toBe(`/worktrees/${parentId}`);
+  });
+
   it('forks-and-resumes a done launched parent into a linked child (clientRef → child started)', async () => {
     const runCalls: RunCall[] = [];
     const ids = await startDaemon(

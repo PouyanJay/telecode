@@ -1352,9 +1352,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     }
     const permissionMode = parent?.permissionMode ?? 'default';
     const cwd = sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd;
-    // The child runs where the parent ran, so it also IS the parent's repo — a worktree cwd alone
-    // can't say so (it ends in the parent's session id, not the repo name).
+    // The child runs where the parent ran, so it also IS the parent's repo and branch — a worktree
+    // cwd alone can't say so (it ends in the parent's session id, not the repo or branch name).
     const repo = parent?.meta?.repo;
+    const branch = parent?.meta?.branch;
     const minted = await mintChainedChild({
       parentSessionId: parentId,
       permissionMode,
@@ -1362,6 +1363,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         ...resolveLaunchTitle(undefined, prompt),
         ...(cwd !== undefined ? { cwd } : {}),
         ...(repo !== undefined ? { repo } : {}),
+        ...(branch !== undefined ? { branch } : {}),
         permissionMode,
       },
       firstTurnText: prompt,
@@ -2098,10 +2100,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // The continuation's identity travels SEALED (ux Phase 6 T5) — the mint's announce is ids-only, so
     // the taken-over question and cwd never reach the relay in cleartext (the P1-2 privacy fix). A
     // failed mint leaves the parent as-is; a later answer can retry.
+    const parentBranch = sessionRecords.get(parentId)?.meta?.branch;
     const minted = await mintChainedChild({
       parentSessionId: parentId,
       permissionMode: 'default',
-      metaPatch: derivedMetaPatch(title, handover.cwd),
+      metaPatch: {
+        ...derivedMetaPatch(title, handover.cwd),
+        // The fork keeps working in the parent's checkout — carry its branch (branch-visibility T3).
+        ...(parentBranch !== undefined ? { branch: parentBranch } : {}),
+      },
       firstTurnText: answerText,
       ...(handover.cwd !== undefined ? { cwd: handover.cwd } : {}),
     });
