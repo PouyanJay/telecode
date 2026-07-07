@@ -107,8 +107,16 @@ export interface RelayConnection {
    * so the relay never sees repo paths; the daemon replies `adopt.state` via `onAdoptState` (Journey 3).
    */
   sendAdoptConfig(set?: AdoptSettings): void;
-  /** Ask the daemon for its default repo's branches; the sealed reply lands on `onRepoBranches`. */
-  sendRepoBranchesRequest(): void;
+  /**
+   * Ask the daemon for its default repo's branches — or, with `sessionId` (branch-actions T4), for
+   * THAT launched session's repo. The sealed reply lands on `onRepoBranches` (echoing the id).
+   */
+  sendRepoBranchesRequest(sessionId?: string): void;
+  /**
+   * Move a launched session's worktree onto another existing branch between turns (branch-actions
+   * T4). Sealed under the session content key; the daemon settles it with `session.branch.state`.
+   */
+  switchBranch(sessionId: string, branch: string): void;
   /**
    * Ask the daemon to remove a launched session's worktree + branch (the delete flow's opt-in,
    * branch-actions T3). Box-sealed like `adopt.config`; the envelope carries the session id as
@@ -439,19 +447,23 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       const sealed = await cipher.encrypt(sessionId, { title });
       return { payload: sealed.payload, nonce: sealed.nonce };
     },
-    sendRepoBranchesRequest(): void {
+    sendRepoBranchesRequest(sessionId?: string): void {
       enqueueSend(async () => {
+        const payload = sessionId !== undefined ? { sessionId } : {};
         if (cipher.enabled) {
           // Nothing sensitive outbound — sealing still announces our pubkey for the sealed reply.
-          const sealed = await cipher.sealToDaemon({});
+          const sealed = await cipher.sealToDaemon(payload);
           return buildFrame('repo.branches', {
             payload: sealed.payload,
             nonce: sealed.nonce,
             senderPublicKey: sealed.senderPublicKey,
           });
         }
-        return buildFrame('repo.branches', { payload: {} });
+        return buildFrame('repo.branches', { payload });
       });
+    },
+    switchBranch(sessionId: string, branch: string): void {
+      enqueueSend(() => sessionFrame('session.branch.switch', sessionId, { branch }));
     },
     sendWorkspaceReap(sessionId: string): void {
       enqueueSend(async () => {

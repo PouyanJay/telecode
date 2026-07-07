@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { SessionChangesPayload, SessionMetaPayload } from '@telecode/protocol';
 
+  import BranchSwitcher from '$lib/components/BranchSwitcher.svelte';
   import { changesView } from '$lib/changes';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionState } from '$lib/session';
@@ -19,6 +20,7 @@
     connection,
     meta,
     changes,
+    canSwitchBranch = false,
   }: {
     session: SessionState;
     deviceName: string | null;
@@ -27,6 +29,8 @@
     meta?: SessionMetaPayload | undefined;
     /** Decrypted branch-diff summary (Phase C); absent → the gate-derived fallback renders. */
     changes?: SessionChangesPayload | undefined;
+    /** Between-turns switch offer (Phase C T4): launched + settled + device reachable. */
+    canSwitchBranch?: boolean;
   } = $props();
 
   const display = $derived(SESSION_DISPLAY[session.status]);
@@ -68,6 +72,9 @@
         <span class="meta-key">Branch</span>
         <span class="meta-val mono" title={meta.branch}>{meta.branch}</span>
       </div>
+      {#if canSwitchBranch && session.sessionId}
+        <BranchSwitcher sessionId={session.sessionId} currentBranch={meta.branch} />
+      {/if}
     {/if}
     <div class="meta">
       <span class="meta-key">Session</span>

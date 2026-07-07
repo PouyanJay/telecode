@@ -25,6 +25,7 @@ import { acquireSingleInstanceLock } from './single-instance-lock';
 import { createGitBranchReader } from './adopt/git-branch';
 import { createGitBranchLister } from './sessions/branch-list';
 import { createGitRepoManager } from './sessions/repo-manager';
+import { createGitBranchSwitcher } from './sessions/branch-switcher';
 import { createGitChangesReader } from './sessions/workspace-changes';
 import { createGitWorkspaceReaper } from './sessions/workspace-reaper';
 import { createSessionStore } from './sessions/session-store';
@@ -319,6 +320,7 @@ function buildDaemon(creds: StoredCredentials): Daemon {
     readWorkspaceChanges: createGitChangesReader(),
     // Shares the worktree manager's root, so reap can only ever touch telecode-cut worktrees.
     reapWorkspace: createGitWorkspaceReaper({ worktreesRoot }),
+    switchBranch: createGitBranchSwitcher(),
     // Gate timeout override (ms); unset → the daemon's 30-minute default, <= 0 disables.
     ...(gateTimeoutOverrideMs !== undefined ? { gateTimeoutMs: gateTimeoutOverrideMs } : {}),
     ...(defaultRepoPath ? { defaultRepoPath } : {}),

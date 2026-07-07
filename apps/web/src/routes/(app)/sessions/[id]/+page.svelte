@@ -27,6 +27,7 @@
   import { SESSION_DISPLAY } from '$lib/session-display';
   import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
   import { canResumeAsNew } from '$lib/resume-as-new';
+  import { canSwitchBranch } from '$lib/branch-switch';
   import {
     answer,
     answerHandover,
@@ -142,6 +143,14 @@
     'This permanently removes the session, its encrypted history, and its titles from your ' +
       `dashboard — on every device and browser. Files and code${device?.name ? ` on ${device.name}` : ' on your machine'} ` +
       'are not touched.',
+  );
+
+  // Between-turns branch switch (branch-actions T4): the session-shape gate (launched + settled-
+  // but-followable) plus the liveness facts only this page holds (device reachable, channel up).
+  const switchOffered = $derived(
+    canSwitchBranch(effectiveStatus, registryRow?.origin ?? 'launched') &&
+      sessionDeviceOnline &&
+      connected,
   );
 
   // Worktree reaping (branch-actions T3): deleting a LAUNCHED session can also remove its worktree
@@ -485,6 +494,7 @@
         connection={$connectionState}
         meta={$sessionMetas.get(sessionId)}
         changes={$sessionChanges.get(sessionId)}
+        canSwitchBranch={switchOffered}
       />
     {/if}
   </div>

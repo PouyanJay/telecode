@@ -10,6 +10,8 @@ import {
   type HandoverAnswerPayload,
   type PermissionDecisionPayload,
   type QuestionAnswerPayload,
+  sessionBranchStatePayloadSchema,
+  type BranchSwitchFailureCode,
   type SessionControlAction,
   type SessionLaunchPayload,
   type SessionRenameBody,
@@ -104,6 +106,9 @@ const sessionDeviceMap = writable<ReadonlyMap<string, string>>(new Map());
 // Settings page requests its policy (or its daemon replies).
 const adoptStatesMap = writable<ReadonlyMap<string, AdoptStatePayload>>(new Map());
 const repoBranchesMap = writable<ReadonlyMap<string, RepoBranchesStatePayload>>(new Map());
+// Session-scoped branch listings (branch-actions T4), keyed by session id: the rail's Switch
+// picker and the fork drawer ask per session; the sealed reply echoes the id.
+const sessionBranchesMap = writable<ReadonlyMap<string, RepoBranchesStatePayload>>(new Map());
 // Decrypted session metadata (ux Phase 6), keyed by session id: live `session.meta` frames merged
 // over the registry's persisted blobs (seeded on load). Titles here beat every other title source.
 const sessionMetaMap = writable<SessionMetaMap>(new Map());
@@ -166,6 +171,11 @@ export const adoptStates: Readable<ReadonlyMap<string, AdoptStatePayload>> = {
 /** Per-device default-repo branches (sealed `repo.branches.state`) for the launch drawer (Phase B). */
 export const repoBranches: Readable<ReadonlyMap<string, RepoBranchesStatePayload>> = {
   subscribe: repoBranchesMap.subscribe,
+};
+
+/** Per-session repo branches (T4) for the rail's Switch picker and the fork drawer's base list. */
+export const sessionBranches: Readable<ReadonlyMap<string, RepoBranchesStatePayload>> = {
+  subscribe: sessionBranchesMap.subscribe,
 };
 
 function updateChannel(deviceId: string, patch: Partial<DeviceChannelState>): void {
@@ -248,12 +258,30 @@ function handleEvent(deviceId: string, envelope: Envelope): void {
     sessionChangesMap.update((map) => applyChangesFrame(map, envelope));
     return;
   }
+  if (envelope.type === 'session.branch.state' && envelope.session_id !== undefined) {
+    // The switch verdict (Phase C T4): settles the asking control; the branch row itself follows
+    // the daemon's session.meta re-emit, so this never touches the meta map.
+    const parsed = sessionBranchStatePayloadSchema.safeParse(envelope.payload);
+    if (parsed.success) {
+      settleBranchSwitch(
+        envelope.session_id,
+        parsed.data.ok
+          ? { ok: true, branch: parsed.data.branch }
+          : { ok: false, reason: parsed.data.code },
+      );
+    }
+    return;
+  }
   if (envelope.type === 'relay.error' && envelope.session_id !== undefined) {
-    // A reap that reached an offline device (Phase C T3): settle the waiting delete flow honestly
-    // instead of letting it time out. Every other relay.error keeps flowing into the session fold.
+    // An action that reached an offline device (Phase C): settle the waiting flow honestly instead
+    // of letting it time out. Every other relay.error keeps flowing into the session fold.
     const parsed = relayErrorPayloadSchema.safeParse(envelope.payload);
     if (parsed.success && parsed.data.regarding === 'workspace.reap') {
       settleReap(envelope.session_id, { ok: false, reason: 'daemon-offline' });
+      return;
+    }
+    if (parsed.success && parsed.data.regarding === 'session.branch.switch') {
+      settleBranchSwitch(envelope.session_id, { ok: false, reason: 'daemon-offline' });
       return;
     }
   }
@@ -386,8 +414,15 @@ function dialDeviceChannel(
     onReconnect: () => reattachSessions(device.id),
     onAdoptState: (state) =>
       adoptStatesMap.update((states) => new Map(states).set(device.id, state)),
-    onRepoBranches: (state) =>
-      repoBranchesMap.update((states) => new Map(states).set(device.id, state)),
+    onRepoBranches: (state) => {
+      // A session-scoped answer (echoed id, T4) keys by session; the Phase B default form by device.
+      if (state.sessionId !== undefined) {
+        const sessionId = state.sessionId;
+        sessionBranchesMap.update((states) => new Map(states).set(sessionId, state));
+      } else {
+        repoBranchesMap.update((states) => new Map(states).set(device.id, state));
+      }
+    },
     onWorkspaceReap: (state) =>
       settleReap(state.sessionId, state.ok ? { ok: true } : { ok: false, reason: state.code }),
   });
@@ -838,6 +873,7 @@ function forgetSession(sessionId: string): void {
   sessionMap.update(drop);
   sessionMetaMap.update(drop);
   sessionChangesMap.update(drop);
+  sessionBranchesMap.update(drop);
   sessionTitleOverrideMap.update(drop);
   sessionDeviceMap.update(drop);
 }
@@ -882,6 +918,54 @@ export function reapWorkspace(sessionId: string): Promise<WorkspaceReapOutcome> 
     pendingReaps.set(sessionId, { resolve, timer });
     connection.sendWorkspaceReap(sessionId);
   });
+}
+
+/** How a branch-switch request settled (branch-actions T4) — every failure is a retellable reason. */
+export type BranchSwitchOutcome =
+  | { ok: true; branch: string }
+  | {
+      ok: false;
+      reason: BranchSwitchFailureCode | 'daemon-offline' | 'timeout' | 'no-connection';
+    };
+
+const SWITCH_TIMEOUT_MS = 15_000;
+const pendingBranchSwitches = new Map<
+  string,
+  { resolve: (outcome: BranchSwitchOutcome) => void; timer: ReturnType<typeof setTimeout> }
+>();
+
+function settleBranchSwitch(sessionId: string, outcome: BranchSwitchOutcome): void {
+  const pending = pendingBranchSwitches.get(sessionId);
+  if (!pending) return;
+  pendingBranchSwitches.delete(sessionId);
+  clearTimeout(pending.timer);
+  pending.resolve(outcome);
+}
+
+/**
+ * Ask the session's device to move its worktree onto another existing branch (the rail's Switch
+ * control, branch-actions T4). Resolves with the daemon's own verdict — the branch row updates via
+ * the daemon's `session.meta` re-emit, never optimistically.
+ */
+export function switchSessionBranch(
+  sessionId: string,
+  branch: string,
+): Promise<BranchSwitchOutcome> {
+  const connection = connectionFor(sessionId);
+  if (!connection) return Promise.resolve({ ok: false, reason: 'no-connection' });
+  return new Promise((resolve) => {
+    const timer = setTimeout(
+      () => settleBranchSwitch(sessionId, { ok: false, reason: 'timeout' }),
+      SWITCH_TIMEOUT_MS,
+    );
+    pendingBranchSwitches.set(sessionId, { resolve, timer });
+    connection.switchBranch(sessionId, branch);
+  });
+}
+
+/** Ask the session's device for its repo's branch list (T4); lands in {@link sessionBranches}. */
+export function requestSessionBranches(sessionId: string): void {
+  connectionFor(sessionId)?.sendRepoBranchesRequest(sessionId);
 }
 
 /**
@@ -983,6 +1067,8 @@ export function disconnect(): void {
   sessionMap.set(new Map());
   adoptStatesMap.set(new Map());
   repoBranchesMap.set(new Map());
+  sessionBranchesMap.set(new Map());
   sessionMetaMap.set(new Map());
   sessionTitleOverrideMap.set(new Map());
+  sessionChangesMap.set(new Map());
 }

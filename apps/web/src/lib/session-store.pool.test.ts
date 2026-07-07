@@ -46,6 +46,7 @@ interface FakeConn {
   readonly launched: unknown[];
   readonly adoptConfigs: unknown[];
   readonly reaps: string[];
+  readonly switches: { sessionId: string; branch: string }[];
   closed: boolean;
   emit(envelope: Envelope): void;
   emitAdoptState(state: AdoptStatePayload): void;
@@ -66,6 +67,7 @@ function makeFakePool() {
       launched: [],
       adoptConfigs: [],
       reaps: [],
+      switches: [],
       closed: false,
       emit: (envelope) => options.onEvent(envelope),
       emitAdoptState: (state) => options.onAdoptState?.(state),
@@ -87,6 +89,7 @@ function makeFakePool() {
       sealTitle: async () => ({ payload: 'sealed-title', nonce: 'nonce' }),
       sendRepoBranchesRequest: () => undefined,
       sendWorkspaceReap: (sessionId) => conn.reaps.push(sessionId),
+      switchBranch: (sessionId, branch) => conn.switches.push({ sessionId, branch }),
       sendAdoptConfig: (set) => conn.adoptConfigs.push(set),
       close: () => {
         conn.closed = true;

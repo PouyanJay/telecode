@@ -39,6 +39,7 @@ describe('relay: relay.error for frames sent while the daemon is offline', () =>
     ['handover.answer', { requestId: 'r3', answerText: 'go on' }],
     ['user.message', { text: 'continue' }],
     ['session.control', { action: 'interrupt' }],
+    ['session.branch.switch', { branch: 'feat/other' }],
   ] as const)('answers a %s to an offline daemon with device_offline', async (type, payload) => {
     const deviceId = `device-offline-${type}`;
     const browser = await connectBrowser(relayUrl, userId, deviceId);

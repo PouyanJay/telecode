@@ -46,6 +46,8 @@ import {
   type SessionStatusName,
   workspaceReapRequestPayloadSchema,
   type WorkspaceReapStatePayload,
+  sessionBranchSwitchPayloadSchema,
+  type SessionBranchStatePayload,
 } from '@telecode/protocol';
 
 import { DEFAULT_ADOPT_SETTINGS, loadAdoptConfig, saveAdoptConfig } from './adopt/adopt-config';
@@ -70,6 +72,7 @@ import { questionsFromToolInput } from './adopt/question-from-tool-input';
 import { createTranscriptMirror, type TranscriptMirror } from './adopt/transcript-mirror';
 import { type BranchReader } from './adopt/git-branch';
 import { type BranchLister } from './sessions/branch-list';
+import { type BranchSwitcher } from './sessions/branch-switcher';
 import { type WorkspaceChangesReader } from './sessions/workspace-changes';
 import { type WorkspaceReaper } from './sessions/workspace-reaper';
 import {
@@ -228,6 +231,12 @@ export interface DaemonOptions {
    * omitted → every reap answers `not-reapable`.
    */
   readonly reapWorkspace?: WorkspaceReaper;
+  /**
+   * Moves a launched session's worktree onto another existing branch between turns
+   * (`session.branch.switch`, branch-actions T4). Injected at the composition root (real
+   * `createGitBranchSwitcher`); omitted → every switch answers `not-launched`.
+   */
+  readonly switchBranch?: BranchSwitcher;
   readonly logger?: Logger;
 }
 
@@ -1701,6 +1710,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
         await handleWorkspaceReap(envelope);
         return;
       }
+      case 'session.branch.switch': {
+        await handleBranchSwitch(envelope);
+        return;
+      }
       case 'viewer.presence': {
         // Relay tells us whether any browser is watching this channel (the mirror of device.presence). We
         // hold it so the adopted-session gate only blocks for a remote approval while an operator is present.
@@ -2027,28 +2040,41 @@ export function createDaemon(options: DaemonOptions): Daemon {
    */
   async function handleRepoBranches(envelope: Envelope): Promise<void> {
     const browserPublicKey = envelope.sender_public_key;
-    // Same boundary discipline as adopt.config: open + validate the (trivial) request before answering.
+    // Same boundary discipline as adopt.config: open + validate the request before answering.
+    let askedSessionId: string | undefined;
     try {
       const raw = cipher.enabled ? await cipher.openFromBrowser(envelope) : envelope.payload;
-      repoBranchesRequestPayloadSchema.parse(raw);
+      askedSessionId = repoBranchesRequestPayloadSchema.parse(raw).sessionId;
     } catch (err) {
       log.warn({ err, deviceId: options.deviceId }, 'daemon: dropped invalid repo.branches');
       return;
     }
-    let state: RepoBranchesStatePayload = { available: false, branches: [] };
-    if (defaultRepoPath !== undefined && options.listRepoBranches !== undefined) {
+    // The default repo (Phase B), or — session-scoped ask (T4) — that LAUNCHED session's own repo
+    // (an unknown/adopted/repo-less session answers unavailable; adopted checkouts stay untouched).
+    const sessionRec =
+      askedSessionId !== undefined ? sessionRecords.get(askedSessionId) : undefined;
+    const repoToList =
+      askedSessionId !== undefined
+        ? sessionRec?.origin !== 'external'
+          ? sessionRec?.repoPath
+          : undefined
+        : defaultRepoPath;
+    let state: RepoBranchesStatePayload = {
+      available: false,
+      branches: [],
+      ...(askedSessionId !== undefined ? { sessionId: askedSessionId } : {}),
+    };
+    if (repoToList !== undefined && options.listRepoBranches !== undefined) {
       try {
-        const listed = await options.listRepoBranches(defaultRepoPath);
+        const listed = await options.listRepoBranches(repoToList);
         state = {
+          ...state,
           available: true,
           branches: listed.branches,
           ...(listed.defaultBranch !== undefined ? { defaultBranch: listed.defaultBranch } : {}),
         };
       } catch (err) {
-        log.warn(
-          { err, deviceId: options.deviceId },
-          'daemon: could not list default repo branches',
-        );
+        log.warn({ err, deviceId: options.deviceId }, 'daemon: could not list repo branches');
       }
     }
     enqueueSend(async () => {
@@ -2066,6 +2092,74 @@ export function createDaemon(options: DaemonOptions): Daemon {
         }),
       );
     });
+  }
+
+  /**
+   * Answer `session.branch.switch` (branch-actions T4): move a LAUNCHED session's worktree onto
+   * another existing branch, strictly BETWEEN turns. On success the switch is announced twice
+   * over: the sealed `session.branch.state` settles the asking control, and fresh `session.meta`
+   * + `session.changes` update every watcher (the branch row and the panel follow the checkout).
+   * The base ref deliberately stays the LAUNCH base (AD-6) — the panel labels "vs <base>".
+   */
+  async function handleBranchSwitch(envelope: Envelope): Promise<void> {
+    const sessionId = envelope.session_id;
+    if (sessionId === undefined) return;
+    const parsed = sessionBranchSwitchPayloadSchema.safeParse(await readSessionPayload(envelope));
+    if (!parsed.success) {
+      log.warn(
+        { deviceId: options.deviceId, sessionId },
+        'daemon: dropped invalid session.branch.switch',
+      );
+      return;
+    }
+    const state = await branchSwitchOutcome(sessionId, parsed.data.branch);
+    // Outcome code only — branch names are sealed workspace content, never logged.
+    log.info(
+      {
+        deviceId: options.deviceId,
+        sessionId,
+        ok: state.ok,
+        ...(state.ok ? {} : { code: state.code }),
+      },
+      'daemon: branch switch answered',
+    );
+    sendForSession(envelope, 'session.branch.state', state);
+    if (state.ok) {
+      emitSessionMeta(envelope, { branch: state.branch });
+      emitSessionChanges(envelope);
+    }
+  }
+
+  /** The switch decision for one session — every refusal is a coded, retellable story. */
+  async function branchSwitchOutcome(
+    sessionId: string,
+    branch: string,
+  ): Promise<SessionBranchStatePayload> {
+    const rec = sessionRecords.get(sessionId);
+    const cwd = sessionCwds.get(sessionId) ?? rec?.cwd;
+    if (
+      rec === undefined ||
+      rec.origin === 'external' || // adopted sessions are display-only by design
+      options.switchBranch === undefined ||
+      cwd === undefined ||
+      rec.repoPath === undefined // a daemon-cwd session runs in the user's own dir — never moved
+    ) {
+      return { ok: false, code: 'not-launched' };
+    }
+    if (activeRuns.has(sessionId)) return { ok: false, code: 'mid-turn' };
+    // Between turns = a settled run a follow-up would continue (done / turn_limit). error and
+    // needs_restart can't take follow-ups, so moving their tree serves nothing; awaiting_input
+    // holds a live gate mid-run (also covered by activeRuns above).
+    if (rec.status === 'error' || rec.status === 'needs_restart') {
+      return { ok: false, code: 'ended' };
+    }
+    if (rec.status !== 'done' && rec.status !== 'turn_limit') {
+      return { ok: false, code: 'mid-turn' };
+    }
+    const result = await options.switchBranch(cwd, branch);
+    // On success `rec.baseBranch` is deliberately untouched (AD-6): the launch base stays the
+    // Changes panel's diff anchor, and the panel's "vs <base>" label keeps that honest.
+    return result.ok ? { ok: true, branch } : result;
   }
 
   /**

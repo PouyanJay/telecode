@@ -196,20 +196,29 @@ export const adoptStatePayloadSchema = adoptSettingsSchema.extend({
 });
 export type AdoptStatePayload = z.infer<typeof adoptStatePayloadSchema>;
 
-/** Payload for `repo.branches` (web → daemon): ask for the default repo's branches (Phase B). */
-export const repoBranchesRequestPayloadSchema = z.object({});
+/**
+ * Payload for `repo.branches` (web → daemon): ask for the default repo's branches (Phase B), or —
+ * with `sessionId` (branch-actions T4) — for the branches of THAT launched session's own repo (the
+ * rail's Switch picker and the fork drawer's base list). Additive optional: old peers only ever ask
+ * the default form.
+ */
+export const repoBranchesRequestPayloadSchema = z.object({
+  sessionId: z.string().uuid().optional(),
+});
 export type RepoBranchesRequestPayload = z.infer<typeof repoBranchesRequestPayloadSchema>;
 
 /**
- * Payload for `repo.branches.state` (daemon → web, sealed to the requester): the DEFAULT repo's
- * local branches for the launch drawer's base picker. `available: false` = this daemon has no
- * default repo configured (the drawer then offers no local base choice). Bounded like the launch's
- * branch fields; the daemon caps the list before sealing.
+ * Payload for `repo.branches.state` (daemon → web, sealed to the requester): the asked repo's
+ * local branches. `available: false` = nothing to list (no default repo configured, or an unknown/
+ * repo-less session). `sessionId` echoes a session-scoped ask so the browser can key the answer to
+ * the asking surface; absent on the Phase B default-repo form. Bounded like the launch's branch
+ * fields; the daemon caps the list before sealing.
  */
 export const repoBranchesStatePayloadSchema = z.object({
   available: z.boolean(),
   branches: z.array(z.string().min(1).max(MAX_BRANCH_NAME_CHARS)).max(MAX_REPO_BRANCHES),
   defaultBranch: z.string().min(1).max(256).optional(),
+  sessionId: z.string().uuid().optional(),
 });
 export type RepoBranchesStatePayload = z.infer<typeof repoBranchesStatePayloadSchema>;
 
@@ -252,6 +261,48 @@ export const workspaceReapStatePayloadSchema = z.union([
   }),
 ]);
 export type WorkspaceReapStatePayload = z.infer<typeof workspaceReapStatePayloadSchema>;
+
+/**
+ * Payload for `session.branch.switch` (web → daemon, branch-actions T4): move a LAUNCHED session's
+ * worktree onto another EXISTING branch between turns. Sealed under the session content key like
+ * every session-scoped command; the branch name is validated at the boundary (it reaches git argv).
+ */
+export const sessionBranchSwitchPayloadSchema = z.object({
+  branch: gitBranchNameSchema,
+});
+export type SessionBranchSwitchPayload = z.infer<typeof sessionBranchSwitchPayloadSchema>;
+
+/**
+ * Why a switch was refused: a turn is in flight (`mid-turn` — never move the tree under the agent),
+ * the session can't take follow-ups anymore (`ended`), it isn't a telecode-launched worktree session
+ * (`not-launched` — adopted checkouts are display-only by design), the tree has uncommitted work
+ * (`dirty`), the branch doesn't exist locally (`not-found`), git refused because another worktree
+ * holds it (`checked-out-elsewhere` — usually the user's own working copy), or git failed
+ * (`failed`, the generic story — stderr can carry local paths).
+ */
+export const BRANCH_SWITCH_FAILURE_CODES = [
+  'mid-turn',
+  'ended',
+  'not-launched',
+  'dirty',
+  'not-found',
+  'checked-out-elsewhere',
+  'failed',
+] as const;
+export const branchSwitchFailureCodeSchema = z.enum(BRANCH_SWITCH_FAILURE_CODES);
+export type BranchSwitchFailureCode = z.infer<typeof branchSwitchFailureCodeSchema>;
+
+/**
+ * Payload for `session.branch.state` (daemon → web, sealed under the session content key): how the
+ * switch settled. Success names the branch actually checked out; a refusal always carries a code.
+ * The daemon also re-emits `session.meta` (new branch) and `session.changes` on success — this
+ * frame exists so the ASKING surface can settle its in-flight control.
+ */
+export const sessionBranchStatePayloadSchema = z.union([
+  z.object({ ok: z.literal(true), branch: z.string().min(1).max(MAX_BRANCH_NAME_CHARS) }),
+  z.object({ ok: z.literal(false), code: branchSwitchFailureCodeSchema }),
+]);
+export type SessionBranchStatePayload = z.infer<typeof sessionBranchStatePayloadSchema>;
 
 /** Session lifecycle states; mirrors the `sessions.status` column. */
 export const SESSION_STATUSES = [

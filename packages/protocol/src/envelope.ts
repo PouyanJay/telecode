@@ -63,6 +63,12 @@ export const MESSAGE_TYPES = [
   // requesting browser with ok or a coded refusal. Workspace paths/branch names stay sealed.
   'workspace.reap',
   'workspace.reap.state',
+  // Between-turns branch switch for LAUNCHED sessions (branch-actions T4), session-scoped and
+  // sealed under the session content key: `session.branch.switch` (web -> daemon) asks to check
+  // out an existing branch in the session's worktree; `session.branch.state` (daemon -> web)
+  // settles the ask (ok + the branch, or a coded refusal — mid-turn, dirty, …).
+  'session.branch.switch',
+  'session.branch.state',
   // human-in-the-loop + follow-ups (web -> daemon)
   'permission.decision',
   // the human's pick for an `agent.question`, relayed to the model as deny-feedback (web -> daemon).

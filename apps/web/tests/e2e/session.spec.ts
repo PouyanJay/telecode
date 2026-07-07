@@ -123,6 +123,26 @@ test('launch cuts a named branch from a picked base (branch-launch Phase B)', as
   await expect(page.getByText('Finished')).toBeVisible();
 });
 
+test('switch the session branch between turns from the rail (branch-actions T4)', async ({
+  page,
+}) => {
+  await signIn(page);
+  await launchFromDashboard(page, 'Prepare the branch switch');
+  await page.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Finished')).toBeVisible();
+
+  // Between turns (done) on a launched session with its daemon online → the rail offers the switch.
+  const rail = page.getByLabel('Session details');
+  await rail.getByRole('button', { name: 'Switch branch' }).click();
+  await rail.getByLabel('Switch to').selectOption('develop');
+  await rail.getByRole('button', { name: 'Switch', exact: true }).click();
+
+  // The Branch row follows the daemon's session.meta re-emit — never an optimistic flip.
+  await expect(rail.getByText('develop', { exact: true })).toBeVisible();
+  // The picker closed back to the quiet affordance.
+  await expect(rail.getByRole('button', { name: 'Switch branch' })).toBeVisible();
+});
+
 test('the launched session appears in the dashboard list with live status', async ({ page }) => {
   await signIn(page);
   await launchFromDashboard(page, 'Add a hello line to the README');

@@ -54,6 +54,7 @@ function makePool() {
       sendAdoptConfig: () => undefined,
       sendRepoBranchesRequest: () => undefined,
       sendWorkspaceReap: () => undefined,
+      switchBranch: () => undefined,
       close: () => {
         rec.closed = true;
       },

@@ -13,6 +13,8 @@ import {
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
   sessionControlPayloadSchema,
+  repoBranchesRequestPayloadSchema,
+  sessionBranchSwitchPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionResumeNewPayloadSchema,
   workspaceReapRequestPayloadSchema,
@@ -219,13 +221,18 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     return;
   }
 
-  // The sealed local-branch round-trip (Phase B) — cleartext in this fake's default mode, exactly
-  // like its other frames; the sealed path is proven by the daemon package's own crypto tests.
+  // The sealed local-branch round-trip (Phase B; sessionId echo = the T4 session-scoped variant) —
+  // cleartext in this fake's default mode, exactly like its other frames; the sealed path is
+  // proven by the daemon package's own crypto tests.
   if (envelope.type === 'repo.branches') {
+    const ask = repoBranchesRequestPayloadSchema.safeParse(envelope.payload);
+    const echo =
+      ask.success && ask.data.sessionId !== undefined ? { sessionId: ask.data.sessionId } : {};
     send('repo.branches.state', {
       available: true,
       branches: ['main', 'develop', 'feat/existing'],
       defaultBranch: 'main',
+      ...echo,
     });
     return;
   }
@@ -481,6 +488,21 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
     if (gate?.kind === 'permission') gate.decision = 'deny';
     rec.status = 'done';
     send('session.ended', { status: 'done' }, sid);
+    return;
+  }
+
+  // Between-turns branch switch (Phase C T4): settle the ask, then re-announce like the real
+  // daemon — fresh meta with the new branch and a recomputed changes summary.
+  if (envelope.type === 'session.branch.switch') {
+    const ask = sessionBranchSwitchPayloadSchema.safeParse(envelope.payload);
+    if (!ask.success) return;
+    if (records.get(sid) === undefined) {
+      send('session.branch.state', { ok: false, code: 'not-launched' }, sid);
+      return;
+    }
+    send('session.branch.state', { ok: true, branch: ask.data.branch }, sid);
+    send('session.meta', { branch: ask.data.branch }, sid);
+    send('session.changes', SESSION_CHANGES_SUMMARY, sid);
     return;
   }
 
