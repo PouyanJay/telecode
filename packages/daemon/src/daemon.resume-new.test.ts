@@ -110,7 +110,13 @@ function sendResumeNew(
   relay: FakeRelay,
   ids: { userId: string; deviceId: string },
   parentId: string,
-  payload: { prompt: string; clientRef?: string; baseBranch?: string; branchName?: string },
+  payload: {
+    prompt: string;
+    clientRef?: string;
+    baseBranch?: string;
+    branchName?: string;
+    permissionMode?: string;
+  },
 ): void {
   relay.send(
     makeEnvelope({
@@ -496,6 +502,78 @@ describe('daemon resume-as-new (session-identity T8)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('continuation permission mode (continuation-permission-mode fix)', () => {
+  it('starts the child in the browser-requested mode — bypass runs unattended', async () => {
+    // The user's saved default is bypass, but the PARENT chain ran in approve mode: the child is a
+    // NEW session, so the explicit mode on resume_new wins over inheritance (the reported bug: a
+    // continuation kept asking although Settings said bypass). The adapter attempts Bash only on
+    // the CHILD's prompt — the parent's prompt never triggers a tool; it exists purely to reach
+    // session.ended so resume_new has a terminal target (parent-mode behavior is NOT under test).
+    const adapter: AgentAdapter = {
+      async run(prompt, { canUseTool, onEvent }) {
+        if (prompt === 'continue it hands-off') {
+          const decision = await canUseTool({
+            toolName: 'Bash',
+            input: { command: 'pnpm test' },
+          });
+          if (decision.behavior === 'allow') {
+            onEvent({ type: 'tool_use', toolName: 'Bash', input: { command: 'pnpm test' } });
+          }
+        }
+        onEvent({ type: 'message', text: 'done' });
+        return { intercepted: [], allowed: [], denied: [], sessionId: 'sdk-mode-child' };
+      },
+    };
+    const ids = await startDaemon(adapter);
+    const { relay } = ids;
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    await launchToEnd(relay, ids, parentId, 'build the feature');
+
+    sendResumeNew(relay, ids, parentId, {
+      prompt: 'continue it hands-off',
+      permissionMode: 'bypassPermissions',
+    });
+    await ackChained(relay, ids, childId);
+    // The child's Bash runs WITHOUT a gate; the turn completes on its own.
+    const ended = await relay.waitForFrame(ofType('session.ended', childId));
+    expect(ended.status).toBe('done');
+    await expectNoFrame(relay, ids, ofType('agent.permission_request', childId));
+  });
+
+  it('inherits the parent mode when the browser sends none (older webs)', async () => {
+    // Parent launched in bypass; a mode-less resume_new keeps the child unattended too.
+    const ids = await startDaemon(
+      createFakeAgentAdapter(
+        [
+          { type: 'tool_use', toolName: 'Bash', input: { command: 'echo hi' } },
+          { type: 'message', text: 'done' },
+        ],
+        { sessionId: 'sdk-mode-inherit' },
+      ),
+    );
+    const { relay } = ids;
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    relay.send(
+      makeEnvelope({
+        type: 'session.launch',
+        userId: ids.userId,
+        deviceId: ids.deviceId,
+        sessionId: parentId,
+        payload: { prompt: 'parent task', permissionMode: 'bypassPermissions' },
+      }),
+    );
+    await relay.waitForFrame(ofType('session.ended', parentId));
+
+    sendResumeNew(relay, ids, parentId, { prompt: 'keep going' });
+    await ackChained(relay, ids, childId);
+    const ended = await relay.waitForFrame(ofType('session.ended', childId));
+    expect(ended.status).toBe('done');
+    await expectNoFrame(relay, ids, ofType('agent.permission_request', childId));
   });
 });
 

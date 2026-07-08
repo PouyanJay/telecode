@@ -15,6 +15,7 @@ import {
   makeEnvelope,
   parseEnvelope,
   permissionDecisionPayloadSchema,
+  permissionModeSchema,
   questionAnswerPayloadSchema,
   sessionAdoptedPayloadSchema,
   sessionChainedPayloadSchema,
@@ -1426,6 +1427,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         clientRef?: string;
         baseBranch?: string;
         branchName?: string;
+        permissionMode?: PermissionModeName;
       }
     | undefined
   > {
@@ -1455,6 +1457,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
       ...(parsed.data.clientRef !== undefined ? { clientRef: parsed.data.clientRef } : {}),
       ...(parsed.data.baseBranch !== undefined ? { baseBranch: parsed.data.baseBranch } : {}),
       ...(parsed.data.branchName !== undefined ? { branchName: parsed.data.branchName } : {}),
+      ...(parsed.data.permissionMode !== undefined
+        ? { permissionMode: parsed.data.permissionMode }
+        : {}),
     };
   }
 
@@ -1551,7 +1556,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // Fork onto a chosen branch (branch-actions T5): either field means the child gets its OWN
     // worktree instead of inheriting the parent's.
     const wantsOwnWorktree = request.baseBranch !== undefined || request.branchName !== undefined;
-    const inherited = resolveChildInheritance(parentId, parent, wantsOwnWorktree);
+    const inherited = resolveChildInheritance(parentId, parent, {
+      wantsOwnWorktree,
+      ...(request.permissionMode !== undefined ? { requestedMode: request.permissionMode } : {}),
+    });
     const minted = await mintChainedChild({
       parentSessionId: parentId,
       permissionMode: inherited.permissionMode,
@@ -1622,14 +1630,16 @@ export function createDaemon(options: DaemonOptions): Daemon {
   function resolveChildInheritance(
     parentId: string,
     parent: SessionRecord | undefined,
-    wantsOwnWorktree: boolean,
+    options: { wantsOwnWorktree: boolean; requestedMode?: PermissionModeName },
   ): { permissionMode: PermissionModeName; cwd?: string; metaPatch: Partial<SessionMetaPayload> } {
-    const cwd = wantsOwnWorktree
+    const cwd = options.wantsOwnWorktree
       ? undefined
       : (sessionCwds.get(parentId) ?? parent?.cwd ?? parent?.meta?.cwd);
-    const branch = wantsOwnWorktree ? undefined : parent?.meta?.branch;
+    const branch = options.wantsOwnWorktree ? undefined : parent?.meta?.branch;
     const repo = parent?.meta?.repo;
-    const permissionMode = parent?.permissionMode ?? 'default';
+    // The child is a NEW session: an explicit mode from the browser (the operator's saved default,
+    // continuation-permission-mode fix) wins over inheriting a mode the operator moved past.
+    const permissionMode = options.requestedMode ?? parent?.permissionMode ?? 'default';
     return {
       permissionMode,
       ...(cwd !== undefined ? { cwd } : {}),
@@ -2751,7 +2761,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const parentBranch = sessionRecords.get(parentId)?.meta?.branch;
     const minted = await mintChainedChild({
       parentSessionId: parentId,
-      permissionMode: 'default',
+      // The continuation keeps the mode the LOCAL session ran in (mirrored off its hook events) —
+      // a bypass terminal session hands over to an unattended child, not a suddenly-gated one.
+      permissionMode: sessionRecords.get(parentId)?.permissionMode ?? 'default',
       metaPatch: {
         ...derivedMetaPatch(title, handover.cwd),
         // The fork keeps working in the parent's checkout — carry its branch (branch-visibility T3).
@@ -3113,6 +3125,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
     adoptedRec.origin = 'external';
     adoptedRec.claudeSessionId = event.session_id;
     if (event.cwd !== undefined) adoptedRec.cwd = event.cwd;
+    // Mirror the LOCAL session's permission mode onto the record (when it is one telecode knows) —
+    // a handover/takeover continuation then starts in the mode the terminal actually ran in, not a
+    // hardcoded default. Unknown modes (e.g. the CLI's auto/dontAsk) leave the record untouched.
+    const parsedMode = permissionModeSchema.safeParse(event.permission_mode);
+    if (parsedMode.success) adoptedRec.permissionMode = parsedMode.data;
     // An adopted session is live the moment we first see it — and hook activity DISPROVES a
     // restart's honest `needs_restart` guess (T4 restores awaiting_input that way) or a
     // between-turns `waiting_local`: the external conversation demonstrably continues, so the

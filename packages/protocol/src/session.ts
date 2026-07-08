@@ -127,6 +127,13 @@ export const sessionResumeNewPayloadSchema = z.object({
    */
   baseBranch: gitBranchNameSchema.optional(),
   branchName: gitBranchNameSchema.optional(),
+  /**
+   * The mode the NEW linked session starts in (continuation-permission-mode fix): a resume-as-new
+   * child is a new session, so the browser sends the operator's saved default — exactly like a
+   * launch — instead of the child silently inheriting a mode the operator may have moved past.
+   * Optional for wire compatibility: an older web omits it and the daemon inherits the parent's mode.
+   */
+  permissionMode: permissionModeSchema.optional(),
 });
 export type SessionResumeNewPayload = z.infer<typeof sessionResumeNewPayloadSchema>;
 

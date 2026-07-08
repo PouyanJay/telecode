@@ -9,6 +9,18 @@ Versions below are releases of the **`@telecode/cli`** npm package (the daemon �
 The web app and relay deploy continuously from `main`; changes that live purely in the web app or relay
 are listed under the CLI release they accompanied.
 
+## [0.7.3] — 2026-07-08
+
+### Fixed
+
+- **Continuations now respect your default permission mode.** "Resume as new" and the one-step
+  takeover start a NEW session — but it silently inherited the old chain's permission mode, so a
+  user who switched their default to Bypass kept getting approval prompts on every continuation.
+  A new linked session now starts in your saved default mode, exactly like a fresh launch.
+- **Handover continuations keep the terminal's mode.** Taking over a local session that ran with
+  permissions bypassed no longer produces a suddenly-gated continuation — the child keeps the mode
+  the local session actually ran in.
+
 ## [0.7.2] — 2026-07-08
 
 ### Added
