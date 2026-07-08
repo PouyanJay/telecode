@@ -2765,7 +2765,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (offer.telecodeSessionId === telecodeSessionId) pendingHandovers.delete(requestId);
     }
     rec.transcript = rec.transcript.filter((entry) => !isStaleOffer(entry));
-    setStatus(telecodeSessionId, 'running');
+    // REPORT the flip (T2): the registry row sits at awaiting_input for the superseded offer, and
+    // without a frame it would stick there until the next gate or ending.
+    reportRunning(telecodeSessionId);
     // Persist the pruned state too — a restart in this window must not resurrect the offer.
     persistSession(telecodeSessionId, rec);
     sendForSession(
@@ -2791,6 +2793,43 @@ export function createDaemon(options: DaemonOptions): Daemon {
       status: 'waiting_local',
       ts: now(),
     });
+  }
+
+  /**
+   * The mirror of {@link reportWaitingLocal} (adopted-takeover T2): a new LOCAL turn began — the
+   * user submitted a prompt (UserPromptSubmit, the only signal a chat-only turn gives) or a tool
+   * call arrived. Reported as a frame, not just a local flip, so the relay registry leaves
+   * waiting_local/awaiting_input instead of sticking there until the next gate or ending.
+   */
+  function reportRunning(telecodeSessionId: string): void {
+    setStatus(telecodeSessionId, 'running');
+    sendForSession(adoptedSource(telecodeSessionId), 'session.status', {
+      status: 'running',
+      ts: now(),
+    });
+  }
+
+  /**
+   * UserPromptSubmit (adopted-takeover T2): the user typed the next task at their terminal. Acts only
+   * on a tracked session. Local activity supersedes any pending takeover offer (the user answered
+   * where the conversation lives), and a between-turns / restart-guessed session honestly flips back
+   * to RUNNING. The prompt text itself is deliberately never parsed, logged, or mirrored here — the
+   * transcript mirror picks the turn up on its Stop.
+   */
+  function handleUserPromptSubmitHook(event: HookEvent): unknown {
+    const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
+    if (knownId === undefined) return {};
+    supersedePendingHandoverByLocalActivity(knownId);
+    const status = recordFor(knownId).status;
+    if (status === 'waiting_local' || status === 'needs_restart') {
+      reportRunning(knownId);
+      persistSession(knownId, recordFor(knownId));
+    }
+    log.info(
+      { deviceId: options.deviceId, sessionId: knownId },
+      'daemon: local prompt — adopted session running',
+    );
+    return {};
   }
 
   /**
@@ -2935,6 +2974,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (event.hook_event_name === 'SessionEnd') return handleSessionEndHook(event);
     if (event.hook_event_name === 'Notification') return handleNotificationHook(event);
     if (event.hook_event_name === 'Stop') return handleStopHook(event);
+    if (event.hook_event_name === 'UserPromptSubmit') return handleUserPromptSubmitHook(event);
 
     // Adoption policy gate (Journey 3): for a session we are NOT already tracking, apply the per-machine
     // policy — if adoption is disabled or this project is on the denylist, telecode stays out entirely and
@@ -2971,10 +3011,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
     adoptedRec.claudeSessionId = event.session_id;
     if (event.cwd !== undefined) adoptedRec.cwd = event.cwd;
     // An adopted session is live the moment we first see it — and hook activity DISPROVES a
-    // restart's honest `needs_restart` guess (T4 restores awaiting_input that way): the external
-    // conversation demonstrably continues, so the session revives rather than reading dead forever.
-    if (adoptedRec.status === 'starting' || adoptedRec.status === 'needs_restart') {
+    // restart's honest `needs_restart` guess (T4 restores awaiting_input that way) or a
+    // between-turns `waiting_local`: the external conversation demonstrably continues, so the
+    // session revives rather than reading stale. First adoption (`starting`) flips locally only —
+    // the announce ack already lands the row as running; revives REPORT the flip (T2), since no
+    // other frame would move the registry off the stale status.
+    if (adoptedRec.status === 'starting') {
       setStatus(telecodeSessionId, 'running');
+    } else if (adoptedRec.status === 'needs_restart' || adoptedRec.status === 'waiting_local') {
+      reportRunning(telecodeSessionId);
     }
     // E2E (invariant #5): mint this session's content key so its frames go to the relay as ciphertext, not
     // plaintext. Idempotent. The key is delivered to the browser on `session.subscribe` (it announces its

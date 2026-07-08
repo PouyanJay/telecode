@@ -614,6 +614,160 @@ describe('daemon: adopted sessions end-to-end', () => {
     expect(sessionHistoryPayloadSchema.parse(history.payload).status).toBe('awaiting_input');
   });
 
+  it('flips waiting_local back to running when the user submits a new local prompt', async () => {
+    // Adopt, then park between turns (T1).
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+    const transcriptPath = join(dir, 'prompt-flip.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Turn one done.' }] },
+      })}\n`,
+    );
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      last_assistant_message: 'Turn one done.',
+    });
+    await relay.waitForFrame((e) => e.type === 'session.status' && e.status === 'waiting_local');
+    await stop;
+
+    // The user types the next task AT THE TERMINAL — a chat-only turn begins (no PreToolUse fires
+    // for it), so UserPromptSubmit is the only honest RUNNING signal.
+    const prompt = hookRpc(socketPath, {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      prompt: 'now write the tests',
+    });
+    const running = await relay.waitForFrame(
+      (e) =>
+        e.type === 'session.status' && e.session_id === TELECODE_SESSION && e.status === 'running',
+    );
+    expect(sessionStatusPayloadSchema.parse(running.payload).status).toBe('running');
+    expect(await prompt).toEqual({});
+  });
+
+  it('revives waiting_local to running on the next tool call (a tool proves a live turn)', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+    const transcriptPath = join(dir, 'tool-revive.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Paused.' }] },
+      })}\n`,
+    );
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      last_assistant_message: 'Paused.',
+    });
+    await relay.waitForFrame((e) => e.type === 'session.status' && e.status === 'waiting_local');
+    await stop;
+
+    // A new turn starts with a tool call (e.g. the user's prompt went straight to work).
+    const tool = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    const running = await relay.waitForFrame(
+      (e) =>
+        e.type === 'session.status' && e.session_id === TELECODE_SESSION && e.status === 'running',
+    );
+    expect(running.status).toBe('running');
+    expect(await tool).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
+  });
+
+  it('supersedes a pending handover offer when the user answers at the terminal (UserPromptSubmit)', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+    const transcriptPath = join(dir, 'supersede-prompt.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Should I refactor the parser or the printer first?' }],
+        },
+      })}\n`,
+    );
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      last_assistant_message: 'Should I refactor the parser or the printer first?',
+    });
+    await relay.waitForFrame((e) => e.type === 'agent.handover');
+    await stop;
+
+    // The user answers AT THE TERMINAL: the takeover offer is stale — it must clear and the session
+    // must honestly report running again (both live browsers and the relay registry, via the frame).
+    const prompt = hookRpc(socketPath, {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      prompt: 'the parser first',
+    });
+    const running = await relay.waitForFrame(
+      (e) =>
+        e.type === 'session.status' && e.session_id === TELECODE_SESSION && e.status === 'running',
+    );
+    expect(running.status).toBe('running');
+    expect(await prompt).toEqual({});
+
+    // The mirror's history (from the Stop) precedes the supersede's pruned one — consume, then check
+    // the subscribe backfill: no handover entry left, status running.
+    await relay.waitForFrame((e) => e.type === 'session.history');
+    await relay.waitForFrame((e) => e.type === 'session.history');
+    relay.send(
+      makeEnvelope({
+        type: 'session.subscribe',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: {},
+      }),
+    );
+    const backfill = sessionHistoryPayloadSchema.parse(
+      (await relay.waitForFrame((e) => e.type === 'session.history')).payload,
+    );
+    expect(backfill.status).toBe('running');
+    expect(backfill.entries.some((e) => e.kind === 'handover')).toBe(false);
+  });
+
   it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {
     // Adopt the session via a read-only tool, ack it.
     const first = hookRpc(socketPath, {
@@ -1460,6 +1614,7 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
       'SessionEnd',
       'SessionStart',
       'Stop',
+      'UserPromptSubmit',
     ]);
 
     // And adopt.state reports the setup status so the web can render "active" — parsed with the wire schema
@@ -1470,7 +1625,8 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     expect(payload.enabled).toBe(true);
     expect(payload.hooksInstalled).toBe(true);
     expect(payload.events).toContain('Stop');
-    expect(payload.events).toHaveLength(5);
+    expect(payload.events).toContain('UserPromptSubmit');
+    expect(payload.events).toHaveLength(6);
   });
 
   it('is idempotent across a restart — re-installing on start never duplicates the hooks', async () => {
@@ -1542,7 +1698,7 @@ describe('daemon: adoption policy (web-managed config + denylist gating, Journey
     const on = await relay.waitForFrame(
       (e) => e.type === 'adopt.state' && (e.payload as { hooksInstalled: boolean }).hooksInstalled,
     );
-    expect(adoptStatePayloadSchema.parse(on.payload).events).toHaveLength(5);
+    expect(adoptStatePayloadSchema.parse(on.payload).events).toHaveLength(6);
   });
 
   it('starts and serves even when the hooks cannot be installed (fail-soft), reporting not-installed', async () => {

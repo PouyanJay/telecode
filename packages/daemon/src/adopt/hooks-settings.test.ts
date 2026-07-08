@@ -52,11 +52,19 @@ describe('hooks installer', () => {
     const group = settings.hooks.PreToolUse[0]!;
     expect(group.matcher).toBe('*');
     expect(group.hooks[0]).toMatchObject({ type: 'command', command: COMMAND, timeout: 3600 });
-    // All five lifecycle events telecode adopts on (Journey 1–4): gate/question + adopt/end + attention +
-    // the free-form handover detector (Stop).
+    // All six lifecycle events telecode adopts on (Journey 1–4 + adopted-takeover T2): gate/question +
+    // adopt/end + attention + the free-form handover detector (Stop) + the new-local-turn signal
+    // (UserPromptSubmit — flips a between-turns session back to RUNNING, incl. chat-only turns).
     expect(await readHooksStatus({ settingsPath })).toEqual({
       installed: true,
-      events: ['PreToolUse', 'SessionStart', 'SessionEnd', 'Notification', 'Stop'],
+      events: [
+        'PreToolUse',
+        'SessionStart',
+        'SessionEnd',
+        'Notification',
+        'Stop',
+        'UserPromptSubmit',
+      ],
     });
   });
 

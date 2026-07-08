@@ -15,6 +15,8 @@ import { stripTelecodeHooks } from './strip-telecode-hooks';
  *  - `SessionEnd` — end the adopted session when the Claude Code process exits (Journey 3).
  *  - `Notification` — surface "needs attention / went idle" cues (Journey 3).
  *  - `Stop` — detect a free-form question at turn end and offer to take it over (Journey 4).
+ *  - `UserPromptSubmit` — a new local turn began (adopted-takeover T2): flips a between-turns
+ *    session back to RUNNING, including chat-only turns that never fire a PreToolUse.
  */
 const TELECODE_HOOK_EVENTS = [
   'PreToolUse',
@@ -22,6 +24,7 @@ const TELECODE_HOOK_EVENTS = [
   'SessionEnd',
   'Notification',
   'Stop',
+  'UserPromptSubmit',
 ] as const;
 
 export interface InstallHooksOptions {
