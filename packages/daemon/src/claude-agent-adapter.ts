@@ -7,12 +7,13 @@ import {
 import type { PermissionModeName } from '@telecode/protocol';
 import { pino, type Logger } from 'pino';
 
-import type {
-  AgentAdapter,
-  AgentEndReason,
-  AgentRunOptions,
-  AgentRunResult,
-  PermissionRequest,
+import {
+  AgentRunError,
+  type AgentAdapter,
+  type AgentEndReason,
+  type AgentRunOptions,
+  type AgentRunResult,
+  type PermissionRequest,
 } from './agent-adapter';
 import { classifyTool } from './permission-policy';
 
@@ -43,6 +44,32 @@ function resolveEndReason(subtype: string): AgentEndReason {
   if (subtype === 'success') return 'completed';
   if (subtype === 'error_max_turns') return 'turn_limit';
   return 'execution_error';
+}
+
+/**
+ * The SDK's turn-cap wording in its THROWN form (see {@link isThrownTurnCap}). Kept as a named
+ * constant so an SDK upgrade that rewords the message has one obvious place to re-sync — the graceful
+ * form is `resolveEndReason`'s `error_max_turns` case, and the regression guard is
+ * claude-agent-adapter.result.test.ts ("recovers a THROWN turn-cap error…").
+ */
+const TURN_CAP_MESSAGE_MARKER = 'maximum number of turns';
+
+/**
+ * A runaway safety net, NOT a task budget: real work routinely needs dozens of turns (the old
+ * default of 4 starved every substantial run). Hitting the net settles as the followable
+ * `turn_limit` — a follow-up message continues the same conversation.
+ */
+const DEFAULT_MAX_TURNS_SAFETY_NET = 100;
+
+/**
+ * Whether a thrown stream error is the SDK's turn-cap ending. Some SDK versions THROW
+ * "Claude Code returned an error result: Reached maximum number of turns (N)" from the message
+ * iterator instead of yielding a `result: error_max_turns` — surfacing that as a run failure turned
+ * the designed, followable "ENDED · TURN LIMIT" into FAILED (and misfired the resume fallback).
+ * Message-text detection is the only handle the SDK gives for the thrown form.
+ */
+function isThrownTurnCap(err: unknown): boolean {
+  return err instanceof Error && err.message.includes(TURN_CAP_MESSAGE_MARKER);
 }
 
 /** The SDK types a tool block's `input` as `unknown`; narrow it to an object instead of casting blindly. */
@@ -122,7 +149,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           // Drive the SDK with the session's mode (so `plan` plans and `acceptEdits` accepts), but never
           // `bypassPermissions` — telecode's gate stays in force regardless.
           permissionMode: sessionMode === 'bypassPermissions' ? 'default' : sessionMode,
-          maxTurns: options.maxTurns ?? 4,
+          maxTurns: options.maxTurns ?? DEFAULT_MAX_TURNS_SAFETY_NET,
           settingSources: options.settingSources ?? [],
           abortController,
           // Run in the session's worktree so parallel agents never clobber each other's files.
@@ -169,9 +196,24 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
       } catch (err) {
         // An operator interrupt/end aborts the query mid-stream. Return what we have (notably the
         // captured conversation id) so the daemon ends the turn cleanly and the session can still be
-        // resumed — rather than surfacing the abort as a run failure. Re-throw any genuine error.
-        if (!signal?.aborted) throw err;
-        log.debug({ sessionId }, 'agent session aborted (interrupt/end)');
+        // resumed — rather than surfacing the abort as a run failure.
+        if (signal?.aborted) {
+          log.debug({ sessionId }, 'agent session aborted (interrupt/end)');
+        } else if (isThrownTurnCap(err)) {
+          // The THROWN form of the turn cap (see isThrownTurnCap): recover it as the graceful
+          // turn_limit ending, keeping the captured conversation id so a follow-up resumes it.
+          endReason = 'turn_limit';
+          log.warn({ sessionId }, 'agent turn budget exhausted — settled as turn_limit');
+        } else {
+          // A genuine failure: tell the daemon whether the conversation had STARTED (a resume that
+          // got past init must never fall back to a context-losing fresh launch) and hand it the
+          // started id so a follow-up can still resume the conversation.
+          throw new AgentRunError(err instanceof Error ? err.message : 'agent run failed', {
+            cause: err,
+            hasConversationStarted: sessionId !== undefined,
+            ...(sessionId !== undefined ? { sessionId } : {}),
+          });
+        }
       }
 
       log.debug(

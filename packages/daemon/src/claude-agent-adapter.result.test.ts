@@ -9,7 +9,14 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: () => {
     const script = scripts.shift() ?? [];
     return (async function* () {
-      for (const message of script) yield message;
+      for (const message of script) {
+        // A `{ __throw }` script item makes the stream THROW mid-iteration — how some SDK versions
+        // surface terminal errors (notably the turn cap) instead of yielding a `result` message.
+        if (typeof message === 'object' && message !== null && '__throw' in message) {
+          throw message.__throw;
+        }
+        yield message;
+      }
     })();
   },
 }));
@@ -65,5 +72,43 @@ describe('createClaudeAgentAdapter: terminal result capture', () => {
   it('reports no endReason when the stream ends without a result message (abort / old SDK)', async () => {
     const result = await run([init]);
     expect(result.endReason).toBeUndefined();
+  });
+
+  it('recovers a THROWN turn-cap error as endReason "turn_limit", keeping the conversation id', async () => {
+    // Some SDK versions THROW on the cap instead of yielding `result: error_max_turns` — seen live:
+    // "Claude Code returned an error result: Reached maximum number of turns (4)". Surfacing that as
+    // a run failure turned the designed, followable "ENDED · TURN LIMIT" into FAILED — and, during a
+    // fork-resume, misfired the context-losing fresh-launch fallback.
+    const result = await run([
+      init,
+      {
+        __throw: new Error(
+          'Claude Code returned an error result: Reached maximum number of turns (4)',
+        ),
+      },
+    ]);
+    expect(result.endReason).toBe('turn_limit');
+    expect(result.sessionId).toBe('sdk-r');
+  });
+
+  it('attaches the started conversation to a genuine mid-stream failure (AgentRunError)', async () => {
+    // The daemon needs to know a throwing run had already STARTED its conversation: the resume
+    // fallback must not fire (it would lose the started context), and the captured id lets a
+    // follow-up resume instead of dead-ending in needs_restart.
+    const failure = run([init, { __throw: new Error('api exploded') }]);
+    await expect(failure).rejects.toMatchObject({
+      name: 'AgentRunError',
+      message: 'api exploded',
+      hasConversationStarted: true,
+      sessionId: 'sdk-r',
+    });
+  });
+
+  it('marks a failure BEFORE the init as conversation-not-started (a true resume failure)', async () => {
+    const failure = run([{ __throw: new Error('No conversation found with session ID: x') }]);
+    await expect(failure).rejects.toMatchObject({
+      name: 'AgentRunError',
+      hasConversationStarted: false,
+    });
   });
 });
