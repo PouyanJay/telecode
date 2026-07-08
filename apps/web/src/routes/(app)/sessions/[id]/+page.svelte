@@ -27,7 +27,7 @@
   import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
-  import { canResumeAsNew } from '$lib/resume-as-new';
+  import { composerModeFor } from '$lib/composer-mode';
   import { canSwitchBranch } from '$lib/branch-switch';
   import { canPushBranch } from '$lib/push-offer';
   import {
@@ -291,18 +291,28 @@
     }),
   );
 
-  // Resume-as-new (T8): a session that CANNOT continue in place (needs_restart any origin; ended
-  // adopted) routes its composer to a forked continuation instead of a dead-end follow-up.
-  const resumeMode = $derived(
-    effectiveStatus !== undefined &&
-      canResumeAsNew(effectiveStatus, registryRow?.origin ?? 'launched'),
+  // The composer's single decision point (adopted-takeover T4/T5): a between-turns adopted session
+  // takes over on Send (a forked continuation — one step, per the agreed UX); an ended/lost session
+  // resumes-as-new (T8); a mid-turn adopted session is BLOCKED with an honest reason instead of the
+  // silent spinner. `resumeMode` = both forking modes — they share the submit path and machinery.
+  const composerMode = $derived(
+    composerModeFor(effectiveStatus, registryRow?.origin ?? 'launched'),
   );
+  const resumeMode = $derived(composerMode === 'resume_new' || composerMode === 'takeover');
   let resuming = $state(false);
   let resumeError = $state<string | null>(null);
   // Standing copy for the flipped composer, derived here so the markup stays scannable.
   const resumeNotice =
     'This session can’t continue here. Your next message starts a new linked session ' +
     'that picks up where it left off.';
+  // One-step takeover (T4): calm guidance, not a warning — sending IS the intended next step.
+  const takeoverNotice =
+    'This session lives in your terminal. Sending continues it here, in a new linked session — ' +
+    'after that, steer it from telecode (the old terminal window becomes a separate conversation).';
+  // Honest blocked composer (T5): while the agent works in the terminal there is nothing telecode
+  // can deliver a message to — say so instead of spinning silently.
+  const blockedLocalTurnReason =
+    'The agent is working in your terminal — you can take over when this turn finishes.';
   // Fork onto a chosen branch (branch-actions T5): the picker's current choice + validity. An
   // invalid custom name BLOCKS the send with an honest story — never a silent fallback.
   // Structurally absent for ADOPTED parents (requirements A8): their fork inherits nothing
@@ -491,7 +501,12 @@
               message="Turn limit reached — the run stopped early. Send a message to continue it."
             />
           {/if}
-          {#if resumeMode}
+          {#if composerMode === 'takeover'}
+            <!-- One-step takeover (adopted-takeover T4): the composer is LIVE — this standing note
+                 explains what Send does. Calm/neutral by design: sending is the intended next step,
+                 not an alert. -->
+            <SessionNotice tone="neutral" message={takeoverNotice} />
+          {:else if composerMode === 'resume_new'}
             <!-- Resume-as-new (T8): the honest affordance for a session that CANNOT continue in
                  place. Standing (no dismiss) — it reads for as long as the state does. -->
             <SessionNotice tone="warning" message={resumeNotice} />
@@ -517,13 +532,17 @@
           {/if}
           <Composer
             isBusy={isBusy || resuming}
-            submitLabel={resumeMode ? 'Resume as new' : 'Send'}
-            placeholder={resumeMode
+            submitLabel={composerMode === 'resume_new' ? 'Resume as new' : 'Send'}
+            placeholder={composerMode === 'resume_new'
               ? 'Continue this work in a new session…'
-              : 'Send a follow-up instruction…'}
-            disabledReason={resumeMode && !forkBranchValid
-              ? 'Fix the new branch name first — it isn’t a valid git branch name.'
-              : undefined}
+              : composerMode === 'takeover'
+                ? 'Send your next task — it continues here…'
+                : 'Send a follow-up instruction…'}
+            disabledReason={composerMode === 'blocked_local_turn'
+              ? blockedLocalTurnReason
+              : composerMode === 'resume_new' && !forkBranchValid
+                ? 'Fix the new branch name first — it isn’t a valid git branch name.'
+                : undefined}
             onsend={submitPrompt}
           />
         </div>

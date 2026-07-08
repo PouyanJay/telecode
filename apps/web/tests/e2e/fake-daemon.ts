@@ -83,6 +83,12 @@ const TURN_LIMIT_PROMPT = 'hit the turn limit';
 // Magic prompt: the daemon "loses" the conversation (ux Phase 6 T8) — ends `needs_restart`, so the
 // session view offers resume-as-new and the spec can drive the forked continuation.
 const LOSE_SESSION_PROMPT = 'lose this session';
+// One-step takeover (adopted-takeover T4): a session launched with this prompt spawns an ADOPTED
+// parent parked BETWEEN TURNS (`waiting_local`) titled `adopted: <prompt>` — the spec then takes it
+// over from its composer, and this fake retires the parent like the real daemon.
+const PARK_PROMPT = 'park at the terminal';
+// Announce clientRef → the parked parent's title, pending the relay's adopted ack.
+const parkedAnnounces = new Map<string, string>();
 // Reap behavior (Phase C T3): a session launched with this prompt answers `dirty` to workspace.reap.
 const DIRTY_WORKTREE_PROMPT = 'leave the worktree dirty';
 // Switch behavior (Phase C T4): a session launched with this prompt refuses every branch switch
@@ -303,6 +309,22 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       );
       return;
     }
+    const parkedTitle = parkedAnnounces.get(ack.data.clientRef);
+    if (parkedTitle !== undefined) {
+      // The parked adopted parent (adopted-takeover T4): a turn just finished at the "terminal" —
+      // mirror its transcript and report the honest between-turns status (the payload carries it;
+      // the cleartext fake omits the envelope field, exercising the relay's payload fallback).
+      parkedAnnounces.delete(ack.data.clientRef);
+      const rec = recordFor(sid);
+      rec.transcript.push(
+        { kind: 'user', text: 'Refactor the config loader' },
+        { kind: 'message', text: 'Turn finished at the terminal. Docs are updated.' },
+      );
+      rec.status = 'waiting_local';
+      send('agent.message', { text: 'Turn finished at the terminal. Docs are updated.' }, sid);
+      send('session.status', { status: 'waiting_local' }, sid);
+      return;
+    }
     if (ack.data.clientRef !== CHAIN_PARENT_REF) return;
     const rec = recordFor(sid);
     const base = Date.now() - 60 * 60_000; // the terminal stretch ran an hour ago
@@ -428,6 +450,18 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       return;
     }
 
+    if (launch.success && launch.data.prompt.startsWith(PARK_PROMPT)) {
+      // The trigger session's only job is to spawn the parked adopted parent — end it and announce.
+      rec.transcript.push({ kind: 'message', text: 'Spawning a terminal session to adopt' });
+      send('agent.message', { text: 'Spawning a terminal session to adopt' }, sid);
+      rec.status = 'done';
+      send('session.ended', { status: 'done' }, sid);
+      const ref = `park-parent-${++requestSeq}`;
+      parkedAnnounces.set(ref, launch.data.prompt);
+      send('session.adopted', { clientRef: ref, title: `adopted: ${launch.data.prompt}` });
+      return;
+    }
+
     if (launch.success && launch.data.prompt === CHAIN_PROMPT) {
       // The trigger session's only job is to kick off the dance — end it and announce the parent.
       rec.transcript.push({ kind: 'message', text: 'Chaining a takeover' });
@@ -463,6 +497,13 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
   if (envelope.type === 'session.resume_new') {
     const resume = sessionResumeNewPayloadSchema.safeParse(await openInboundLaunch(envelope));
     if (!resume.success) return;
+    // One-step takeover (adopted-takeover T4): a LIVE parked parent migrates to the child — the
+    // real daemon retires the mirror promptly, before the child's turn.
+    const parent = records.get(sid);
+    if (parent !== undefined && parent.status === 'waiting_local') {
+      parent.status = 'done';
+      send('session.ended', { status: 'done' }, sid);
+    }
     const ref = `resume-child-${++requestSeq}`;
     pendingResumes.set(ref, {
       prompt: resume.data.prompt,
