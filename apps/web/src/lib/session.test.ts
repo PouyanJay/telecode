@@ -129,6 +129,18 @@ describe('session reducer', () => {
     }
   });
 
+  it('never lets a late session.status resurrect a terminal session (T9)', () => {
+    // The daemon guards this ordering, but a defensive client must not undo an ending on a stray
+    // or reordered frame — done stays done.
+    const ended = fold([frame('session.started', {}), frame('session.ended', { status: 'done' })]);
+    expect(applyEnvelope(ended, frame('session.status', { status: 'waiting_local' })).status).toBe(
+      'done',
+    );
+    expect(applyEnvelope(ended, frame('session.status', { status: 'running' })).status).toBe(
+      'done',
+    );
+  });
+
   it('marks the terminal status from session.ended', () => {
     const done = applyEnvelope(startingState(), frame('session.ended', { status: 'done' }));
     expect(done.status).toBe('done');

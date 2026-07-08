@@ -40,7 +40,10 @@ export function markChannelOffline(map: SessionMap, scope: ReadonlySet<string>):
       scope.has(id) &&
       (state.status === 'running' ||
         state.status === 'starting' ||
-        state.status === 'awaiting_input')
+        state.status === 'awaiting_input' ||
+        // A between-turns adopted session is live too — an offline device can't honor a takeover,
+        // so the AT YOUR TERMINAL pill (and its live composer) must pause honestly with the rest.
+        state.status === 'waiting_local')
     ) {
       next.set(id, { ...state, status: 'offline_paused' });
       changed = true;

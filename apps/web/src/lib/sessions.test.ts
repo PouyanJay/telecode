@@ -1,7 +1,7 @@
 import { makeEnvelope, type Envelope } from '@telecode/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { foldSessionFrame, type SessionMap } from './sessions';
+import { foldSessionFrame, markChannelOffline, type SessionMap } from './sessions';
 
 const USER = 'u_1';
 const DEVICE = 'd_1';
@@ -63,5 +63,20 @@ describe('multi-session demux (foldSessionFrame)', () => {
     expect(map.get('a')?.status).toBe('done');
     expect(map.get('a')?.entries.map((e) => e.kind)).toEqual(['user', 'message']);
     expect(map.get('b')?.status).toBe('running'); // untouched
+  });
+});
+
+describe('markChannelOffline scope (adopted-takeover T9)', () => {
+  it('pauses a between-turns adopted session too — an offline device cannot honor a takeover', () => {
+    let map: SessionMap = new Map();
+    map = foldSessionFrame(map, frame('adopted', 'session.started', {}));
+    map = foldSessionFrame(map, frame('adopted', 'session.status', { status: 'waiting_local' }));
+    map = foldSessionFrame(map, frame('ended', 'session.ended', { status: 'done' }));
+    expect(map.get('adopted')?.status).toBe('waiting_local');
+
+    const paused = markChannelOffline(map, new Set(['adopted', 'ended']));
+    expect(paused.get('adopted')?.status).toBe('offline_paused');
+    // Terminal sessions stay exactly as they ended.
+    expect(paused.get('ended')?.status).toBe('done');
   });
 });

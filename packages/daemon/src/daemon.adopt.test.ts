@@ -768,6 +768,31 @@ describe('daemon: adopted sessions end-to-end', () => {
     expect(backfill.entries.some((e) => e.kind === 'handover')).toBe(false);
   });
 
+  it('ignores a UserPromptSubmit for a session it does not track (never force-adopts, T9)', async () => {
+    const reply = await hookRpc(socketPath, {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'never-seen-claude-session',
+      cwd: '/repo',
+      prompt: 'hello there',
+    });
+    expect(reply).toEqual({});
+    // No announce may follow — the handler is synchronous, so the echo barrier proves absence.
+    let announced = false;
+    relay
+      .waitForFrame((e) => e.type === 'session.adopted')
+      .then(
+        () => {
+          announced = true;
+        },
+        () => undefined,
+      );
+    relay.send(
+      makeEnvelope({ type: 'echo', userId: USER, deviceId: DEVICE, payload: { text: 'b' } }),
+    );
+    await relay.waitForFrame((e) => e.type === 'echo.reply');
+    expect(announced).toBe(false);
+  });
+
   it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {
     // Adopt the session via a read-only tool, ack it.
     const first = hookRpc(socketPath, {
@@ -1839,6 +1864,86 @@ describe('daemon: adopted session survives a restart without a duplicate card (s
     // immediately (a re-announce would await an ack that never comes, then fail-closed to `ask`).
     const decision = await hookRpc(b.socket, readTool(CLAUDE_SESSION));
     expect(decision).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
+  });
+
+  it('restores waiting_local as waiting_local and still honors a takeover after the restart (T9)', async () => {
+    // Daemon A: adopt, park between turns (Stop, non-question), let status + Claude id persist.
+    const a = await startAdoptDaemon();
+    const firstDecision = hookRpc(a.socket, readTool(CLAUDE_SESSION));
+    ackAdopted(a.relay, await a.relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await firstDecision;
+    const transcriptPath = join(dir, 'restart-park.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'parked before restart' }] },
+      })}\n`,
+    );
+    await hookRpc(a.socket, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      last_assistant_message: 'parked before restart',
+    });
+    await a.relay.waitForFrame((e) => e.type === 'session.status' && e.status === 'waiting_local');
+    await awaitPersistedClaudeId();
+    await vi.waitFor(
+      async () => {
+        const persisted = (await createSessionStore({ dir: join(dir, 'sessions') }).loadAll()).get(
+          TELECODE_SESSION,
+        );
+        expect(persisted?.status).toBe('waiting_local');
+      },
+      { timeout: 5000, interval: 50 },
+    );
+    await a.daemon.stop();
+    await a.relay.close();
+
+    // Daemon B restores it BETWEEN TURNS (not needs_restart): the takeover affordance survives a
+    // daemon restart — the conversation is resumable from the persisted Claude id either way.
+    const b = await startAdoptDaemon();
+    b.relay.send(
+      makeEnvelope({
+        type: 'session.subscribe',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: {},
+      }),
+    );
+    const history = await b.relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === TELECODE_SESSION,
+    );
+    expect(sessionHistoryPayloadSchema.parse(history.payload).status).toBe('waiting_local');
+
+    // And the takeover works post-restart: fork the persisted conversation, retire the mirror.
+    b.relay.send(
+      makeEnvelope({
+        type: 'session.resume_new',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: { prompt: 'continue after the restart' },
+      }),
+    );
+    const chained = await b.relay.waitForFrame((e) => e.type === 'session.chained');
+    const chainedPayload = chained.payload as { clientRef: string; parentSessionId: string };
+    expect(chainedPayload.parentSessionId).toBe(TELECODE_SESSION);
+    b.relay.send(
+      makeEnvelope({
+        type: 'session.chained',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: '22222222-2222-2222-2222-222222222222',
+        payload: { clientRef: chainedPayload.clientRef, parentSessionId: TELECODE_SESSION },
+      }),
+    );
+    const parentEnded = await b.relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.session_id === TELECODE_SESSION,
+    );
+    expect(parentEnded.status).toBe('done');
   });
 
   it('re-derives a restored machinery title from the first real prompt at startup (title backfill)', async () => {
