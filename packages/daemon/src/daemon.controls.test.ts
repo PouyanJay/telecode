@@ -4,7 +4,7 @@ import { makeEnvelope, type Envelope, type SessionHistoryEntry } from '@telecode
 import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { type AgentAdapter } from './agent-adapter';
+import { AgentRunError, type AgentAdapter } from './agent-adapter';
 import { createDaemon, type Daemon } from './daemon';
 import { startFakeRelay, type FakeRelay } from './fake-relay';
 
@@ -309,5 +309,106 @@ describe('daemon: per-session controls (Task 9)', () => {
     followUp(relay, userId, deviceId, sid, 'keep going');
     await relay.waitForFrame((e) => e.type === 'agent.message' && e.session_id === sid);
     expect(prompts).toEqual(['run forever', 'keep going']);
+  });
+});
+
+describe('mid-run failures stay honest (turn-budget fix)', () => {
+  it('never misfires the resume fallback for a STARTED conversation, and a follow-up resumes it', async () => {
+    // A fork-resume that gets past init and then dies mid-run (api error): the context-losing
+    // fresh-launch fallback must NOT fire, the session ends FAILED with the real message — and the
+    // started conversation id is kept, so the user's follow-up RESUMES it instead of dead-ending
+    // in needs_restart (the exact cascade seen live).
+    const runCalls: { prompt: string; resume?: string }[] = [];
+    let failNext = true;
+    const adapter: AgentAdapter = {
+      async run(prompt, { onEvent, resume }) {
+        runCalls.push({ prompt, ...(resume !== undefined ? { resume } : {}) });
+        // Only the CHILD's first turn fails (the parent's seed launch and the follow-up succeed).
+        if (prompt === 'continue the work' && failNext) {
+          failNext = false;
+          throw new AgentRunError('api exploded', {
+            hasConversationStarted: true,
+            sessionId: 'sdk-started-1',
+          });
+        }
+        onEvent({ type: 'message', text: 'resumed fine' });
+        return { intercepted: [], allowed: [], denied: [], sessionId: 'sdk-started-1' };
+      },
+    };
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startFakeRelay(userId, deviceId);
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId,
+      deviceId,
+      agentAdapter: adapter,
+      logger: pino({ level: 'silent' }),
+    });
+    await daemon.start();
+    try {
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      // A terminal parent + resume_new gives the run BOTH a resume id and a fallback prompt — the
+      // misfire needs that combination to be reachable at all.
+      relay.send(
+        makeEnvelope({
+          type: 'session.launch',
+          userId,
+          deviceId,
+          sessionId: parentId,
+          payload: { prompt: 'seed the parent' },
+        }),
+      );
+      await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === parentId);
+      relay.send(
+        makeEnvelope({
+          type: 'session.resume_new',
+          userId,
+          deviceId,
+          sessionId: parentId,
+          payload: { prompt: 'continue the work' },
+        }),
+      );
+      const announce = await relay.waitForFrame((e) => e.type === 'session.chained');
+      relay.send(
+        makeEnvelope({
+          type: 'session.chained',
+          userId,
+          deviceId,
+          sessionId: childId,
+          payload: {
+            clientRef: (announce.payload as { clientRef: string }).clientRef,
+            parentSessionId: parentId,
+          },
+        }),
+      );
+
+      // Phase 1: the child's turn fails mid-run — honestly FAILED, with NO second (fallback) run call.
+      const ended = await relay.waitForFrame(
+        (e) => e.type === 'session.ended' && e.session_id === childId,
+      );
+      expect(ended.status).toBe('error');
+      expect(runCalls.filter((c) => c.prompt === 'continue the work')).toHaveLength(1);
+
+      // Phase 2: the follow-up RESUMES the started conversation (no needs_restart dead end).
+      relay.send(
+        makeEnvelope({
+          type: 'user.message',
+          userId,
+          deviceId,
+          sessionId: childId,
+          payload: { text: 'try again' },
+        }),
+      );
+      const resumed = await relay.waitForFrame(
+        (e) => e.type === 'session.ended' && e.session_id === childId,
+      );
+      expect(resumed.status).toBe('done');
+      expect(runCalls.at(-1)).toMatchObject({ prompt: 'try again', resume: 'sdk-started-1' });
+    } finally {
+      await daemon.stop();
+      await relay.close();
+    }
   });
 });

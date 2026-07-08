@@ -82,6 +82,7 @@ import { type BranchSwitcher } from './sessions/branch-switcher';
 import { type WorkspaceChangesReader } from './sessions/workspace-changes';
 import { type WorkspaceReaper } from './sessions/workspace-reaper';
 import {
+  AgentRunError,
   type AgentAdapter,
   type AgentRunOptions,
   type AgentRunResult,
@@ -417,6 +418,18 @@ export function createDaemon(options: DaemonOptions): Daemon {
   /** Append an entry to a session's transcript (no-op when the envelope carries no session id). */
   function record(sessionId: string | undefined, entry: SessionHistoryEntry): void {
     if (sessionId !== undefined) recordFor(sessionId).transcript.push(entry);
+  }
+
+  /**
+   * Capture the SDK conversation id on the session (ux Phase 6 T4) so a follow-up — or a restart's
+   * restore — resumes the SAME conversation instead of being silently dropped. Shared by the success
+   * path and the failed-but-started path (a mid-run failure must not orphan its conversation).
+   */
+  function persistSdkConversationId(sessionId: string, sdkConversationId: string): void {
+    sdkSessions.set(sessionId, sdkConversationId);
+    const rec = recordFor(sessionId);
+    rec.claudeSessionId = sdkConversationId;
+    rec.origin ??= 'launched';
   }
 
   /** Set a session's tracked status (no-op when the envelope carries no session id). */
@@ -1070,8 +1083,18 @@ export function createDaemon(options: DaemonOptions): Daemon {
         });
       } catch (resumeErr) {
         // A failed resume of an externally-created conversation is recoverable: continue the handover as a
-        // fresh, summary-seeded launch so the user's answer isn't lost. An operator abort is not recoverable.
-        if (abort.signal.aborted || resume === undefined || resumeFallbackPrompt === undefined) {
+        // fresh, summary-seeded launch so the user's answer isn't lost. An operator abort is not
+        // recoverable — and neither is a run whose conversation had already STARTED: that wasn't a
+        // resume failure, and the fallback would silently throw away the started context (seen live
+        // when a thrown turn-cap error was misread as a resume failure).
+        const hasConversationStarted =
+          resumeErr instanceof AgentRunError && resumeErr.hasConversationStarted;
+        if (
+          abort.signal.aborted ||
+          resume === undefined ||
+          resumeFallbackPrompt === undefined ||
+          hasConversationStarted
+        ) {
           throw resumeErr;
         }
         log.warn(
@@ -1081,12 +1104,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
         result = await agentAdapter.run(resumeFallbackPrompt, baseOptions);
       }
       if (sessionId !== undefined && result.sessionId !== undefined) {
-        sdkSessions.set(sessionId, result.sessionId);
-        // Capture the resume id on the record (ux Phase 6 T4) so the terminal persist below carries it —
-        // a follow-up after a restart resumes the SAME conversation instead of being silently dropped.
-        const rec = recordFor(sessionId);
-        rec.claudeSessionId = result.sessionId;
-        rec.origin ??= 'launched';
+        persistSdkConversationId(sessionId, result.sessionId);
       }
       emitModelUpdate(envelope, result.model);
       // Status split (ux Phase 6 T2): report HOW the turn settled. A turn-limit ending is a pause —
@@ -1125,6 +1143,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
         setStatus(sessionId, 'done');
         sendForSession(envelope, 'session.ended', { status: 'done' });
       } else {
+        // A failed turn that STARTED its conversation keeps the id (ux Phase 6 T4 shape): the user's
+        // follow-up then RESUMES it instead of dead-ending in "follow-up cannot resume → needs_restart".
+        if (
+          err instanceof AgentRunError &&
+          err.sessionId !== undefined &&
+          sessionId !== undefined
+        ) {
+          persistSdkConversationId(sessionId, err.sessionId);
+        }
         log.error({ err, sessionId }, 'daemon: turn failed');
         setStatus(sessionId, 'error');
         sendForSession(envelope, 'session.ended', {

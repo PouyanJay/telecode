@@ -52,4 +52,12 @@ describe('createClaudeAgentAdapter: forkSession threading', () => {
     expect(options.resume).toBe('r2');
     expect(options.forkSession).toBeUndefined();
   });
+
+  it('defaults the turn budget to a runaway safety net, not a task cap (4 starved real work)', async () => {
+    // Seen live: journeys died at "maximum number of turns (4)". The default must allow real work;
+    // hitting it still settles as the followable turn_limit, so it only exists to stop runaways.
+    await run({});
+    const { options } = queryCalls.at(-1)!;
+    expect(options.maxTurns).toBe(100);
+  });
 });

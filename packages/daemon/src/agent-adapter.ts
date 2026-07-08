@@ -90,6 +90,29 @@ export interface AgentAdapter {
   run(prompt: string, options: AgentRunOptions): Promise<AgentRunResult>;
 }
 
+/**
+ * A failed {@link AgentAdapter.run}, carrying what the daemon needs to fail HONESTLY:
+ * `hasConversationStarted` says whether the run got past its init before dying — a resume that
+ * already started must never fall back to a context-losing fresh launch (it wasn't a resume
+ * failure) — and `sessionId` (same concept as {@link AgentRunResult.sessionId}, delivered via the
+ * error path) preserves the started conversation's id so a follow-up can resume it instead of
+ * dead-ending in needs_restart. The original failure rides `cause`.
+ */
+export class AgentRunError extends Error {
+  readonly hasConversationStarted: boolean;
+  readonly sessionId?: string;
+
+  constructor(
+    message: string,
+    options: { cause?: unknown; hasConversationStarted: boolean; sessionId?: string },
+  ) {
+    super(message, { cause: options.cause });
+    this.name = 'AgentRunError';
+    this.hasConversationStarted = options.hasConversationStarted;
+    if (options.sessionId !== undefined) this.sessionId = options.sessionId;
+  }
+}
+
 /** Test hooks for {@link createFakeAgentAdapter}. */
 export interface FakeAgentAdapterOptions {
   /** The conversation id every run reports (so the daemon can thread `resume` across turns). */
