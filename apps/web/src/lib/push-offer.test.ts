@@ -18,6 +18,7 @@ describe('canPushBranch', () => {
       offline_paused: false, // the device cannot act anyway
       turn_limit: true,
       needs_restart: true,
+      waiting_local: false, // adopted-only state; a launched session can never be in it
     };
     for (const status of SESSION_STATUSES) {
       expect(canPushBranch(status, 'launched', 'feat/x'), status).toBe(expected[status]);

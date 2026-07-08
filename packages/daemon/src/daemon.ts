@@ -22,6 +22,7 @@ import {
   sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionResumeNewPayloadSchema,
+  sessionStatusPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   viewerPresencePayloadSchema,
@@ -578,6 +579,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (type === 'session.ended') {
       const parsed = sessionEndedPayloadSchema.safeParse(payload);
       return parsed.success ? parsed.data.status : 'done';
+    }
+    if (type === 'session.status') {
+      const parsed = sessionStatusPayloadSchema.safeParse(payload);
+      return parsed.success ? parsed.data.status : undefined;
     }
     return undefined;
   }
@@ -2774,6 +2779,42 @@ export function createDaemon(options: DaemonOptions): Daemon {
     );
   }
 
+  /**
+   * Report the between-turns truth for an adopted session (adopted-takeover T1): the turn is over and
+   * nothing is executing — the conversation is waiting at the user's own terminal, not RUNNING. Sent as
+   * a `session.status` frame (sealed payload + cleartext envelope status) so both live browsers and the
+   * payload-blind relay registry flip together.
+   */
+  function reportWaitingLocal(telecodeSessionId: string): void {
+    setStatus(telecodeSessionId, 'waiting_local');
+    sendForSession(adoptedSource(telecodeSessionId), 'session.status', {
+      status: 'waiting_local',
+      ts: now(),
+    });
+  }
+
+  /**
+   * Settle an adopted session's state for a just-ended turn and decide whether a free-form handover
+   * offer should follow. In order: a Stop disproves a restart's `needs_restart` guess (chat-only turns
+   * fire no PreToolUse, so the revive must live here too — and BEFORE the supersede, whose end-status
+   * guard would otherwise skip pruning a stale offer on a needs_restart record); local activity
+   * supersedes any stale pending offer; then the offer decision — gated on adoption policy (launching a
+   * handover starts a NEW telecode-owned session, so a denylisted repo must not get one), on the turn
+   * ending in a free-form question, and on not stacking over a still-pending gate. When no offer will
+   * show and no gate is pending, the honest between-turns status is reported instead.
+   */
+  function settleStopOutcome(knownId: string, event: HookEvent): boolean {
+    if (recordFor(knownId).status === 'needs_restart') setStatus(knownId, 'waiting_local');
+    supersedePendingHandoverByLocalActivity(knownId);
+    const isAlreadyAwaitingInput = recordFor(knownId).status === 'awaiting_input';
+    const shouldOfferHandover =
+      !isAlreadyAwaitingInput &&
+      isAdoptionAllowed(adoptConfig, event.cwd) &&
+      isFreeFormQuestion(event.last_assistant_message);
+    if (!shouldOfferHandover && !isAlreadyAwaitingInput) reportWaitingLocal(knownId);
+    return shouldOfferHandover;
+  }
+
   async function handleStopHook(event: HookEvent): Promise<unknown> {
     const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
     if (knownId === undefined) return {};
@@ -2796,26 +2837,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // Refine the derived title once a chat-only session (no PreToolUse) mirrors its first prompt (T5).
     refineAdoptedTitleFromPrompt(knownId);
     void refreshAdoptedBranch(knownId);
-    // A Stop proves the external conversation is alive: a restart's `needs_restart` guess for this
-    // adopted session is disproven (chat-only turns fire no PreToolUse, so the revive must live
-    // here too, not only on the tool path).
-    if (recordFor(knownId).status === 'needs_restart') setStatus(knownId, 'running');
-    // A Stop AFTER an offering one means a NEW local turn ran — the user answered at the device, so
-    // any still-pending offer is stale. Cleared BEFORE the offer block below, which may then offer
-    // afresh if THIS turn also ended on a free-form question.
-    supersedePendingHandoverByLocalActivity(knownId);
+    const shouldOfferHandover = settleStopOutcome(knownId, event);
     // Keep the persisted transcript current (ux Phase 6 T4): an adopted session isn't terminal on Stop,
     // so without this its on-disk copy would stay frozen at adoption time and a restart would backfill a
     // stale transcript. Best-effort, coalesced by the store.
     persistSession(knownId, recordFor(knownId));
 
-    // Free-form handover offer (Journey 4). The mirror above is intentionally unconditional (an already-
-    // adopted session keeps flowing regardless of a mid-session policy change); only the OFFER is gated here:
-    // launching a handover starts a NEW telecode-owned session, so a repo the user has since denylisted (or
-    // adoption turned off) must not get one. And don't stack an offer while one is already showing.
-    if (!isAdoptionAllowed(adoptConfig, event.cwd)) return {};
-    if (!isFreeFormQuestion(event.last_assistant_message)) return {};
-    if (recordFor(knownId).status === 'awaiting_input') return {};
+    if (!shouldOfferHandover) return {};
     const question = (event.last_assistant_message ?? '').trim();
     // Deterministic "what the session was doing" summary from the mirrored transcript — no extra model call.
     const summary = buildHandoverSummary(recordFor(knownId).transcript);

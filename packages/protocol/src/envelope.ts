@@ -94,6 +94,12 @@ export const MESSAGE_TYPES = [
   // like `session.launch` (box-sealed to the daemon), NOT under the parent's content key: a
   // needs_restart parent after a restart may have no key anywhere, and this frame must still open.
   'session.resume_new',
+  // non-terminal status report (daemon -> relay -> web, adopted-takeover T1): the session's lifecycle
+  // moved without any content frame to imply it — e.g. an ADOPTED session's turn ended (`waiting_local`)
+  // or a new local turn began (`running`). The status rides the envelope's cleartext `status` routing
+  // field (like `session.ended`); the payload carries nothing. The relay updates the registry from it
+  // exactly as it does from lifecycle/gate frame types — type-driven, payload-blind.
+  'session.status',
   // per-session controls (web -> daemon): end / interrupt / pause / resume
   'session.control',
   // reconnect (web <-> daemon)

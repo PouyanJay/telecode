@@ -249,8 +249,12 @@ function groupKey(status: SessionStatus): SessionGroupKey {
   switch (status) {
     case 'awaiting_input':
       return 'awaiting';
+    // waiting_local files under ACTIVE: an adopted session between turns is a LIVE conversation
+    // (just resting at the terminal) — it belongs with the active ones, not the finished pile, and
+    // must not scream in "awaiting" (the user is usually sitting right there driving it locally).
     case 'running':
     case 'starting':
+    case 'waiting_local':
       return 'active';
     case 'done':
     case 'error':

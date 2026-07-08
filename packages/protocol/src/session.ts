@@ -373,6 +373,10 @@ export const SESSION_STATUSES = [
   // The daemon no longer holds this session's conversation (it restarted, or the row was retired by
   // reconcile), so follow-ups can't resume it in place (ux Phase 6, B5 "Needs restart").
   'needs_restart',
+  // An ADOPTED session finished its turn and is waiting for input at the user's own terminal
+  // (adopted-takeover T1). Not terminal, not "running": nothing is executing, and telecode can't type
+  // into the local process — the remote affordance is a takeover into a new linked session.
+  'waiting_local',
 ] as const;
 export const sessionStatusSchema = z.enum(SESSION_STATUSES);
 export type SessionStatusName = z.infer<typeof sessionStatusSchema>;
@@ -427,6 +431,20 @@ export type SessionReconcilePayload = z.infer<typeof sessionReconcilePayloadSche
  */
 export const entryTimestampSchema = z.number().int().nonnegative();
 export type EntryTimestamp = z.infer<typeof entryTimestampSchema>;
+
+/**
+ * Payload for `session.status` (daemon → web, adopted-takeover T1): a non-terminal lifecycle move that
+ * no content frame implies — an adopted session's turn ended (`waiting_local`) or a new local turn
+ * began (`running`). Sealed under the session content key like every session payload; the SAME status
+ * also rides the envelope's cleartext `status` routing field so the payload-blind relay can update its
+ * registry (the session.ended pattern). Deliberately narrower than the full status enum: these are the
+ * only two states the daemon reports this way — endings have `session.ended`, gates have their own frames.
+ */
+export const sessionStatusPayloadSchema = z.object({
+  status: z.enum(['running', 'waiting_local']),
+  ts: entryTimestampSchema.optional(),
+});
+export type SessionStatusPayload = z.infer<typeof sessionStatusPayloadSchema>;
 
 /** Payload for `agent.message` (daemon → web): a chunk of streamed agent text. */
 export const agentMessagePayloadSchema = z.object({

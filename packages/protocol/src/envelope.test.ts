@@ -142,6 +142,12 @@ describe('envelope E2E routing-metadata fields (Phase 3)', () => {
       expect(safeParseEnvelope({ ...validWire, type }).success).toBe(true);
     },
   );
+
+  it('recognizes session.status as a valid message type carrying a cleartext status (adopted-takeover T1)', () => {
+    expect(
+      safeParseEnvelope({ ...validWire, type: 'session.status', status: 'waiting_local' }).success,
+    ).toBe(true);
+  });
 });
 
 describe('makeEnvelope routing-metadata fields', () => {

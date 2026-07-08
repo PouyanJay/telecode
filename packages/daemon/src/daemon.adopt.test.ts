@@ -16,6 +16,7 @@ import {
   sessionAdoptedPayloadSchema,
   sessionHistoryPayloadSchema,
   sessionMetaPayloadSchema,
+  sessionStatusPayloadSchema,
   type Envelope,
 } from '@telecode/protocol';
 import { pino } from 'pino';
@@ -498,6 +499,119 @@ describe('daemon: adopted sessions end-to-end', () => {
     );
     expect(refined.title).toBe('read the memory and continue the session identity journey from…');
     expect(refined.titleSource).toBe('derived');
+  });
+
+  it('parks an adopted session at waiting_local when its turn ends without a question', async () => {
+    // Adopt via a read-only tool, ack it — the session is mid-turn (running).
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    // The turn ends with a plain summary (no free-form question → no handover offer). The daemon must
+    // report the between-turns truth: nothing is executing, the conversation waits at the terminal.
+    const transcriptPath = join(dir, 'plain-stop.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Deploy is green.' }] },
+      })}\n`,
+    );
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      last_assistant_message: 'Deploy is green. All tasks are complete.',
+    });
+
+    const statusFrame = await relay.waitForFrame(
+      (e) => e.type === 'session.status' && e.session_id === TELECODE_SESSION,
+    );
+    // Cleartext routing status on the envelope — the payload-blind relay updates its registry from it.
+    expect(statusFrame.status).toBe('waiting_local');
+    expect(sessionStatusPayloadSchema.parse(statusFrame.payload).status).toBe('waiting_local');
+    expect(await stop).toEqual({});
+
+    // Consume the mirror's own history push (it precedes the status flip) so the next history frame
+    // we match is the SUBSCRIBE's backfill, not the mirror's.
+    await relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === TELECODE_SESSION,
+    );
+    // The tracked record agrees: a fresh subscribe backfills waiting_local, not a phantom RUNNING.
+    relay.send(
+      makeEnvelope({
+        type: 'session.subscribe',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: {},
+      }),
+    );
+    const history = await relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === TELECODE_SESSION,
+    );
+    expect(sessionHistoryPayloadSchema.parse(history.payload).status).toBe('waiting_local');
+  });
+
+  it('keeps a question-ending Stop on the handover path — awaiting_input wins over waiting_local', async () => {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    const transcriptPath = join(dir, 'question-stop.jsonl');
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Should I use Postgres or SQLite for this?' }],
+        },
+      })}\n`,
+    );
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      last_assistant_message: 'Should I use Postgres or SQLite for this?',
+    });
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    expect(offer.session_id).toBe(TELECODE_SESSION);
+    await stop;
+
+    // Consume the mirror's own history push (sent before the offer) so the next history frame we
+    // match is the SUBSCRIBE's backfill, not the mirror's pre-offer snapshot.
+    await relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === TELECODE_SESSION,
+    );
+    // The offer parks the session at awaiting_input — the calm waiting_local must not override the gate.
+    relay.send(
+      makeEnvelope({
+        type: 'session.subscribe',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: {},
+      }),
+    );
+    const history = await relay.waitForFrame(
+      (e) => e.type === 'session.history' && e.session_id === TELECODE_SESSION,
+    );
+    expect(sessionHistoryPayloadSchema.parse(history.payload).status).toBe('awaiting_input');
   });
 
   it('ends an adopted session on SessionEnd (Journey 3 lifecycle)', async () => {

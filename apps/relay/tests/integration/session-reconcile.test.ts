@@ -78,6 +78,10 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
     await registry.markRunning({ userId, sessionId: held });
     const staleAwaiting = await registry.createSession({ userId, deviceId });
     await registry.markAwaitingInput({ userId, sessionId: staleAwaiting });
+    // A stale between-turns adopted row (adopted-takeover T1) — a daemon restart strands these exactly
+    // like running/awaiting ones, so reconcile must retire it too.
+    const staleWaitingLocal = await registry.createSession({ userId, deviceId });
+    await registry.markWaitingLocal({ userId, sessionId: staleWaitingLocal });
     const alreadyDone = await registry.createSession({ userId, deviceId });
     await registry.markEnded({ userId, sessionId: alreadyDone, status: 'done' });
     const otherDeviceAwaiting = await registry.createSession({ userId, deviceId: otherDeviceId });
@@ -89,10 +93,15 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
     const daemon = await connectDaemon(relayUrl, userId, deviceId);
     const browser = await connectBrowser(relayUrl, userId, deviceId);
 
-    // The daemon reports it holds only `held`. The relay must retire `staleAwaiting` (non-held, non-terminal).
+    // The daemon reports it holds only `held`. The relay must retire `staleAwaiting` AND
+    // `staleWaitingLocal` (non-held, non-terminal).
     const retired = waitForEnvelope(
       browser,
       (e) => e.type === 'session.ended' && e.session_id === staleAwaiting,
+    );
+    const retiredWaitingLocal = waitForEnvelope(
+      browser,
+      (e) => e.type === 'session.ended' && e.session_id === staleWaitingLocal,
     );
     daemon.send(
       JSON.stringify(
@@ -108,10 +117,12 @@ describe('relay: session reconciliation retires stale rows on daemon (re)connect
     // frame carries the honest terminal state: the daemon LOST this conversation (status split, T2).
     const retiredFrame = await retired;
     expect(retiredFrame.status).toBe('needs_restart');
+    expect((await retiredWaitingLocal).status).toBe('needs_restart');
 
-    // The stale awaiting row is now needs_restart; the held and already-done rows are unchanged; the
-    // other device's session is untouched.
+    // The stale awaiting + waiting_local rows are now needs_restart; the held and already-done rows
+    // are unchanged; the other device's session is untouched.
     await expectSessionStatus(admin, staleAwaiting, 'needs_restart');
+    await expectSessionStatus(admin, staleWaitingLocal, 'needs_restart');
     await expectSessionStatus(admin, held, 'running');
     await expectSessionStatus(admin, alreadyDone, 'done');
     await expectSessionStatus(admin, otherDeviceAwaiting, 'awaiting_input');

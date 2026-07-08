@@ -13,9 +13,11 @@ import {
   sessionChainedPayloadSchema,
   sessionEndedPayloadSchema,
   sessionReconcilePayloadSchema,
+  sessionStatusPayloadSchema,
   WS_CLOSE_UNAUTHORIZED,
   type Envelope,
   type SessionEndedPayload,
+  type SessionStatusPayload,
 } from '@telecode/protocol';
 
 import { type AuthService } from './auth/auth-service';
@@ -354,6 +356,21 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   }
 
   /**
+   * The reported status of a `session.status` (adopted-takeover T1): prefer the cleartext `status`
+   * envelope field, fall back to the payload for cleartext-mode peers. Only the two non-terminal,
+   * daemon-reportable states are valid here — endings ride `session.ended`, gates their own frames;
+   * anything else means a malformed frame and the caller drops it whole.
+   */
+  function resolveReportedStatus(envelope: Envelope): SessionStatusPayload['status'] | undefined {
+    if (envelope.status === 'running' || envelope.status === 'waiting_local') {
+      return envelope.status;
+    }
+    if (envelope.status !== undefined) return undefined;
+    const fromPayload = sessionStatusPayloadSchema.safeParse(envelope.payload);
+    return fromPayload.success ? fromPayload.data.status : undefined;
+  }
+
+  /**
    * A `device.presence` frame (relay → browsers): the daemon behind the channel is now online/offline.
    * Cleartext routing metadata the relay generates itself — no session payload, E2E-safe (the browser
    * pauses its live sessions when offline and resubscribes to resume them when online).
@@ -618,7 +635,9 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       (row) =>
         row.deviceId === envelope.device_id &&
         !held.has(row.id) &&
-        (row.status === 'running' || row.status === 'awaiting_input'),
+        (row.status === 'running' ||
+          row.status === 'awaiting_input' ||
+          row.status === 'waiting_local'),
     );
     // Retire the stale rows concurrently — independent DB writes; one failure must not block the rest.
     const results = await Promise.allSettled(
@@ -839,6 +858,32 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         });
         log.info({ channel, sessionId: envelope.session_id, status }, 'relay: session ended');
       }
+      return;
+    }
+    // A non-terminal status report (adopted-takeover T1): an adopted session's turn ended
+    // (`waiting_local`) or a new local turn began (`running`). Persist BEFORE broadcasting — like the
+    // gate frames — so a reacting browser already observes the flipped registry row. A frame carrying
+    // any other status is malformed and dropped whole (not persisted, not forwarded).
+    if (envelope.type === 'session.status') {
+      const reported = resolveReportedStatus(envelope);
+      if (reported === undefined) {
+        log.warn(
+          { channel, sessionId: envelope.session_id },
+          'relay: dropped session.status with an unreportable status',
+        );
+        return;
+      }
+      if (sessionRegistry && envelope.session_id) {
+        const target = { userId: envelope.user_id, sessionId: envelope.session_id };
+        await (reported === 'running'
+          ? sessionRegistry.markRunning(target)
+          : sessionRegistry.markWaitingLocal(target));
+        log.info(
+          { channel, sessionId: envelope.session_id, status: reported },
+          'relay: session status reported',
+        );
+      }
+      broadcastToBrowsers(channel, text);
       return;
     }
     if (sessionRegistry && envelope.session_id) {

@@ -17,6 +17,9 @@ export function canPushBranch(
     status !== 'starting' &&
     status !== 'running' &&
     status !== 'awaiting_input' &&
-    status !== 'offline_paused'
+    status !== 'offline_paused' &&
+    // Between-turns of a LIVE adopted session (adopted-only, so the origin gate above already
+    // excludes it) — listed so the status answer stays honest on its own.
+    status !== 'waiting_local'
   );
 }

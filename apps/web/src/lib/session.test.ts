@@ -107,6 +107,28 @@ describe('session reducer', () => {
     expect(state.entries.find((e) => e.kind === 'permission')?.decision).toBe('rejected');
   });
 
+  it('flips between waiting_local and running on session.status frames (adopted-takeover T1)', () => {
+    // An adopted session's turn ended — nothing is executing; the conversation waits at the terminal.
+    let state = fold([
+      frame('session.started', {}),
+      frame('agent.message', { text: 'Deploy is green.' }),
+      frame('session.status', { status: 'waiting_local' }),
+    ]);
+    expect(state.status).toBe('waiting_local');
+    expect(state.entries.map((e) => e.kind)).toEqual(['message']); // a status report adds no entry
+
+    // A new local turn began — the same frame type brings it back to running.
+    state = applyEnvelope(state, frame('session.status', { status: 'running' }));
+    expect(state.status).toBe('running');
+  });
+
+  it('ignores a session.status frame carrying a non-reportable status or junk', () => {
+    const base = fold([frame('session.started', {})]);
+    for (const payload of [{ status: 'done' }, { status: 'nonsense' }, {}, { status: 42 }]) {
+      expect(applyEnvelope(base, frame('session.status', payload)).status).toBe('running');
+    }
+  });
+
   it('marks the terminal status from session.ended', () => {
     const done = applyEnvelope(startingState(), frame('session.ended', { status: 'done' }));
     expect(done.status).toBe('done');

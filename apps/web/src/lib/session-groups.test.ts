@@ -45,9 +45,12 @@ describe('groupSessions', () => {
       row('idle', 'idle', '2026-06-29T10:00:00Z'),
       row('limit', 'turn_limit', '2026-06-29T10:00:00Z'),
       row('restart', 'needs_restart', '2026-06-29T10:00:00Z'),
+      // adopted-takeover T1: between-turns is a LIVE conversation — ACTIVE, deliberately NOT
+      // "awaiting" (despite the name's kinship with awaiting_input) and not the finished pile.
+      row('atterm', 'waiting_local', '2026-06-29T10:00:00Z'),
     ]);
     expect(groups.awaiting.map((r) => r.id)).toEqual(['await']);
-    expect(groups.active.map((r) => r.id).sort()).toEqual(['run', 'start']);
+    expect(groups.active.map((r) => r.id).sort()).toEqual(['atterm', 'run', 'start']);
     expect(groups.recent.map((r) => r.id).sort()).toEqual([
       'done',
       'err',
