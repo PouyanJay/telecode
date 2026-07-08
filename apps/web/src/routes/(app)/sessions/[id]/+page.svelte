@@ -398,6 +398,7 @@
     branch={$sessionMetas.get(sessionId)?.branch ?? null}
     {sessionId}
     status={session.status}
+    origin={registryRow?.origin ?? 'launched'}
     {isBusy}
     {isTerminal}
     {showControls}
