@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import {
   agentPermissionRequestPayloadSchema,
+  agentQuestionPayloadSchema,
   makeEnvelope,
   sessionHistoryPayloadSchema,
   type Envelope,
@@ -252,5 +253,186 @@ describe('gate diff stats (mockup §01-4)', () => {
     const frame = await relay.waitForFrame(gate(sessionId));
     expect(frame.payload).toMatchObject({ toolName: 'Bash' });
     expect((frame.payload as { diffStat?: unknown }).diffStat).toBeUndefined();
+  });
+});
+
+describe('bypassPermissions launches (bypass-launch-mode)', () => {
+  it('runs consequential tools unattended — no gate, the turn completes on its own', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, [
+      { type: 'tool_use', toolName: 'Bash', input: { command: 'pnpm test' } },
+      { type: 'tool_use', toolName: 'Write', input: { path: 'a.ts', content: 'x' } },
+      { type: 'message', text: 'all done' },
+    ]);
+    const sid = randomUUID();
+
+    launch(relay, userId, deviceId, sid, {
+      prompt: 'ship it',
+      permissionMode: 'bypassPermissions',
+    });
+    // The run ends without ever parking on a human decision.
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sid);
+    const done = await history(relay, userId, deviceId, sid);
+    expect(done.status).toBe('done');
+    expect(done.entries.filter((e) => e.kind === 'permission')).toHaveLength(0);
+    expect(done.entries.filter((e) => e.kind === 'tool')).toHaveLength(2);
+  });
+
+  it('still stops for AskUserQuestion — the structured picker, answered from the browser', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, [
+      {
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        input: {
+          questions: [
+            {
+              question: 'Deploy to staging or prod?',
+              header: 'Target',
+              multiSelect: false,
+              options: [{ label: 'staging' }, { label: 'prod' }],
+            },
+          ],
+        },
+      },
+      { type: 'message', text: 'proceeding with your pick' },
+    ]);
+    const sid = randomUUID();
+
+    launch(relay, userId, deviceId, sid, {
+      prompt: 'release it',
+      permissionMode: 'bypassPermissions',
+    });
+    // The question rides the STRUCTURED flow (agent.question → picker card), never a raw
+    // approve/reject gate — and the session honestly parks on it, bypass or not.
+    const question = await relay.waitForFrame(
+      (e) => e.type === 'agent.question' && e.session_id === sid,
+    );
+    const payload = agentQuestionPayloadSchema.parse(question.payload);
+    expect(payload.questions[0]?.header).toBe('Target');
+    const parked = await history(relay, userId, deviceId, sid);
+    expect(parked.status).toBe('awaiting_input');
+
+    // Answer from the browser; the turn continues and completes.
+    relay.send(
+      makeEnvelope({
+        type: 'question.answer',
+        userId,
+        deviceId,
+        sessionId: sid,
+        payload: { requestId: payload.requestId, answers: [{ selectedLabels: ['prod'] }] },
+      }),
+    );
+    await relay.waitForFrame((e) => e.type === 'session.ended' && e.session_id === sid);
+    const done = await history(relay, userId, deviceId, sid);
+    expect(done.status).toBe('done');
+    const entry = done.entries.find((e) => e.kind === 'question');
+    expect(entry?.kind === 'question' && entry.answers?.[0]?.selectedLabels).toEqual(['prod']);
+  });
+
+  it('falls back to the ordinary permission gate when the question input is unparseable', async () => {
+    // The one case where a bypass operator still sees a raw approve/reject card: a malformed
+    // AskUserQuestion can't render a picker, so it fails toward a human decision (never auto-runs).
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, [
+      { type: 'tool_use', toolName: 'AskUserQuestion', input: { not_questions: true } },
+    ]);
+    const sid = randomUUID();
+    launch(relay, userId, deviceId, sid, {
+      prompt: 'ask badly',
+      permissionMode: 'bypassPermissions',
+    });
+    const request = await relay.waitForFrame(gate(sid));
+    expect(agentPermissionRequestPayloadSchema.parse(request.payload).toolName).toBe(
+      'AskUserQuestion',
+    );
+  });
+
+  it('tells the agent to use its own judgment when a question goes unanswered (timeout)', async () => {
+    // Bypass runs are often unattended — an unanswered question must settle the turn, not hang it.
+    const decisions: { behavior: string; message?: string }[] = [];
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startFakeRelay(userId, deviceId);
+    relays.push(relay);
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId,
+      deviceId,
+      agentAdapter: {
+        async run(_prompt, { canUseTool, onEvent }) {
+          const decision = await canUseTool({
+            toolName: 'AskUserQuestion',
+            input: {
+              questions: [
+                {
+                  question: 'Anyone there?',
+                  header: 'Hello',
+                  multiSelect: false,
+                  options: [{ label: 'yes' }, { label: 'no' }],
+                },
+              ],
+            },
+          });
+          decisions.push({
+            behavior: decision.behavior,
+            ...(decision.behavior === 'deny' && decision.message !== undefined
+              ? { message: decision.message }
+              : {}),
+          });
+          onEvent({ type: 'message', text: 'continuing on my own judgment' });
+          return { intercepted: [], allowed: [], denied: [], sessionId: 'sdk-q-timeout' };
+        },
+      },
+      logger: silent,
+      gateTimeoutMs: 250,
+    });
+    daemons.push(daemon);
+    await daemon.start();
+    const sid = randomUUID();
+
+    launch(relay, userId, deviceId, sid, { prompt: 'go', permissionMode: 'bypassPermissions' });
+    await relay.waitForFrame((e) => e.type === 'agent.question' && e.session_id === sid);
+    // Nobody answers. The gate timeout settles the question (pushing its own reconcile
+    // session.history — consume it so the final subscribe's backfill is what we assert on)
+    // and the turn completes on its own.
+    await relay.waitForFrame((e) => e.type === 'session.history' && e.session_id === sid);
+    await relay.waitForFrame(ended(sid));
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ behavior: 'deny' });
+    expect(decisions[0]?.message).toMatch(/No answer arrived/);
+    expect(decisions[0]?.message).toMatch(/own judgment|most sensible option/);
+    const done = await history(relay, userId, deviceId, sid);
+    expect(done.status).toBe('done');
+  });
+
+  it('routes AskUserQuestion through the picker in gated modes too (never a raw approve/reject)', async () => {
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startDaemon(userId, deviceId, [
+      {
+        type: 'tool_use',
+        toolName: 'AskUserQuestion',
+        input: {
+          questions: [
+            {
+              question: 'Which one?',
+              header: 'Pick',
+              multiSelect: false,
+              options: [{ label: 'A' }, { label: 'B' }],
+            },
+          ],
+        },
+      },
+    ]);
+    const sid = randomUUID();
+    launch(relay, userId, deviceId, sid, { prompt: 'ask me', permissionMode: 'default' });
+    const question = await relay.waitForFrame(
+      (e) => e.type === 'agent.question' && e.session_id === sid,
+    );
+    expect(agentQuestionPayloadSchema.parse(question.payload).questions[0]?.header).toBe('Pick');
   });
 });

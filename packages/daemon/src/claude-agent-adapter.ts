@@ -94,8 +94,10 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
       let endReason: AgentEndReason | undefined;
       let model: string | undefined;
 
-      // The session's mode drives both the SDK and telecode's own gate. `bypassPermissions` is never honored
-      // (telecode never surrenders the approval gate), so it is clamped to `default` for the SDK below.
+      // The session's mode drives both the SDK and telecode's own gate. `bypassPermissions` is honored
+      // by TELECODE'S policy (classifyTool auto-allows via the hook below), not by the SDK's own bypass —
+      // the SDK gets `default` (clamped below) so every tool still routes through the hook/canUseTool
+      // pipeline and AskUserQuestion keeps reaching the operator.
       const sessionMode: PermissionModeName = permissionMode ?? options.permissionMode ?? 'default';
 
       const sdkCanUseTool = async (
@@ -128,7 +130,7 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
             permissionDecision: decision,
             permissionDecisionReason:
               decision === 'allow'
-                ? 'telecode: read-only tool auto-approved'
+                ? 'telecode: auto-approved by the session permission mode'
                 : 'telecode: forwarded to the operator for approval',
           },
         };
@@ -147,7 +149,8 @@ export function createClaudeAgentAdapter(options: ClaudeAgentAdapterOptions = {}
           canUseTool: sdkCanUseTool,
           hooks: { PreToolUse: [{ hooks: [preToolUseGate] }] },
           // Drive the SDK with the session's mode (so `plan` plans and `acceptEdits` accepts), but never
-          // `bypassPermissions` — telecode's gate stays in force regardless.
+          // the SDK's own `bypassPermissions` — telecode's policy does the bypassing (hook above), which
+          // keeps the tool stream observable and questions routed to the operator.
           permissionMode: sessionMode === 'bypassPermissions' ? 'default' : sessionMode,
           maxTurns: options.maxTurns ?? DEFAULT_MAX_TURNS_SAFETY_NET,
           settingSources: options.settingSources ?? [],

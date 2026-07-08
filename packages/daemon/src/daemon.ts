@@ -786,6 +786,34 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
+   * A launched session's `AskUserQuestion` (bypass-launch-mode): a question is a request FOR the
+   * human, so it rides the structured question flow (`agent.question` → picker card →
+   * `question.answer`) in EVERY mode — bypass included; a question is the one thing bypass never
+   * skips — instead of a raw approve/reject gate that can't actually answer it. The pick returns as
+   * deny-feedback, exactly like the adopted flow (AD-4): the model reads the answer and continues.
+   * Unparseable input falls back to the ordinary permission gate (fail toward a human decision); an
+   * unanswered/timed-out question tells the agent to use its own judgment — there is no local picker
+   * behind a launched session to defer to.
+   */
+  async function answerLaunchedQuestion(
+    source: Envelope,
+    request: PermissionRequest,
+  ): Promise<PermissionDecision> {
+    const questions = questionsFromToolInput(request.input);
+    if (!questions) return requestPermission(source, request);
+    const answers = await requestQuestionAnswer(source, questions);
+    if (answers === null) {
+      // Timeout, interrupt, or shutdown — reason-agnostic on purpose: whichever way the answer
+      // stopped being possible, the agent should proceed on its own judgment.
+      return {
+        behavior: 'deny',
+        message: 'No answer arrived — pick the most sensible option yourself and continue.',
+      };
+    }
+    return { behavior: 'deny', message: buildQuestionDenyReason(questions, answers) };
+  }
+
+  /**
    * The human-in-the-loop gate: decide whether a tool the agent wants to run may proceed. Telecode's
    * own policy ({@link classifyTool}) is authoritative — a read-only tool auto-runs (no prompt, no
    * round-trip), while every consequential tool is forwarded to the browser as `agent.permission_request`
@@ -1054,7 +1082,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       sessionId !== undefined ? sessionRecords.get(sessionId)?.permissionMode : undefined;
     // Options shared by both the resume attempt and the seeded-fresh fallback (only prompt/resume/fork differ).
     const baseOptions: Omit<AgentRunOptions, 'resume' | 'forkSession'> = {
-      canUseTool: (request) => requestPermission(envelope, request),
+      canUseTool: (request) =>
+        request.toolName === 'AskUserQuestion'
+          ? answerLaunchedQuestion(envelope, request)
+          : requestPermission(envelope, request),
       signal: abort.signal,
       ...(cwd !== undefined ? { cwd } : {}),
       ...(permissionMode !== undefined ? { permissionMode } : {}),

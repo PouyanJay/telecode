@@ -9,6 +9,53 @@ Versions below are releases of the **`@telecode/cli`** npm package (the daemon �
 The web app and relay deploy continuously from `main`; changes that live purely in the web app or relay
 are listed under the CLI release they accompanied.
 
+## [0.7.2] — 2026-07-08
+
+### Added
+
+- **Bypass permissions as a launch mode.** The launch drawer and Settings now offer a fourth
+  permission mode: everything runs without asking — full access to your machine — while **questions
+  still stop for you**. The shipped default remains "Approve edits"; bypass is an explicit choice.
+- **Real question cards for launched sessions.** An `AskUserQuestion` from a telecode-launched
+  session now arrives as the structured multiple-choice picker (like adopted sessions), in every
+  permission mode, instead of a raw approve/reject gate that couldn't actually answer it.
+
+## [0.7.1] — 2026-07-08
+
+### Fixed
+
+- **Runs no longer die at 4 turns.** Every daemon-launched run was silently capped at 4 agent turns —
+  far too small for real work. The cap is now a runaway safety net (100), and hitting it settles as
+  the followable "Ended — turn limit" (a follow-up message continues the same conversation) instead
+  of "Failed".
+- **A taken-over conversation can't lose its context mid-flight.** A failure during a fork-resume was
+  misread as "the conversation can't be resumed" and silently restarted fresh; now the fallback only
+  fires when the conversation truly never started.
+- **A failed run stays resumable.** A turn that failed mid-run kept no conversation id, so the next
+  follow-up dead-ended in "Needs restart"; the id is now kept and follow-ups resume.
+
+## [0.7.0] — 2026-07-08
+
+The adopted-session steering release: sessions you started in your own terminal are now honest about
+their state and can be taken over remotely in one step. See
+[docs/adopted-sessions.md](docs/adopted-sessions.md).
+
+### Added
+
+- **"At your terminal".** An adopted session between turns now shows a calm AT YOUR TERMINAL state
+  instead of reading RUNNING forever, and flips back to RUNNING the moment a new local turn starts
+  (including chat-only turns).
+- **One-step takeover.** Between turns, the composer is live: sending your next task continues the
+  conversation in a new linked telecode-owned session — with a guard that never severs a session you
+  resumed typing into locally (it becomes an honest linked fork instead).
+- **Honest composer & controls.** Mid-turn adopted sessions say why sending is unavailable instead of
+  spinning; Interrupt (which could do nothing) is gone for adopted sessions and End reads
+  **Stop following** — mirroring stops, your local process is untouched.
+- **Session controls on phones.** Interrupt / End / Stop following are now visible and usable on
+  small screens.
+- **Readable takeover cards.** Handover questions render as real markdown — on the dashboard card
+  (clamped preview with an honest fade) and in the session view.
+
 ## [0.6.0] — 2026-07-07
 
 The branch workflow release: every launched session works on its own branch, and you can review, switch,
