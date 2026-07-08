@@ -68,6 +68,7 @@ import { readHooksStatus } from './adopt/hooks-status';
 import { uninstallHooks } from './adopt/hooks-uninstall';
 import { isAdoptionAllowed } from './adopt/is-adoption-allowed';
 import { isFreeFormQuestion } from './adopt/free-form-question';
+import { buildTakeoverFallbackPrompt } from './adopt/takeover-fallback-prompt';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
 import { preToolUseOutput } from './adopt/pretooluse-output';
 import { buildQuestionDenyReason } from './adopt/question-deny-reason';
@@ -1474,10 +1475,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (!request) return;
     const { parentId, prompt } = request;
     const parent = sessionRecords.get(parentId);
-    // Only a session that is OVER continues as a new one — a live parent keeps its own composer. An
-    // UNKNOWN parent is allowed: the relay remembers sessions this daemon lost (needs_restart after a
-    // restart), and the child link needs nothing from the parent beyond its id.
-    if (parent !== undefined && !isSessionEndStatus(parent.status)) {
+    // One-step takeover (adopted-takeover T3): a LIVE adopted parent BETWEEN TURNS may continue as a
+    // new session — telecode can't type into the local terminal, so the fork IS its follow-up path.
+    // The mirror is retired once the child actually launches (below), like the question-handover.
+    const isLiveTakeover =
+      parent !== undefined && parent.origin === 'external' && parent.status === 'waiting_local';
+    // Otherwise only a session that is OVER continues as a new one — a live parent keeps its own
+    // composer. An UNKNOWN parent is allowed: the relay remembers sessions this daemon lost
+    // (needs_restart after a restart), and the child link needs nothing from the parent beyond its id.
+    if (parent !== undefined && !isSessionEndStatus(parent.status) && !isLiveTakeover) {
       log.warn(
         { deviceId: options.deviceId, sessionId: parentId },
         'daemon: resume_new refused — session still active',
@@ -1515,6 +1521,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
       });
       if (forkCwd === undefined) return; // the child already failed cleanly
       cwd = forkCwd;
+    }
+    if (isLiveTakeover) {
+      // Migrate the conversation (the handover pattern): the parent's mirror is retired — terminal,
+      // read-only, linked — and the child carries it forward. Retired promptly, BEFORE the child's
+      // long turn, so the dashboard reflects the migration; but only after the child is fully set up
+      // (a failed mint/workspace above must leave the still-live parent untouched). `setStatus`
+      // persists terminal states, so a daemon restart cannot revive the retired row.
+      setStatus(parentId, 'done');
+      sendForSession(adoptedSource(parentId), 'session.ended', { status: 'done' });
+      log.info(
+        { deviceId: options.deviceId, parentSessionId: parentId, sessionId: minted.childId },
+        'daemon: takeover — adopted parent retired, continuation launched',
+      );
     }
     await runResumedTurn(minted, parentId, prompt, cwd);
   }
@@ -1557,7 +1576,17 @@ export function createDaemon(options: DaemonOptions): Daemon {
   ): Promise<void> {
     // The resume id survives on the record for launched AND adopted parents (T4); fall back to the
     // in-memory map. Absent → fresh launch, still linked.
-    const resume = sessionRecords.get(parentId)?.claudeSessionId ?? sdkSessions.get(parentId);
+    const parent = sessionRecords.get(parentId);
+    const resume = parent?.claudeSessionId ?? sdkSessions.get(parentId);
+    // If the resume fails, an ADOPTED parent's fallback is seeded with the mirrored context (summary
+    // + instruction, adopted-takeover T3) — an externally-created conversation is exactly the kind
+    // the SDK may refuse to pick up, and a bare-prompt fresh start would lose everything the mirror
+    // knows. Launched parents keep the bare prompt (their resume ids are the SDK's own — a failure
+    // is rare and the transcript shape isn't handover-summarizable).
+    const fallbackPrompt =
+      parent?.origin === 'external' && parent.transcript.length > 0
+        ? buildTakeoverFallbackPrompt(buildHandoverSummary(parent.transcript), prompt)
+        : prompt;
     log.info(
       {
         deviceId: options.deviceId,
@@ -1569,8 +1598,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     );
     await runTurn(minted.source, prompt, {
       ...(cwd !== undefined ? { cwd } : {}),
-      // A fork that can't actually resume falls back to a fresh run seeded with the same prompt.
-      ...(resume !== undefined ? { resume, forkSession: true, resumeFallbackPrompt: prompt } : {}),
+      ...(resume !== undefined
+        ? { resume, forkSession: true, resumeFallbackPrompt: fallbackPrompt }
+        : {}),
     });
   }
 
@@ -2843,7 +2873,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * show and no gate is pending, the honest between-turns status is reported instead.
    */
   function settleStopOutcome(knownId: string, event: HookEvent): boolean {
-    if (recordFor(knownId).status === 'needs_restart') setStatus(knownId, 'waiting_local');
+    // A retired/ended mirror stays ended (its story is over — e.g. a taken-over or handed-off parent
+    // whose local process keeps running): later Stops keep mirroring the transcript, but must never
+    // resurrect the row to waiting_local or stack a fresh offer on it. `needs_restart` is the one
+    // "ended" state a Stop deliberately disproves — the revive below handles it.
+    const statusOnStop = recordFor(knownId).status;
+    if (isSessionEndStatus(statusOnStop) && statusOnStop !== 'needs_restart') return false;
+    if (statusOnStop === 'needs_restart') setStatus(knownId, 'waiting_local');
     supersedePendingHandoverByLocalActivity(knownId);
     const isAlreadyAwaitingInput = recordFor(knownId).status === 'awaiting_input';
     const shouldOfferHandover =

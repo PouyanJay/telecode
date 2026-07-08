@@ -499,6 +499,237 @@ describe('daemon resume-as-new (session-identity T8)', () => {
   });
 });
 
+describe('one-step takeover of a live adopted session (adopted-takeover T3)', () => {
+  /** Start an adopt-capable daemon with a run-capturing adapter; returns the harness pieces. */
+  async function startTakeoverDaemon(adapter: AgentAdapter): Promise<{
+    relay: FakeRelay;
+    ids: { userId: string; deviceId: string };
+    socketPath: string;
+    dir: string;
+  }> {
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-takeover-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startFakeRelay(userId, deviceId);
+    relays.push(relay);
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId,
+      deviceId,
+      agentAdapter: adapter,
+      adopt: { socketPath, ackTimeoutMs: 2000, configPath: join(dir, 'adopt-config.json') },
+      logger: silent,
+    });
+    daemons.push(daemon);
+    await daemon.start();
+    return { relay, ids: { userId, deviceId }, socketPath, dir };
+  }
+
+  /** Adopt a Claude session and park it between turns (Stop without a question → waiting_local). */
+  async function adoptAndPark(
+    relay: FakeRelay,
+    ids: { userId: string; deviceId: string },
+    socketPath: string,
+    dir: string,
+    claudeSessionId: string,
+    parentId: string,
+  ): Promise<void> {
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: claudeSessionId,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+    });
+    const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+    relay.send(
+      makeEnvelope({
+        type: 'session.adopted',
+        userId: ids.userId,
+        deviceId: ids.deviceId,
+        sessionId: parentId,
+        payload: { clientRef: (announce.payload as { clientRef: string }).clientRef },
+      }),
+    );
+    await first;
+    const transcriptPath = join(dir, `park-${claudeSessionId}.jsonl`);
+    await writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Docs are updated.' }] },
+      })}\n`,
+    );
+    await hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: claudeSessionId,
+      cwd: '/repo',
+      transcript_path: transcriptPath,
+      last_assistant_message: 'Docs are updated. The deploy is green.',
+    });
+    await relay.waitForFrame(
+      (e) =>
+        e.type === 'session.status' && e.session_id === parentId && e.status === 'waiting_local',
+    );
+  }
+
+  it('takes over a between-turns adopted parent: forks its conversation and retires the mirror', async () => {
+    const runCalls: RunCall[] = [];
+    const { relay, ids, socketPath, dir } = await startTakeoverDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'took over' }], {
+        sessionId: 'sdk-takeover-child',
+        onRun: (call) => runCalls.push(call),
+      }),
+    );
+    try {
+      const claudeSessionId = 'claude-live-1';
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      await adoptAndPark(relay, ids, socketPath, dir, claudeSessionId, parentId);
+
+      sendResumeNew(relay, ids, parentId, { prompt: 'now implement phase 7' });
+      const chained = await ackChained(relay, ids, childId);
+      expect(chained.parentSessionId).toBe(parentId);
+
+      // The conversation migrates: the parent mirror is retired PROMPTLY (before the child's long
+      // turn settles), exactly like the question-handover path.
+      const parentEnded = await relay.waitForFrame(ofType('session.ended', parentId));
+      expect(parentEnded.status).toBe('done');
+
+      // The child fork-resumes the EXTERNAL conversation with the typed instruction as its turn,
+      // in the parent's cwd — never writing into the live external transcript (forkSession).
+      await relay.waitForFrame(ofType('session.ended', childId));
+      expect(runCalls.at(-1)).toMatchObject({
+        prompt: 'now implement phase 7',
+        resume: claudeSessionId,
+        forkSession: true,
+        cwd: '/repo',
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still refuses a mid-turn adopted parent (running) — takeover is a between-turns move', async () => {
+    const { relay, ids, socketPath, dir } = await startTakeoverDaemon(createFakeAgentAdapter([]));
+    try {
+      const claudeSessionId = 'claude-live-2';
+      const parentId = randomUUID();
+      // Adopt via a tool call and leave it RUNNING (no Stop) — the agent is mid-turn locally.
+      const first = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: claudeSessionId,
+        cwd: '/repo',
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      const announce = await relay.waitForFrame((e) => e.type === 'session.adopted');
+      relay.send(
+        makeEnvelope({
+          type: 'session.adopted',
+          userId: ids.userId,
+          deviceId: ids.deviceId,
+          sessionId: parentId,
+          payload: { clientRef: (announce.payload as { clientRef: string }).clientRef },
+        }),
+      );
+      await first;
+
+      sendResumeNew(relay, ids, parentId, { prompt: 'fork it anyway' });
+      await expectNoFrame(relay, ids, (e) => e.type === 'session.chained');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to a context-seeded fresh launch when the external conversation cannot resume', async () => {
+    const runCalls: RunCall[] = [];
+    // Resuming an externally-created conversation fails (SDK cannot pick it up) — the takeover must
+    // still land, seeded with the mirrored context instead of starting cold.
+    const adapter: AgentAdapter = {
+      async run(prompt, { onEvent, resume, forkSession, cwd }) {
+        runCalls.push({
+          prompt,
+          ...(resume !== undefined ? { resume } : {}),
+          ...(forkSession !== undefined ? { forkSession } : {}),
+          ...(cwd !== undefined ? { cwd } : {}),
+        });
+        if (resume !== undefined) {
+          throw new Error('cannot resume an externally-created conversation');
+        }
+        onEvent({ type: 'message', text: 'fresh but oriented' });
+        return { intercepted: [], allowed: [], denied: [] };
+      },
+    };
+    const { relay, ids, socketPath, dir } = await startTakeoverDaemon(adapter);
+    try {
+      const claudeSessionId = 'claude-live-3';
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      await adoptAndPark(relay, ids, socketPath, dir, claudeSessionId, parentId);
+
+      sendResumeNew(relay, ids, parentId, { prompt: 'polish the error copy' });
+      await ackChained(relay, ids, childId);
+      await relay.waitForFrame(ofType('session.ended', childId));
+
+      // First call tried the fork-resume; the fallback ran fresh, seeded with the mirrored context
+      // (summary of where the session left off) AND the user's instruction — never the bare prompt.
+      expect(runCalls.at(-2)).toMatchObject({ resume: claudeSessionId, forkSession: true });
+      const fallback = runCalls.at(-1);
+      expect(fallback?.resume).toBeUndefined();
+      expect(fallback?.prompt).toContain('continuing a previous session');
+      expect(fallback?.prompt).toContain('polish the error copy');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never resurrects a retired parent: later local Stops keep mirroring but the row stays done', async () => {
+    const { relay, ids, socketPath, dir } = await startTakeoverDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'child ran' }], {
+        sessionId: 'sdk-no-resurrect',
+      }),
+    );
+    try {
+      const claudeSessionId = 'claude-live-4';
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      await adoptAndPark(relay, ids, socketPath, dir, claudeSessionId, parentId);
+      sendResumeNew(relay, ids, parentId, { prompt: 'take it from here' });
+      await ackChained(relay, ids, childId);
+      await relay.waitForFrame(ofType('session.ended', parentId));
+
+      // The user keeps typing in the STILL-LIVE local terminal session: another turn ends there.
+      const transcriptPath = join(dir, 'post-takeover.jsonl');
+      await writeFile(
+        transcriptPath,
+        `${JSON.stringify({
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'more local work' }] },
+        })}\n`,
+      );
+      await hookRpc(socketPath, {
+        hook_event_name: 'Stop',
+        session_id: claudeSessionId,
+        cwd: '/repo',
+        transcript_path: transcriptPath,
+        last_assistant_message: 'more local work',
+      });
+
+      // No waiting_local report may follow for the retired parent — its story is over.
+      await expectNoFrame(
+        relay,
+        ids,
+        (e) =>
+          e.type === 'session.status' && e.session_id === parentId && e.status === 'waiting_local',
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('resume-as-new variants: every terminal parent status is continuable (T9)', () => {
   it.each([
     { endReason: undefined, endedAs: 'done' },
