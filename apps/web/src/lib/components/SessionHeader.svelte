@@ -1,16 +1,20 @@
 <script lang="ts">
+  import type { SessionOrigin } from '@telecode/protocol';
   import { Button, Pill, type PillTone } from '@telecode/ui';
 
   import SessionTitleEditor from '$lib/components/SessionTitleEditor.svelte';
+  import { sessionControlsFor } from '$lib/session-controls';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import type { SessionStatus } from '$lib/session';
   import type { SessionActionResult } from '$lib/session-store';
 
   /**
    * The session-view header (enterprise-ui §7): a back link to the list, the session title (with inline
-   * rename, ux Phase 6 T6) + the machine it runs on, the live status pill, and the operator controls
-   * (Interrupt / End). Controls are disabled off a live channel and never optimistic — the daemon reports
-   * the resulting status. Only real metadata is shown (the device + short id; no invented path).
+   * rename, ux Phase 6 T6) + the machine it runs on, the live status pill, and the operator controls.
+   * Controls are HONEST per origin (adopted-takeover T6): an adopted session gets no Interrupt (there
+   * is no telecode-owned turn to abort) and its End reads "Stop following" (it retires the mirror; the
+   * local process is untouched). Controls are disabled off a live channel and never optimistic — the
+   * daemon reports the resulting status. Only real metadata is shown (the device + short id).
    */
   let {
     title,
@@ -19,6 +23,7 @@
     branch = null,
     sessionId,
     status,
+    origin = 'launched',
     isBusy,
     isTerminal,
     showControls,
@@ -41,6 +46,8 @@
     branch?: string | null;
     sessionId: string;
     status: SessionStatus;
+    /** Where the session runs: telecode-launched, or adopted from the user's own terminal. */
+    origin?: SessionOrigin;
     isBusy: boolean;
     isTerminal: boolean;
     showControls: boolean;
@@ -61,6 +68,7 @@
 
   const display = $derived(SESSION_DISPLAY[status]);
   const tone = $derived<PillTone>(display.tone === 'muted' ? 'neutral' : display.tone);
+  const controls = $derived(sessionControlsFor(origin, isBusy, isTerminal));
 </script>
 
 <header class="shead hairline-b">
@@ -82,11 +90,21 @@
 
   {#if showControls}
     <div class="ctrls">
-      {#if isBusy}
-        <Button variant="ghost" size="sm" disabled={!connected} onclick={oninterrupt}>Interrupt</Button>
+      {#if controls.showInterrupt}
+        <Button variant="ghost" size="sm" disabled={!connected} onclick={oninterrupt}>
+          Interrupt
+        </Button>
       {/if}
-      {#if !isTerminal}
-        <Button variant="danger" size="sm" disabled={!connected} onclick={onend}>End</Button>
+      {#if controls.showEnd}
+        <Button
+          variant={controls.endLabel === 'End' ? 'danger' : 'secondary'}
+          size="sm"
+          disabled={!connected}
+          title={controls.endTitle}
+          onclick={onend}
+        >
+          {controls.endLabel}
+        </Button>
       {/if}
     </div>
   {/if}
@@ -177,13 +195,21 @@
 
   @media (max-width: 640px) {
     .shead {
+      /* The controls WRAP to a full-width second row (adopted-takeover T7) — hiding them left
+         phones with no Interrupt/End/Stop-following at all. Full text labels, same buttons. */
+      flex-wrap: wrap;
+      row-gap: var(--space-2);
       padding: var(--space-3) var(--space-4);
     }
     .path {
       display: none;
     }
-    .ctrls {
-      display: none;
+    .ctrls,
+    .house {
+      flex-basis: 100%;
+      justify-content: flex-start;
+      /* Second row aligns under the title, past the back button (30px + the flex gap). */
+      padding-left: calc(30px + var(--space-3));
     }
   }
 </style>

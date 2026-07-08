@@ -3,16 +3,21 @@
    * A non-blocking banner for a session (enterprise-ui). `attention` (default) surfaces Claude Code's
    * own `Notification` text (e.g. the session went idle) in the amber "awaiting input" signal colour;
    * `danger` surfaces a failure the user must know about (e.g. an undelivered action); `warning`
-   * surfaces a standing state (e.g. a turn-limited run awaiting continuation). A soft cue, not a gate.
-   * With `ondismiss` the banner is dismissible (the reducer clears it when the session next moves);
-   * without it the banner STANDS — for notices tied to a state rather than a moment.
+   * surfaces a standing state (e.g. a turn-limited run awaiting continuation); `neutral` carries calm
+   * standing guidance (e.g. what sending will do for a between-turns adopted session) — deliberately
+   * un-amber: it explains, it doesn't summon. A soft cue, not a gate. With `ondismiss` the banner is
+   * dismissible (the reducer clears it when the session next moves); without it the banner STANDS —
+   * for notices tied to a state rather than a moment.
    */
   let {
     message,
     tone = 'attention',
     ondismiss,
-  }: { message: string; tone?: 'attention' | 'danger' | 'warning'; ondismiss?: () => void } =
-    $props();
+  }: {
+    message: string;
+    tone?: 'attention' | 'danger' | 'warning' | 'neutral';
+    ondismiss?: () => void;
+  } = $props();
 </script>
 
 <div class="notice" data-tone={tone} role={tone === 'danger' ? 'alert' : 'status'}>
@@ -43,6 +48,10 @@
     background: var(--warning-soft);
     border-left-color: var(--warning);
   }
+  .notice[data-tone='neutral'] {
+    background: var(--bg-subtle);
+    border-left-color: var(--border-strong);
+  }
   .dot {
     width: 8px;
     height: 8px;
@@ -55,6 +64,9 @@
   }
   .notice[data-tone='warning'] .dot {
     background: var(--warning);
+  }
+  .notice[data-tone='neutral'] .dot {
+    background: var(--text-muted);
   }
   .msg {
     flex: 1;

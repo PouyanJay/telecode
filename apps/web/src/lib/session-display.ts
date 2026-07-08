@@ -30,4 +30,8 @@ export const SESSION_DISPLAY: Record<SessionStatus, StatusDisplay> = {
   // "PAUSED · OFFLINE", never bare "OFFLINE": that word already means device presence — a paused
   // session and an offline device are different facts and must read differently.
   offline_paused: { tone: 'warning', label: 'PAUSED · OFFLINE', pulse: false },
+  // An adopted session between turns: nothing is executing, the conversation is waiting at the
+  // user's own terminal (adopted-takeover T1). Calm by design — muted, no pulse: this is the NORMAL
+  // resting state of a locally-driven session, not an alert. Amber stays reserved for gates.
+  waiting_local: { tone: 'muted', label: 'AT YOUR TERMINAL', pulse: false },
 };

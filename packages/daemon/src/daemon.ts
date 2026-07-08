@@ -22,6 +22,7 @@ import {
   sessionEndedPayloadSchema,
   sessionLaunchPayloadSchema,
   sessionResumeNewPayloadSchema,
+  sessionStatusPayloadSchema,
   sessionSubscribePayloadSchema,
   userMessagePayloadSchema,
   viewerPresencePayloadSchema,
@@ -67,6 +68,7 @@ import { readHooksStatus } from './adopt/hooks-status';
 import { uninstallHooks } from './adopt/hooks-uninstall';
 import { isAdoptionAllowed } from './adopt/is-adoption-allowed';
 import { isFreeFormQuestion } from './adopt/free-form-question';
+import { buildTakeoverFallbackPrompt } from './adopt/takeover-fallback-prompt';
 import { createHookSocketServer, type HookSocketServer } from './adopt/hook-socket';
 import { preToolUseOutput } from './adopt/pretooluse-output';
 import { buildQuestionDenyReason } from './adopt/question-deny-reason';
@@ -578,6 +580,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (type === 'session.ended') {
       const parsed = sessionEndedPayloadSchema.safeParse(payload);
       return parsed.success ? parsed.data.status : 'done';
+    }
+    if (type === 'session.status') {
+      const parsed = sessionStatusPayloadSchema.safeParse(payload);
+      return parsed.success ? parsed.data.status : undefined;
     }
     return undefined;
   }
@@ -1469,10 +1475,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (!request) return;
     const { parentId, prompt } = request;
     const parent = sessionRecords.get(parentId);
-    // Only a session that is OVER continues as a new one — a live parent keeps its own composer. An
-    // UNKNOWN parent is allowed: the relay remembers sessions this daemon lost (needs_restart after a
-    // restart), and the child link needs nothing from the parent beyond its id.
-    if (parent !== undefined && !isSessionEndStatus(parent.status)) {
+    // One-step takeover (adopted-takeover T3): a LIVE adopted parent BETWEEN TURNS may continue as a
+    // new session — telecode can't type into the local terminal, so the fork IS its follow-up path.
+    // The mirror is retired once the child actually launches (below), like the question-handover.
+    const isLiveTakeover =
+      parent !== undefined && parent.origin === 'external' && parent.status === 'waiting_local';
+    // Otherwise only a session that is OVER continues as a new one — a live parent keeps its own
+    // composer. An UNKNOWN parent is allowed: the relay remembers sessions this daemon lost
+    // (needs_restart after a restart), and the child link needs nothing from the parent beyond its id.
+    if (parent !== undefined && !isSessionEndStatus(parent.status) && !isLiveTakeover) {
       log.warn(
         { deviceId: options.deviceId, sessionId: parentId },
         'daemon: resume_new refused — session still active',
@@ -1511,7 +1522,37 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (forkCwd === undefined) return; // the child already failed cleanly
       cwd = forkCwd;
     }
+    if (isLiveTakeover) retireTakenOverParent(parentId, minted.childId);
     await runResumedTurn(minted, parentId, prompt, cwd);
+  }
+
+  /**
+   * Migrate a taken-over conversation (the handover pattern): the parent's mirror is retired —
+   * terminal, read-only, linked — and the child carries it forward. Retired promptly, BEFORE the
+   * child's long turn, so the dashboard reflects the migration; the caller invokes this only after
+   * the child is fully set up (a failed mint/workspace must leave the still-live parent untouched).
+   * `setStatus` persists terminal states, so a daemon restart cannot revive the retired row.
+   *
+   * RE-VALIDATED against the live record, not the caller's pre-await snapshot: the user may have
+   * resumed typing at the terminal during the child's mint round-trip (UserPromptSubmit/PreToolUse
+   * flip the record back to running). A live local conversation must never be severed underneath
+   * the user (invariant #7) — the takeover then degrades to an ordinary FORK: the child still runs,
+   * linked, and the parent stays live.
+   */
+  function retireTakenOverParent(parentId: string, childId: string): void {
+    if (recordFor(parentId).status !== 'waiting_local') {
+      log.info(
+        { deviceId: options.deviceId, parentSessionId: parentId, sessionId: childId },
+        'daemon: takeover parent resumed locally mid-mint — left live, child continues as a fork',
+      );
+      return;
+    }
+    setStatus(parentId, 'done');
+    sendForSession(adoptedSource(parentId), 'session.ended', { status: 'done' });
+    log.info(
+      { deviceId: options.deviceId, parentSessionId: parentId, sessionId: childId },
+      'daemon: takeover — adopted parent retired, continuation launched',
+    );
   }
 
   /**
@@ -1552,7 +1593,17 @@ export function createDaemon(options: DaemonOptions): Daemon {
   ): Promise<void> {
     // The resume id survives on the record for launched AND adopted parents (T4); fall back to the
     // in-memory map. Absent → fresh launch, still linked.
-    const resume = sessionRecords.get(parentId)?.claudeSessionId ?? sdkSessions.get(parentId);
+    const parent = sessionRecords.get(parentId);
+    const resume = parent?.claudeSessionId ?? sdkSessions.get(parentId);
+    // If the resume fails, an ADOPTED parent's fallback is seeded with the mirrored context (summary
+    // + instruction, adopted-takeover T3) — an externally-created conversation is exactly the kind
+    // the SDK may refuse to pick up, and a bare-prompt fresh start would lose everything the mirror
+    // knows. Launched parents keep the bare prompt (their resume ids are the SDK's own — a failure
+    // is rare and the transcript shape isn't handover-summarizable).
+    const fallbackPrompt =
+      parent?.origin === 'external' && parent.transcript.length > 0
+        ? buildTakeoverFallbackPrompt(buildHandoverSummary(parent.transcript), prompt)
+        : prompt;
     log.info(
       {
         deviceId: options.deviceId,
@@ -1564,8 +1615,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
     );
     await runTurn(minted.source, prompt, {
       ...(cwd !== undefined ? { cwd } : {}),
-      // A fork that can't actually resume falls back to a fresh run seeded with the same prompt.
-      ...(resume !== undefined ? { resume, forkSession: true, resumeFallbackPrompt: prompt } : {}),
+      ...(resume !== undefined
+        ? { resume, forkSession: true, resumeFallbackPrompt: fallbackPrompt }
+        : {}),
     });
   }
 
@@ -2729,14 +2781,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
-   * Stop (Journey 4): the adopted session ended its turn. If its last assistant message looks like a
-   * free-form question (heuristic, {@link isFreeFormQuestion}), offer to take it over: emit a non-blocking
-   * `agent.handover` carrying the exact question + a handover summary, park the session at `awaiting_input`,
-   * and remember the context so a later `handover.answer` can fork-resume the conversation. NON-blocking —
-   * the hook returns `{}` immediately (the idle external process is never held). Acts only on a tracked
-   * session; skips the re-entrancy case (`stop_hook_active`) and never offers twice (already awaiting input).
-   */
-  /**
    * Local activity supersedes a pending free-form handover: the user answered the question AT THE
    * DEVICE, so the takeover offer no longer applies. Drop the stale offer (map + transcript entry),
    * bring the session back to `running`, and reconcile watching browsers with a fresh history frame —
@@ -2760,7 +2804,9 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (offer.telecodeSessionId === telecodeSessionId) pendingHandovers.delete(requestId);
     }
     rec.transcript = rec.transcript.filter((entry) => !isStaleOffer(entry));
-    setStatus(telecodeSessionId, 'running');
+    // REPORT the flip (T2): the registry row sits at awaiting_input for the superseded offer, and
+    // without a frame it would stick there until the next gate or ending.
+    reportRunning(telecodeSessionId);
     // Persist the pruned state too — a restart in this window must not resurrect the offer.
     persistSession(telecodeSessionId, rec);
     sendForSession(
@@ -2772,6 +2818,85 @@ export function createDaemon(options: DaemonOptions): Daemon {
       { deviceId: options.deviceId, sessionId: telecodeSessionId },
       'daemon: pending handover superseded by local activity',
     );
+  }
+
+  /**
+   * Report the between-turns truth for an adopted session (adopted-takeover T1): the turn is over and
+   * nothing is executing — the conversation is waiting at the user's own terminal, not RUNNING. Sent as
+   * a `session.status` frame (sealed payload + cleartext envelope status) so both live browsers and the
+   * payload-blind relay registry flip together.
+   */
+  function reportWaitingLocal(telecodeSessionId: string): void {
+    setStatus(telecodeSessionId, 'waiting_local');
+    sendForSession(adoptedSource(telecodeSessionId), 'session.status', {
+      status: 'waiting_local',
+      ts: now(),
+    });
+  }
+
+  /**
+   * The mirror of {@link reportWaitingLocal} (adopted-takeover T2): a new LOCAL turn began — the
+   * user submitted a prompt (UserPromptSubmit, the only signal a chat-only turn gives) or a tool
+   * call arrived. Reported as a frame, not just a local flip, so the relay registry leaves
+   * waiting_local/awaiting_input instead of sticking there until the next gate or ending.
+   */
+  function reportRunning(telecodeSessionId: string): void {
+    setStatus(telecodeSessionId, 'running');
+    sendForSession(adoptedSource(telecodeSessionId), 'session.status', {
+      status: 'running',
+      ts: now(),
+    });
+  }
+
+  /**
+   * UserPromptSubmit (adopted-takeover T2): the user typed the next task at their terminal. Acts only
+   * on a tracked session. Local activity supersedes any pending takeover offer (the user answered
+   * where the conversation lives), and a between-turns / restart-guessed session honestly flips back
+   * to RUNNING. The prompt text itself is deliberately never parsed, logged, or mirrored here — the
+   * transcript mirror picks the turn up on its Stop.
+   */
+  function handleUserPromptSubmitHook(event: HookEvent): unknown {
+    const knownId = adoptedSessions?.telecodeIdFor(event.session_id);
+    if (knownId === undefined) return {};
+    supersedePendingHandoverByLocalActivity(knownId);
+    const status = recordFor(knownId).status;
+    if (status === 'waiting_local' || status === 'needs_restart') {
+      reportRunning(knownId);
+      persistSession(knownId, recordFor(knownId));
+    }
+    log.info(
+      { deviceId: options.deviceId, sessionId: knownId },
+      'daemon: local prompt — adopted session running',
+    );
+    return {};
+  }
+
+  /**
+   * Settle an adopted session's state for a just-ended turn and decide whether a free-form handover
+   * offer should follow. In order: a Stop disproves a restart's `needs_restart` guess (chat-only turns
+   * fire no PreToolUse, so the revive must live here too — and BEFORE the supersede, whose end-status
+   * guard would otherwise skip pruning a stale offer on a needs_restart record); local activity
+   * supersedes any stale pending offer; then the offer decision — gated on adoption policy (launching a
+   * handover starts a NEW telecode-owned session, so a denylisted repo must not get one), on the turn
+   * ending in a free-form question, and on not stacking over a still-pending gate. When no offer will
+   * show and no gate is pending, the honest between-turns status is reported instead.
+   */
+  function settleStopOutcome(knownId: string, event: HookEvent): boolean {
+    // A retired/ended mirror stays ended (its story is over — e.g. a taken-over or handed-off parent
+    // whose local process keeps running): later Stops keep mirroring the transcript, but must never
+    // resurrect the row to waiting_local or stack a fresh offer on it. `needs_restart` is the one
+    // "ended" state a Stop deliberately disproves — the revive below handles it.
+    const statusOnStop = recordFor(knownId).status;
+    if (isSessionEndStatus(statusOnStop) && statusOnStop !== 'needs_restart') return false;
+    if (statusOnStop === 'needs_restart') setStatus(knownId, 'waiting_local');
+    supersedePendingHandoverByLocalActivity(knownId);
+    const isAlreadyAwaitingInput = recordFor(knownId).status === 'awaiting_input';
+    const shouldOfferHandover =
+      !isAlreadyAwaitingInput &&
+      isAdoptionAllowed(adoptConfig, event.cwd) &&
+      isFreeFormQuestion(event.last_assistant_message);
+    if (!shouldOfferHandover && !isAlreadyAwaitingInput) reportWaitingLocal(knownId);
+    return shouldOfferHandover;
   }
 
   async function handleStopHook(event: HookEvent): Promise<unknown> {
@@ -2796,26 +2921,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // Refine the derived title once a chat-only session (no PreToolUse) mirrors its first prompt (T5).
     refineAdoptedTitleFromPrompt(knownId);
     void refreshAdoptedBranch(knownId);
-    // A Stop proves the external conversation is alive: a restart's `needs_restart` guess for this
-    // adopted session is disproven (chat-only turns fire no PreToolUse, so the revive must live
-    // here too, not only on the tool path).
-    if (recordFor(knownId).status === 'needs_restart') setStatus(knownId, 'running');
-    // A Stop AFTER an offering one means a NEW local turn ran — the user answered at the device, so
-    // any still-pending offer is stale. Cleared BEFORE the offer block below, which may then offer
-    // afresh if THIS turn also ended on a free-form question.
-    supersedePendingHandoverByLocalActivity(knownId);
+    const shouldOfferHandover = settleStopOutcome(knownId, event);
     // Keep the persisted transcript current (ux Phase 6 T4): an adopted session isn't terminal on Stop,
     // so without this its on-disk copy would stay frozen at adoption time and a restart would backfill a
     // stale transcript. Best-effort, coalesced by the store.
     persistSession(knownId, recordFor(knownId));
 
-    // Free-form handover offer (Journey 4). The mirror above is intentionally unconditional (an already-
-    // adopted session keeps flowing regardless of a mid-session policy change); only the OFFER is gated here:
-    // launching a handover starts a NEW telecode-owned session, so a repo the user has since denylisted (or
-    // adoption turned off) must not get one. And don't stack an offer while one is already showing.
-    if (!isAdoptionAllowed(adoptConfig, event.cwd)) return {};
-    if (!isFreeFormQuestion(event.last_assistant_message)) return {};
-    if (recordFor(knownId).status === 'awaiting_input') return {};
+    if (!shouldOfferHandover) return {};
     const question = (event.last_assistant_message ?? '').trim();
     // Deterministic "what the session was doing" summary from the mirrored transcript — no extra model call.
     const summary = buildHandoverSummary(recordFor(knownId).transcript);
@@ -2907,6 +3019,7 @@ export function createDaemon(options: DaemonOptions): Daemon {
     if (event.hook_event_name === 'SessionEnd') return handleSessionEndHook(event);
     if (event.hook_event_name === 'Notification') return handleNotificationHook(event);
     if (event.hook_event_name === 'Stop') return handleStopHook(event);
+    if (event.hook_event_name === 'UserPromptSubmit') return handleUserPromptSubmitHook(event);
 
     // Adoption policy gate (Journey 3): for a session we are NOT already tracking, apply the per-machine
     // policy — if adoption is disabled or this project is on the denylist, telecode stays out entirely and
@@ -2943,10 +3056,15 @@ export function createDaemon(options: DaemonOptions): Daemon {
     adoptedRec.claudeSessionId = event.session_id;
     if (event.cwd !== undefined) adoptedRec.cwd = event.cwd;
     // An adopted session is live the moment we first see it — and hook activity DISPROVES a
-    // restart's honest `needs_restart` guess (T4 restores awaiting_input that way): the external
-    // conversation demonstrably continues, so the session revives rather than reading dead forever.
-    if (adoptedRec.status === 'starting' || adoptedRec.status === 'needs_restart') {
+    // restart's honest `needs_restart` guess (T4 restores awaiting_input that way) or a
+    // between-turns `waiting_local`: the external conversation demonstrably continues, so the
+    // session revives rather than reading stale. First adoption (`starting`) flips locally only —
+    // the announce ack already lands the row as running; revives REPORT the flip (T2), since no
+    // other frame would move the registry off the stale status.
+    if (adoptedRec.status === 'starting') {
       setStatus(telecodeSessionId, 'running');
+    } else if (adoptedRec.status === 'needs_restart' || adoptedRec.status === 'waiting_local') {
+      reportRunning(telecodeSessionId);
     }
     // E2E (invariant #5): mint this session's content key so its frames go to the relay as ciphertext, not
     // plaintext. Idempotent. The key is delivered to the browser on `session.subscribe` (it announces its

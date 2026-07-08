@@ -10,6 +10,7 @@ import {
   agentQuestionPayloadSchema,
   agentToolUsePayloadSchema,
   handoverAnswerPayloadSchema,
+  isSessionEndStatus,
   permissionDecisionPayloadSchema,
   questionAnswerPayloadSchema,
   relayErrorPayloadSchema,
@@ -21,6 +22,8 @@ import {
   sessionLaunchPayloadSchema,
   sessionOriginSchema,
   sessionReconcilePayloadSchema,
+  sessionStatusPayloadSchema,
+  sessionStatusSchema,
   userMessagePayloadSchema,
   viewerPresencePayloadSchema,
 } from './session';
@@ -831,5 +834,34 @@ describe('sessionReconcilePayloadSchema (daemon → relay reconciliation)', () =
     expect(
       sessionReconcilePayloadSchema.parse({ heldSessionIds: many }).heldSessionIds,
     ).toHaveLength(500);
+  });
+});
+
+describe('waiting_local status (adopted-takeover T1: adopted session between turns)', () => {
+  it('is a valid session status — the daemon reports it when an adopted turn ends', () => {
+    expect(sessionStatusSchema.parse('waiting_local')).toBe('waiting_local');
+  });
+
+  it('is NOT terminal — the conversation continues (at the terminal, or via takeover)', () => {
+    expect(isSessionEndStatus('waiting_local')).toBe(false);
+  });
+});
+
+describe('sessionStatusPayloadSchema (daemon → web non-terminal status report)', () => {
+  it('parses the two reportable states, with and without a timestamp', () => {
+    expect(sessionStatusPayloadSchema.parse({ status: 'waiting_local' }).status).toBe(
+      'waiting_local',
+    );
+    expect(sessionStatusPayloadSchema.parse({ status: 'running', ts: 1751900000000 })).toEqual({
+      status: 'running',
+      ts: 1751900000000,
+    });
+  });
+
+  it('rejects statuses that have their own frames (endings, gates) and junk', () => {
+    for (const status of ['done', 'error', 'awaiting_input', 'starting', 'nonsense', '']) {
+      expect(sessionStatusPayloadSchema.safeParse({ status }).success, status).toBe(false);
+    }
+    expect(sessionStatusPayloadSchema.safeParse({}).success).toBe(false);
   });
 });

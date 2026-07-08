@@ -124,6 +124,11 @@ export interface SessionRegistry {
   /** Flip a session to `awaiting_input` while a tool request blocks on a human decision. No-op if not the user's. */
   markAwaitingInput(input: { userId: string; sessionId: string }): Promise<void>;
   /**
+   * Flip an ADOPTED session to `waiting_local` when its turn ends at the user's terminal
+   * (adopted-takeover T1, driven by the daemon's `session.status` frame). No-op if not the user's.
+   */
+  markWaitingLocal(input: { userId: string; sessionId: string }): Promise<void>;
+  /**
    * Store the latest sealed `session.meta` blob for a session (ux Phase 6) — latest-wins, opaque to the
    * relay. Bumps `updatedAt` (a metadata change is session activity). No-op if the row isn't the user's.
    */
@@ -226,7 +231,7 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
   async function setStatus(
     userId: string,
     sessionId: string,
-    status: 'running' | 'awaiting_input',
+    status: 'running' | 'awaiting_input' | 'waiting_local',
   ): Promise<void> {
     await withUserContext(db, userId, async (scoped) => {
       await scoped
@@ -352,6 +357,10 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
       await setStatus(userId, sessionId, 'awaiting_input');
     },
 
+    async markWaitingLocal({ userId, sessionId }): Promise<void> {
+      await setStatus(userId, sessionId, 'waiting_local');
+    },
+
     async setSealedMeta({ userId, sessionId, sealedMeta, sealedMetaNonce }): Promise<void> {
       await withUserContext(db, userId, async (scoped) => {
         await scoped
@@ -440,7 +449,13 @@ export function createSessionRegistry(db: DbHandle): SessionRegistry {
               // gone for good (no daemon will ever reconnect on its token), so a `starting` or `offline_paused`
               // session on it can never progress and must be ended too. (`offline_paused` isn't persisted by
               // the relay today, but is listed so a revoked device is fully cleared if that ever changes.)
-              inArray(sessions.status, ['starting', 'running', 'awaiting_input', 'offline_paused']),
+              inArray(sessions.status, [
+                'starting',
+                'running',
+                'awaiting_input',
+                'waiting_local',
+                'offline_paused',
+              ]),
             ),
           )
           .returning({ id: sessions.id });

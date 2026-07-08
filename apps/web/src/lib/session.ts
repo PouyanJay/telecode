@@ -10,6 +10,7 @@ import {
   agentToolUsePayloadSchema,
   sessionEndedPayloadSchema,
   sessionHistoryPayloadSchema,
+  sessionStatusPayloadSchema,
   type AgentQuestionItem,
   type Envelope,
   type QuestionAnswerItem,
@@ -446,6 +447,16 @@ export function applyEnvelope(
         ],
         seq: base.seq + 1,
       };
+    }
+
+    case 'session.status': {
+      // A non-terminal lifecycle report (adopted-takeover T1): an adopted session's turn ended
+      // (waiting_local — nothing is executing, the conversation waits at the terminal) or a new
+      // local turn began (running). Status-only; adds no transcript entry. Defensive (T9): a
+      // stray/reordered report must never resurrect a session that already ended here.
+      const parsed = sessionStatusPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success || isSessionEndStatus(base.status)) return base;
+      return { ...base, status: parsed.data.status };
     }
 
     case 'session.ended': {

@@ -202,6 +202,8 @@ describe('relay device listing: GET /me/devices', () => {
     await sessions.markRunning({ userId: alice.userId, sessionId: running });
     const awaiting = await sessions.createSession({ userId: alice.userId, deviceId });
     await sessions.markAwaitingInput({ userId: alice.userId, sessionId: awaiting });
+    const waitingLocal = await sessions.createSession({ userId: alice.userId, deviceId });
+    await sessions.markWaitingLocal({ userId: alice.userId, sessionId: waitingLocal });
     const paused = await sessions.createSession({ userId: alice.userId, deviceId });
     await admin.query("update sessions set status = 'offline_paused' where id = $1", [paused]);
     const alreadyDone = await sessions.createSession({ userId: alice.userId, deviceId });
@@ -235,6 +237,7 @@ describe('relay device listing: GET /me/devices', () => {
     expect(statusOf(starting)).toBe('done');
     expect(statusOf(running)).toBe('done');
     expect(statusOf(awaiting)).toBe('done');
+    expect(statusOf(waitingLocal)).toBe('done');
     expect(statusOf(paused)).toBe('done');
     expect(statusOf(alreadyDone)).toBe('done');
     // A different device of the same user is untouched.

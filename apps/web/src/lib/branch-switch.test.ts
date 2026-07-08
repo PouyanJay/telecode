@@ -18,6 +18,7 @@ describe('canSwitchBranch', () => {
       offline_paused: false,
       turn_limit: true, // settled but followable
       needs_restart: false,
+      waiting_local: false, // adopted-only state; a launched session can never be in it
     };
     for (const status of SESSION_STATUSES) {
       expect(canSwitchBranch(status, 'launched'), status).toBe(expected[status]);

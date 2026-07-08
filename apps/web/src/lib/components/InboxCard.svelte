@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { Button, Spinner } from '@telecode/ui';
+  import { Button, Spinner, clipIndicator } from '@telecode/ui';
 
   import type { InboxAsk } from '$lib/inbox';
   import { summarizeTool } from '$lib/tool-summary';
 
   import DiffStatBadge from './DiffStatBadge.svelte';
+  import MessageBody from './MessageBody.svelte';
   import { waitingLabel } from '$lib/waiting-label';
 
   import RejectNoteForm from './RejectNoteForm.svelte';
@@ -86,7 +87,12 @@
       </div>
     {/if}
   {:else}
-    <p class="summary">{ask.kind === 'question' ? ask.prompt : ask.question}</p>
+    <!-- The agent's message is markdown (often long and structured) — render it properly, clamped
+         to a preview; the fade appears only when content is actually cut off (data-clipped), and
+         the link below is the way into the full story. Sanitized like the transcript. -->
+    <div class="preview" use:clipIndicator>
+      <MessageBody text={ask.kind === 'question' ? ask.prompt : ask.question} />
+    </div>
     <div class="actions">
       <a class="open" href="/sessions/{ask.sessionId}">
         {ask.kind === 'question' ? 'Answer in the session →' : 'Review & take over →'}
@@ -175,6 +181,20 @@
     font-size: var(--text-sm);
     color: var(--text);
     word-break: break-word;
+  }
+  /* The clamped markdown preview: ~7 lines of body text, then a fade — but ONLY when something is
+     actually clipped (the action keeps data-clipped honest; short messages never wash out). */
+  .preview {
+    font-size: var(--text-sm);
+    color: var(--text);
+    max-height: 9rem;
+    overflow: hidden;
+  }
+  /* data-clipped is set by the clipIndicator action at runtime — :global() keeps Svelte's
+     compile-time pruning from dropping the selector it can't see. */
+  .preview:global([data-clipped='true']) {
+    mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
   }
   .summary.mono {
     font-family: var(--font-mono);

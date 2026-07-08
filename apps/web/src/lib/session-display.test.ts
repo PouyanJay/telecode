@@ -25,6 +25,16 @@ describe('SESSION_DISPLAY vocabulary', () => {
     }
   });
 
+  it('reads an adopted between-turns session as AT YOUR TERMINAL, calm by design', () => {
+    // adopted-takeover T1: nothing is executing and nothing needs the operator NOW — muted, no
+    // pulse. Amber stays reserved for the live/needs-you states above.
+    expect(SESSION_DISPLAY.waiting_local).toEqual({
+      tone: 'muted',
+      label: 'AT YOUR TERMINAL',
+      pulse: false,
+    });
+  });
+
   it('no two statuses share a label (every state is distinguishable at a glance)', () => {
     const labels = Object.values(SESSION_DISPLAY).map((display) => display.label);
     expect(new Set(labels).size).toBe(labels.length);
