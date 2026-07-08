@@ -83,7 +83,9 @@ On Windows the background service isn't available yet — run `telecode` in a te
      **own new branch**, cut from the base you pick (auto-named from the task if you don't). See
      [Branches, changes & PRs](./branches-and-changes.md).
    - **Permission mode** — _Plan only_, _Approve edits_ (the default: you approve each consequential
-     action), or _Auto-accept edits_.
+     action), _Auto-accept edits_, or _Bypass permissions_ (everything runs without asking — full
+     access to your machine; multiple-choice questions still stop for you). Pick a default once in
+     **Settings** and every launch starts from it.
 2. Watch the agent work in the **transcript**: messages, collapsible tool calls, and syntax-highlighted
    diffs stream in live. The **Changes** panel keeps a running diff of the session's branch against its
    base.

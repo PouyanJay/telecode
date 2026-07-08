@@ -34,9 +34,17 @@ describe('permission-mode persistence', () => {
     expect(readPermissionMode(corrupt)).toBe(DEFAULT_PERMISSION_MODE);
   });
 
-  it('offers exactly the three surfaced modes and omits the gate-bypassing one', () => {
+  it('offers all four modes, ordered least → most autonomous (bypass last, never the default)', () => {
     const values = PERMISSION_MODES.map((mode) => mode.value);
-    expect(values).toEqual(['plan', 'default', 'acceptEdits']);
-    expect(values).not.toContain('bypassPermissions');
+    expect(values).toEqual(['plan', 'default', 'acceptEdits', 'bypassPermissions']);
+    // Choosable is not the same as default: a fresh install still gates everything (invariant #4).
+    expect(DEFAULT_PERMISSION_MODE).toBe('default');
+  });
+
+  it('frames bypass honestly — full autonomy, questions still stop for you', () => {
+    const bypass = PERMISSION_MODES.find((mode) => mode.value === 'bypassPermissions');
+    expect(bypass?.label).toBe('Bypass permissions');
+    expect(bypass?.hint).toMatch(/without asking/i);
+    expect(bypass?.hint).toMatch(/questions still/i);
   });
 });

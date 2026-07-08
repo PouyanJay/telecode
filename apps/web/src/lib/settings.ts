@@ -5,8 +5,10 @@ import { permissionModeSchema, type PermissionModeName } from '@telecode/protoco
  * Settings edits it). The persistence is split into pure read/write over a `Storage`-shaped seam so it
  * unit-tests without a DOM; the Svelte surfaces call these with the real `localStorage` (browser-guarded).
  *
- * We surface three of the SDK's four modes; `bypassPermissions` (skip every gate) is deliberately omitted
- * — the approval gate is telecode's safety boundary (architecture invariant #4), not a casual default.
+ * All four modes are surfaced, ordered least → most autonomous. `bypassPermissions` is CHOOSABLE but
+ * never the shipped default (invariant #4 keeps the fresh-install default conservative): the operator
+ * who picks it explicitly surrenders the gate — everything runs unattended, except questions, which
+ * always stop for a human (the daemon's policy enforces that exception, not this list).
  */
 export interface PermissionModeOption {
   readonly value: PermissionModeName;
@@ -25,6 +27,11 @@ export const PERMISSION_MODES: readonly PermissionModeOption[] = [
     value: 'acceptEdits',
     label: 'Auto-accept edits',
     hint: 'File edits apply automatically; other actions still ask.',
+  },
+  {
+    value: 'bypassPermissions',
+    label: 'Bypass permissions',
+    hint: 'Everything runs without asking — full access to your machine. Questions still stop for you.',
   },
 ];
 

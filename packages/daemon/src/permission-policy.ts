@@ -14,8 +14,10 @@ import type { PermissionModeName } from '@telecode/protocol';
  * `mode` is the session's permission mode (chosen at launch):
  *  - `plan` / `default`  → only read-only tools auto-run; every consequential tool asks.
  *  - `acceptEdits`       → file-edit tools also auto-run; bash, network, and the rest still ask.
- *  - `bypassPermissions` is intentionally NOT honored as allow-all here — telecode never surrenders the
- *    gate, so it falls through to the conservative consequential-asks behavior.
+ *  - `bypassPermissions` → everything auto-runs. The operator EXPLICITLY surrendered the gate when
+ *    they picked this mode at launch (it is never the shipped default — invariant #4's conservative
+ *    default holds; this is the same trade Claude Code's own bypass mode offers). The one exception
+ *    is `AskUserQuestion`: a question is a request FOR the human — bypassing it answers nothing.
  *
  * Anything not on an allowlist asks — unknown/new tools fail safe (toward a human decision).
  */
@@ -39,6 +41,7 @@ const EDIT_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit', 'MultiEdit', '
 
 export function classifyTool(toolName: string, mode: PermissionModeName): 'allow' | 'ask' {
   if (AUTO_APPROVED_TOOLS.has(toolName)) return 'allow';
+  if (mode === 'bypassPermissions') return toolName === 'AskUserQuestion' ? 'ask' : 'allow';
   if (mode === 'acceptEdits' && EDIT_TOOLS.has(toolName)) return 'allow';
   return 'ask';
 }

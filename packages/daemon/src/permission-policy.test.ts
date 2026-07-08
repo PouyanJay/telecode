@@ -9,6 +9,8 @@ const ALL_MODES: readonly PermissionModeName[] = [
   'acceptEdits',
   'bypassPermissions',
 ];
+// The modes that keep the human gate for consequential tools (bypassPermissions surrenders it).
+const GATED_MODES: readonly PermissionModeName[] = ['default', 'plan', 'acceptEdits'];
 
 describe('classifyTool', () => {
   it.each(['Read', 'Glob', 'Grep', 'NotebookRead', 'TodoWrite'])(
@@ -18,7 +20,7 @@ describe('classifyTool', () => {
     },
   );
 
-  it.each(ALL_MODES)('always asks for Bash in %s mode (the unapproved-command bug)', (mode) => {
+  it.each(GATED_MODES)('always asks for Bash in %s mode (the unapproved-command bug)', (mode) => {
     expect(classifyTool('Bash', mode)).toBe('ask');
   });
 
@@ -43,10 +45,28 @@ describe('classifyTool', () => {
     expect(classifyTool('Frobnicate', 'acceptEdits')).toBe('ask');
   });
 
-  it('never surrenders the gate under bypassPermissions — consequential tools still ask', () => {
-    expect(classifyTool('Bash', 'bypassPermissions')).toBe('ask');
-    expect(classifyTool('Write', 'bypassPermissions')).toBe('ask');
-    // read-only stays auto-allowed (it is safe regardless of mode)
+  it('read-only stays auto-allowed under bypassPermissions too (safe regardless of mode)', () => {
     expect(classifyTool('Read', 'bypassPermissions')).toBe('allow');
+  });
+});
+
+describe('bypassPermissions (launch-selectable, bypass-launch-mode)', () => {
+  it.each(['Bash', 'Write', 'Edit', 'WebFetch', 'KillShell', 'SomeFutureTool'])(
+    'auto-allows %s — the operator explicitly surrendered the gate at launch',
+    (tool) => {
+      expect(classifyTool(tool, 'bypassPermissions')).toBe('allow');
+    },
+  );
+
+  it('still asks for AskUserQuestion — a question is a request FOR the human, never bypassable', () => {
+    expect(classifyTool('AskUserQuestion', 'bypassPermissions')).toBe('ask');
+  });
+
+  it('leaves every other mode exactly as conservative as before', () => {
+    expect(classifyTool('Bash', 'default')).toBe('ask');
+    expect(classifyTool('Bash', 'acceptEdits')).toBe('ask');
+    expect(classifyTool('Bash', 'plan')).toBe('ask');
+    expect(classifyTool('Write', 'acceptEdits')).toBe('allow');
+    expect(classifyTool('AskUserQuestion', 'default')).toBe('ask');
   });
 });

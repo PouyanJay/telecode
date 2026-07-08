@@ -13,8 +13,10 @@ between them. This document states plainly what each part can and cannot see, an
 **1. The approval gate is the execution boundary.** The daemon runs code on your machine. Every
 consequential tool call the agent wants to make is paused at the SDK permission gate and forwarded to your
 browser as an `agent.permission_request`; nothing runs until you allow it. The default permission mode is
-conservative. A compromised account is therefore a serious event — prefer scoped repositories and keep the
-default gate on.
+conservative. Choosing **Bypass permissions** at launch explicitly moves this boundary for that session —
+every tool runs unattended (questions still stop for a human), so treat a bypass session as granting the
+agent the same access you have. A compromised account is therefore a serious event — prefer scoped
+repositories and keep the default gate on.
 
 **2. End-to-end encryption is the confidentiality boundary.** Session content — your prompts, the agent's
 output, tool inputs, diffs, and the backfilled transcript — is encrypted in the browser and the daemon and
