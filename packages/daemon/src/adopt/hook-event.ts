@@ -11,6 +11,12 @@ import { z } from 'zod';
  * `SessionStart` carries `source`; `SessionEnd` carries `reason`; `Notification` carries `message`; other
  * events omit them. Unknown fields are ignored (zod strips by default) so a Claude Code version that adds
  * fields doesn't break parsing.
+ *
+ * SECURITY BOUNDARY (adopted-takeover AD-7/AD-22): `UserPromptSubmit` events carry a `prompt` field
+ * that is DELIBERATELY absent here — zod's strip mode drops it at this trust boundary, so the user's
+ * prompt text is structurally never parsed, logged, or mirrored by the daemon (the transcript mirror
+ * picks the turn up from the transcript file on its Stop instead). Do not "complete" the schema with
+ * it.
  */
 export const hookEventSchema = z.object({
   hook_event_name: z.string().min(1),

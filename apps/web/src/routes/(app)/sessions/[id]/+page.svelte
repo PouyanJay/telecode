@@ -27,7 +27,11 @@
   import { resolveSessionDevice } from '$lib/session-device';
   import { SESSION_DISPLAY } from '$lib/session-display';
   import { resolvePlaceholder, RESTORE_TIMEOUT_MS } from '$lib/session-placeholder';
-  import { composerModeFor } from '$lib/composer-mode';
+  import {
+    composerDisabledReasonFor,
+    composerModeFor,
+    composerPlaceholderFor,
+  } from '$lib/composer-mode';
   import { canSwitchBranch } from '$lib/branch-switch';
   import { canPushBranch } from '$lib/push-offer';
   import {
@@ -309,10 +313,6 @@
   const takeoverNotice =
     'This session lives in your terminal. Sending continues it here, in a new linked session — ' +
     'after that, steer it from telecode (the old terminal window becomes a separate conversation).';
-  // Honest blocked composer (T5): while the agent works in the terminal there is nothing telecode
-  // can deliver a message to — say so instead of spinning silently.
-  const blockedLocalTurnReason =
-    'The agent is working in your terminal — you can take over when this turn finishes.';
   // Fork onto a chosen branch (branch-actions T5): the picker's current choice + validity. An
   // invalid custom name BLOCKS the send with an honest story — never a silent fallback.
   // Structurally absent for ADOPTED parents (requirements A8): their fork inherits nothing
@@ -534,16 +534,8 @@
           <Composer
             isBusy={isBusy || resuming}
             submitLabel={composerMode === 'resume_new' ? 'Resume as new' : 'Send'}
-            placeholder={composerMode === 'resume_new'
-              ? 'Continue this work in a new session…'
-              : composerMode === 'takeover'
-                ? 'Send your next task — it continues here…'
-                : 'Send a follow-up instruction…'}
-            disabledReason={composerMode === 'blocked_local_turn'
-              ? blockedLocalTurnReason
-              : composerMode === 'resume_new' && !forkBranchValid
-                ? 'Fix the new branch name first — it isn’t a valid git branch name.'
-                : undefined}
+            placeholder={composerPlaceholderFor(composerMode)}
+            disabledReason={composerDisabledReasonFor(composerMode, forkBranchValid)}
             onsend={submitPrompt}
           />
         </div>

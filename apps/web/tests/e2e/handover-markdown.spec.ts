@@ -57,6 +57,16 @@ test('a markdown handover question renders formatted on the board card and in th
   await expect(card).not.toContainText('##');
   await expect(card).not.toContainText('**');
 
+  // Honest clamp (clipIndicator): the LONG question's preview is actually cut off — data-clipped
+  // flips true (the fade) — while the SHORT question's card must NOT wash out.
+  await expect(card.locator('.preview')).toHaveAttribute('data-clipped', 'true');
+  const shortCard = page
+    .getByRole('article', { name: 'READY TO TAKE OVER' })
+    .filter({ hasText: 'Ship it now, or wait for the review?' })
+    .first();
+  await expect(shortCard).toBeVisible();
+  await expect(shortCard.locator('.preview')).toHaveAttribute('data-clipped', 'false');
+
   // In the session: the handover card renders the same message as markdown, with the answer box.
   await card.getByRole('link', { name: 'Review & take over →' }).click();
   await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/);

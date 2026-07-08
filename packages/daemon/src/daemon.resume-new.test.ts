@@ -671,7 +671,8 @@ describe('one-step takeover of a live adopted session (adopted-takeover T3)', ()
 
       sendResumeNew(relay, ids, parentId, { prompt: 'polish the error copy' });
       await ackChained(relay, ids, childId);
-      await relay.waitForFrame(ofType('session.ended', childId));
+      // The fallback run still lands the child cleanly — a completed turn, not an error.
+      expect((await relay.waitForFrame(ofType('session.ended', childId))).status).toBe('done');
 
       // First call tried the fork-resume; the fallback ran fresh, seeded with the mirrored context
       // (summary of where the session left off) AND the user's instruction — never the bare prompt.
@@ -680,6 +681,57 @@ describe('one-step takeover of a live adopted session (adopted-takeover T3)', ()
       expect(fallback?.resume).toBeUndefined();
       expect(fallback?.prompt).toContain('continuing a previous session');
       expect(fallback?.prompt).toContain('polish the error copy');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the parent LIVE when the user resumes locally during the takeover mint (race)', async () => {
+    const { relay, ids, socketPath, dir } = await startTakeoverDaemon(
+      createFakeAgentAdapter([{ type: 'message', text: 'forked anyway' }], {
+        sessionId: 'sdk-race-child',
+      }),
+    );
+    try {
+      const claudeSessionId = 'claude-live-race';
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      await adoptAndPark(relay, ids, socketPath, dir, claudeSessionId, parentId);
+
+      // The takeover starts… and while the daemon awaits the relay's chained ack, the user types at
+      // the terminal (UserPromptSubmit flips the parent back to running — a frame we wait for, so
+      // the flip deterministically lands before we release the mint below).
+      sendResumeNew(relay, ids, parentId, { prompt: 'take it over' });
+      const announce = await relay.waitForFrame((e) => e.type === 'session.chained');
+      await hookRpc(socketPath, {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: claudeSessionId,
+        cwd: '/repo',
+        prompt: 'actually, one more local tweak',
+      });
+      await relay.waitForFrame(
+        (e) => e.type === 'session.status' && e.session_id === parentId && e.status === 'running',
+      );
+      relay.send(
+        makeEnvelope({
+          type: 'session.chained',
+          userId: ids.userId,
+          deviceId: ids.deviceId,
+          sessionId: childId,
+          payload: {
+            clientRef: (announce.payload as { clientRef: string }).clientRef,
+            parentSessionId: parentId,
+          },
+        }),
+      );
+
+      // The child still runs (an honest FORK, linked) — but the LIVE parent is never severed.
+      await relay.waitForFrame(ofType('session.ended', childId));
+      await expectNoFrame(
+        relay,
+        ids,
+        (e) => e.type === 'session.ended' && e.session_id === parentId,
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

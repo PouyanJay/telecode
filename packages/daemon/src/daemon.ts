@@ -1522,20 +1522,37 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (forkCwd === undefined) return; // the child already failed cleanly
       cwd = forkCwd;
     }
-    if (isLiveTakeover) {
-      // Migrate the conversation (the handover pattern): the parent's mirror is retired — terminal,
-      // read-only, linked — and the child carries it forward. Retired promptly, BEFORE the child's
-      // long turn, so the dashboard reflects the migration; but only after the child is fully set up
-      // (a failed mint/workspace above must leave the still-live parent untouched). `setStatus`
-      // persists terminal states, so a daemon restart cannot revive the retired row.
-      setStatus(parentId, 'done');
-      sendForSession(adoptedSource(parentId), 'session.ended', { status: 'done' });
-      log.info(
-        { deviceId: options.deviceId, parentSessionId: parentId, sessionId: minted.childId },
-        'daemon: takeover — adopted parent retired, continuation launched',
-      );
-    }
+    if (isLiveTakeover) retireTakenOverParent(parentId, minted.childId);
     await runResumedTurn(minted, parentId, prompt, cwd);
+  }
+
+  /**
+   * Migrate a taken-over conversation (the handover pattern): the parent's mirror is retired —
+   * terminal, read-only, linked — and the child carries it forward. Retired promptly, BEFORE the
+   * child's long turn, so the dashboard reflects the migration; the caller invokes this only after
+   * the child is fully set up (a failed mint/workspace must leave the still-live parent untouched).
+   * `setStatus` persists terminal states, so a daemon restart cannot revive the retired row.
+   *
+   * RE-VALIDATED against the live record, not the caller's pre-await snapshot: the user may have
+   * resumed typing at the terminal during the child's mint round-trip (UserPromptSubmit/PreToolUse
+   * flip the record back to running). A live local conversation must never be severed underneath
+   * the user (invariant #7) — the takeover then degrades to an ordinary FORK: the child still runs,
+   * linked, and the parent stays live.
+   */
+  function retireTakenOverParent(parentId: string, childId: string): void {
+    if (recordFor(parentId).status !== 'waiting_local') {
+      log.info(
+        { deviceId: options.deviceId, parentSessionId: parentId, sessionId: childId },
+        'daemon: takeover parent resumed locally mid-mint — left live, child continues as a fork',
+      );
+      return;
+    }
+    setStatus(parentId, 'done');
+    sendForSession(adoptedSource(parentId), 'session.ended', { status: 'done' });
+    log.info(
+      { deviceId: options.deviceId, parentSessionId: parentId, sessionId: childId },
+      'daemon: takeover — adopted parent retired, continuation launched',
+    );
   }
 
   /**
@@ -2763,14 +2780,6 @@ export function createDaemon(options: DaemonOptions): Daemon {
     return {};
   }
 
-  /**
-   * Stop (Journey 4): the adopted session ended its turn. If its last assistant message looks like a
-   * free-form question (heuristic, {@link isFreeFormQuestion}), offer to take it over: emit a non-blocking
-   * `agent.handover` carrying the exact question + a handover summary, park the session at `awaiting_input`,
-   * and remember the context so a later `handover.answer` can fork-resume the conversation. NON-blocking —
-   * the hook returns `{}` immediately (the idle external process is never held). Acts only on a tracked
-   * session; skips the re-entrancy case (`stop_hook_active`) and never offers twice (already awaiting input).
-   */
   /**
    * Local activity supersedes a pending free-form handover: the user answered the question AT THE
    * DEVICE, so the takeover offer no longer applies. Drop the stale offer (map + transcript entry),
