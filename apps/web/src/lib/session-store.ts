@@ -9,6 +9,7 @@ import {
   type Envelope,
   type HandoverAnswerPayload,
   type PermissionDecisionPayload,
+  type PermissionModeName,
   type QuestionAnswerPayload,
   sessionBranchStatePayloadSchema,
   sessionPushStatePayloadSchema,
@@ -728,12 +729,14 @@ export function launch(payload: SessionLaunchPayload, deviceId?: string): Promis
  * PARENT's channel; the daemon forks (or fresh-launches) a `session.chained` child whose
  * `session.started` echoes our clientRef — resolves with the child id so the caller can navigate.
  * With a branch choice (branch-actions T5) the child gets its OWN worktree, cut from `baseBranch`
- * (default: the parent's branch) with `branchName` (default: the auto slug).
+ * (default: the parent's branch) with `branchName` (default: the auto slug). `permissionMode`, when
+ * given, starts the child in that mode — a launch-equivalent default — instead of the child silently
+ * inheriting the parent chain's mode (continuation-permission-mode fix).
  */
 export function resumeAsNew(
   parentSessionId: string,
   prompt: string,
-  branch?: { baseBranch?: string; branchName?: string },
+  options?: { baseBranch?: string; branchName?: string; permissionMode?: PermissionModeName },
 ): Promise<string> {
   const deviceId = routedDeviceId(parentSessionId);
   const conn = deviceId !== undefined ? connections.get(deviceId) : undefined;
@@ -749,8 +752,11 @@ export function resumeAsNew(
   conn.resumeNew(parentSessionId, {
     prompt,
     clientRef,
-    ...(branch?.baseBranch !== undefined ? { baseBranch: branch.baseBranch } : {}),
-    ...(branch?.branchName !== undefined ? { branchName: branch.branchName } : {}),
+    ...(options?.baseBranch !== undefined ? { baseBranch: options.baseBranch } : {}),
+    ...(options?.branchName !== undefined ? { branchName: options.branchName } : {}),
+    // The child is a NEW session: it starts in the operator's saved default mode, exactly like a
+    // launch (continuation-permission-mode fix) — omitted, the daemon inherits the parent's mode.
+    ...(options?.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
   });
   return started;
 }

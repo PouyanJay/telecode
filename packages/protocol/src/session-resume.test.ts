@@ -60,3 +60,23 @@ describe('session.resume_new wire contract (T8)', () => {
     ).toBe(false);
   });
 });
+
+describe('session.resume_new permission mode (continuation-permission-mode fix)', () => {
+  it('carries an optional permissionMode — a NEW linked session starts in the mode the browser asks for', () => {
+    const parsed = sessionResumeNewPayloadSchema.parse({
+      prompt: 'continue',
+      permissionMode: 'bypassPermissions',
+    });
+    expect(parsed.permissionMode).toBe('bypassPermissions');
+  });
+
+  it('keeps the field optional (older webs omit it — the daemon then inherits the parent mode)', () => {
+    expect(sessionResumeNewPayloadSchema.parse({ prompt: 'go' }).permissionMode).toBeUndefined();
+  });
+
+  it('rejects an unknown mode', () => {
+    expect(
+      sessionResumeNewPayloadSchema.safeParse({ prompt: 'go', permissionMode: 'yolo' }).success,
+    ).toBe(false);
+  });
+});

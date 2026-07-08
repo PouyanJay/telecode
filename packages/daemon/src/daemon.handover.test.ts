@@ -250,6 +250,81 @@ describe('daemon: free-form handover & resume', () => {
     );
   });
 
+  it('the continuation inherits the terminal-mirrored bypass mode — runs unattended (continuation-permission-mode fix)', async () => {
+    // The LOCAL session ran with permissions bypassed (its hook events say so — mirrored onto the
+    // adopted record); handing it over must not produce a suddenly-gated continuation. The child's
+    // adapter attempts a consequential tool through the REAL canUseTool: with the inherited bypass
+    // it auto-runs and the turn completes; a 'default' fallback would park it at a gate instead.
+    const adapter: AgentAdapter = {
+      async run(_prompt, { canUseTool, onEvent }) {
+        const decision = await canUseTool({ toolName: 'Bash', input: { command: 'pnpm test' } });
+        if (decision.behavior === 'allow') {
+          onEvent({ type: 'tool_use', toolName: 'Bash', input: { command: 'pnpm test' } });
+        }
+        onEvent({ type: 'message', text: 'shipped unattended' });
+        return { intercepted: [], allowed: [], denied: [], sessionId: 'fork-bypass-sdk' };
+      },
+    };
+    await start(adapter);
+    // Adopt with the local session's mode riding the hook event (the mirror source).
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+      permission_mode: 'bypassPermissions',
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    const stop = hookRpc(socketPath, stopEvent('Should I ship it now or wait?'));
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    await stop;
+    relay.send(
+      makeEnvelope({
+        type: 'handover.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: PARENT_SESSION,
+        payload: {
+          requestId: (offer.payload as { requestId: string }).requestId,
+          answerText: 'Ship it.',
+        },
+      }),
+    );
+    const chained = await relay.waitForFrame((e) => e.type === 'session.chained');
+    relay.send(
+      makeEnvelope({
+        type: 'session.chained',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: CHILD_SESSION,
+        payload: {
+          clientRef: (chained.payload as { clientRef: string }).clientRef,
+          parentSessionId: PARENT_SESSION,
+        },
+      }),
+    );
+
+    // The continuation's Bash runs WITHOUT a gate and the turn completes — proven positively (no
+    // agent.permission_request ever surfaced for the child) and by the completed ending.
+    let gated = false;
+    relay
+      .waitForFrame((e) => e.type === 'agent.permission_request' && e.session_id === CHILD_SESSION)
+      .then(
+        () => {
+          gated = true;
+        },
+        () => undefined,
+      );
+    const childEnded = await relay.waitForFrame(
+      (e) => e.type === 'session.ended' && e.session_id === CHILD_SESSION,
+    );
+    expect(childEnded.status).toBe('done');
+    expect(gated).toBe(false);
+  });
+
   it('seals the chained-child session.meta — title/cwd never reach the relay in cleartext (T5)', async () => {
     // A full E2E path: a keypair-bearing daemon and a real browser peer, so the handover offer, the answer,
     // and the child's identity all cross the relay sealed — exactly as production runs them.

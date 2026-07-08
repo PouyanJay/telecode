@@ -32,6 +32,7 @@
     composerModeFor,
     composerPlaceholderFor,
   } from '$lib/composer-mode';
+  import { readPermissionMode } from '$lib/settings';
   import { canSwitchBranch } from '$lib/branch-switch';
   import { canPushBranch } from '$lib/push-offer';
   import {
@@ -329,7 +330,12 @@
     resumeError = null;
     resuming = true;
     try {
-      const childId = await resumeAsNew(sessionId, text, forkBranch);
+      // The child starts in the operator's saved default mode, exactly like a fresh launch — a
+      // continuation must not silently keep asking after the operator switched their default.
+      const childId = await resumeAsNew(sessionId, text, {
+        ...forkBranch,
+        permissionMode: readPermissionMode(localStorage),
+      });
       await goto(`/sessions/${childId}`, { invalidateAll: true });
     } catch (err) {
       resumeError = err instanceof Error ? err.message : 'Could not resume. Please try again.';

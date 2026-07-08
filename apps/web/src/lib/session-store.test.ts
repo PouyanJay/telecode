@@ -57,7 +57,10 @@ let branchRequests = 0;
 
 function makeFakeConnection() {
   const launched: SessionLaunchPayload[] = [];
-  const resumed: { sessionId: string; payload: { prompt: string; clientRef?: string } }[] = [];
+  const resumed: {
+    sessionId: string;
+    payload: { prompt: string; clientRef?: string; permissionMode?: string };
+  }[] = [];
   const subscribed: string[] = [];
   const answered: { sessionId: string; payload: unknown }[] = [];
   const handovers: { sessionId: string; payload: unknown }[] = [];
@@ -753,6 +756,33 @@ describe('resume-as-new (ux Phase 6 T8)', () => {
     // The daemon's child session.started echoes the clientRef — the promise resolves with the child.
     fake.started('child-9', sent.payload.clientRef);
     await expect(pending).resolves.toBe('child-9');
+  });
+
+  it('forwards the requested permission mode on the wire (continuation-permission-mode fix)', async () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started('parent-3');
+    const pending = resumeAsNew('parent-3', 'continue', { permissionMode: 'bypassPermissions' });
+    expect(fake.resumed[0]!.payload.permissionMode).toBe('bypassPermissions');
+    fake.started('child-3', fake.resumed[0]!.payload.clientRef);
+    await expect(pending).resolves.toBe('child-3');
+  });
+
+  it('omits permissionMode when the caller passes none (older-daemon wire compat)', async () => {
+    const fake = makeFakeConnection();
+    connect(
+      { relayUrl: 'ws://x', userId, deviceId, getChannelToken: () => Promise.resolve('t') },
+      fake.create,
+    );
+    fake.started('parent-4');
+    const pending = resumeAsNew('parent-4', 'continue');
+    expect(fake.resumed[0]!.payload.permissionMode).toBeUndefined();
+    expect('permissionMode' in fake.resumed[0]!.payload).toBe(false);
+    fake.started('child-4', fake.resumed[0]!.payload.clientRef);
+    await expect(pending).resolves.toBe('child-4');
   });
 
   it('rejects when no device channel exists at all', async () => {
