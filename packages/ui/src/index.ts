@@ -15,4 +15,4 @@ export { SelectField } from './SelectField';
 export { Spinner } from './Spinner';
 export { StatusDot } from './StatusDot';
 export { Switch } from './Switch';
-export { trapFocus } from './actions';
+export { clipIndicator, trapFocus } from './actions';

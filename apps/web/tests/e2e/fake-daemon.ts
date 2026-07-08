@@ -89,6 +89,23 @@ const LOSE_SESSION_PROMPT = 'lose this session';
 const PARK_PROMPT = 'park at the terminal';
 // Announce clientRef → the parked parent's title, pending the relay's adopted ack.
 const parkedAnnounces = new Map<string, string>();
+// Formatted takeover cards (adopted-takeover T8): a session launched with this prompt spawns an
+// ADOPTED parent that ends its turn on a free-form MARKDOWN question (agent.handover) — the spec
+// asserts the dashboard inbox card and the in-session handover card render it as markdown.
+const OFFER_PROMPT = 'offer a handover';
+const offerAnnounces = new Map<string, string>();
+// Long + structured on purpose: headings, bold, a list, and code — the exact shape the user reported
+// as an unreadable wall of raw markdown.
+const OFFER_QUESTION = [
+  '## Restyle done — one decision left',
+  '',
+  'The **lesson rail** now uses numbered chips and the `LessonChip` component is shared.',
+  '',
+  '- P4 and P5 are still awaiting your look',
+  '- the sources toggle works at every width',
+  '',
+  'Should I proceed with **P7 map restyle** or **P8 build control room** next?',
+].join('\n');
 // Reap behavior (Phase C T3): a session launched with this prompt answers `dirty` to workspace.reap.
 const DIRTY_WORKTREE_PROMPT = 'leave the worktree dirty';
 // Switch behavior (Phase C T4): a session launched with this prompt refuses every branch switch
@@ -325,6 +342,25 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       send('session.status', { status: 'waiting_local' }, sid);
       return;
     }
+    const offerTitle = offerAnnounces.get(ack.data.clientRef);
+    if (offerTitle !== undefined) {
+      // The offering adopted parent (adopted-takeover T8): its turn ended on a free-form MARKDOWN
+      // question — mirror the transcript, park at awaiting_input, and send the handover offer.
+      offerAnnounces.delete(ack.data.clientRef);
+      const rec = recordFor(sid);
+      const requestId = `handover-${++requestSeq}`;
+      rec.transcript.push(
+        { kind: 'user', text: 'Restyle the reader' },
+        { kind: 'handover', requestId, question: OFFER_QUESTION, summary: 'Restyling the reader.' },
+      );
+      rec.status = 'awaiting_input';
+      send(
+        'agent.handover',
+        { requestId, question: OFFER_QUESTION, summary: 'Restyling the reader.' },
+        sid,
+      );
+      return;
+    }
     if (ack.data.clientRef !== CHAIN_PARENT_REF) return;
     const rec = recordFor(sid);
     const base = Date.now() - 60 * 60_000; // the terminal stretch ran an hour ago
@@ -459,6 +495,18 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       const ref = `park-parent-${++requestSeq}`;
       parkedAnnounces.set(ref, launch.data.prompt);
       send('session.adopted', { clientRef: ref, title: `adopted: ${launch.data.prompt}` });
+      return;
+    }
+
+    if (launch.success && launch.data.prompt.startsWith(OFFER_PROMPT)) {
+      // The trigger session's only job is to spawn the offering adopted parent — end it and announce.
+      rec.transcript.push({ kind: 'message', text: 'Spawning an offering terminal session' });
+      send('agent.message', { text: 'Spawning an offering terminal session' }, sid);
+      rec.status = 'done';
+      send('session.ended', { status: 'done' }, sid);
+      const ref = `offer-parent-${++requestSeq}`;
+      offerAnnounces.set(ref, launch.data.prompt);
+      send('session.adopted', { clientRef: ref, title: `offering: ${launch.data.prompt}` });
       return;
     }
 

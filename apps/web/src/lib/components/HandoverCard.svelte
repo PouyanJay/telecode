@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Button } from '@telecode/ui';
 
+  import MessageBody from '$lib/components/MessageBody.svelte';
   import type { TranscriptEntry } from '$lib/session';
 
   /**
@@ -53,7 +54,11 @@
     </span>
   </header>
 
-  <p class="question">{entry.question}</p>
+  <!-- The agent's final message is often long, structured markdown (headings, lists, code) —
+       render it like the transcript does (sanitized, token-themed), never as one flat paragraph. -->
+  <div class="question">
+    <MessageBody text={entry.question} />
+  </div>
   {#if entry.summary}
     <p class="summary">{entry.summary}</p>
   {/if}
@@ -146,9 +151,7 @@
     white-space: nowrap;
   }
   .question {
-    margin: 0;
     font-size: var(--text-sm);
-    font-weight: 500;
     color: var(--text);
     max-width: 70ch;
   }
