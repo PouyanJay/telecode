@@ -9,6 +9,19 @@ Versions below are releases of the **`@telecode/cli`** npm package (the daemon �
 The web app and relay deploy continuously from `main`; changes that live purely in the web app or relay
 are listed under the CLI release they accompanied.
 
+## Unreleased — web app (deploys continuously from `main`)
+
+### Added
+
+- **Delete from the board card.** Ended sessions get a trash button on their dashboard row — one
+  confirm dialog, then the session and its encrypted history are gone. Files and branches on your
+  machine are never touched (the fuller options, including worktree cleanup, stay in the session
+  view).
+- **Dismissible needs-you cards.** Approval, question, and takeover cards can be closed without
+  answering: the ask stays pending, the session's row carries an amber "N waiting" chip until it's
+  resolved, the section header counts hidden cards honestly, and dismissals survive reloads. A new
+  ask from the same session always shows a fresh card.
+
 ## [0.7.3] — 2026-07-08
 
 ### Fixed

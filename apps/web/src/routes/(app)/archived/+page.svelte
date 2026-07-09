@@ -3,6 +3,7 @@
 
   import { invalidateAll } from '$app/navigation';
 
+  import { sessionDeleteBody } from '$lib/delete-copy';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import RegistryErrorNotice from '$lib/components/RegistryErrorNotice.svelte';
   import SessionNotice from '$lib/components/SessionNotice.svelte';
@@ -98,11 +99,8 @@
     await invalidateAll();
   }
 
-  // The one irreversible action's consequence copy, derived here so the markup stays scannable.
-  const deleteBody = $derived(
-    `“${confirmDelete?.title ?? ''}” and its encrypted history will be permanently removed from ` +
-      'your dashboard — on every device and browser. Files and code on your machine are not touched.',
-  );
+  // The shared consequence copy (delete-copy.ts), led by the row's own title.
+  const deleteBody = $derived(sessionDeleteBody({ title: confirmDelete?.title ?? '' }));
 </script>
 
 <svelte:head>

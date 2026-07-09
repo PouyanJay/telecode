@@ -1,6 +1,9 @@
 <script lang="ts">
-  import { Button } from '@telecode/ui';
+  import { isSessionEndStatus } from '@telecode/protocol';
+  import { Button, ConfirmDialog } from '@telecode/ui';
 
+  import { browser } from '$app/environment';
+  import { invalidateAll } from '$app/navigation';
   import { page } from '$app/stores';
 
   import DeviceChips from '$lib/components/DeviceChips.svelte';
@@ -17,6 +20,7 @@
     deviceFilterFromSearch,
     filterRowsByDevice,
   } from '$lib/device-filter';
+  import { sessionDeleteBody } from '$lib/delete-copy';
   import { appendSessionRows } from '$lib/housekeeping';
   import {
     buildOutcomeChips,
@@ -27,6 +31,13 @@
   } from '$lib/outcome-filter';
   import { createSessionPager } from '$lib/session-pager.svelte';
   import { deviceChannelOf, deviceStatus } from '$lib/devices';
+  import {
+    dismissAsk,
+    dismissedAskCountBySession,
+    pruneDismissedAsks,
+    visibleInboxAsks,
+    type DismissedAsks,
+  } from '$lib/dismissed-asks';
   import { buildInboxAsks } from '$lib/inbox';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildOnboardingSteps } from '$lib/onboarding';
@@ -47,9 +58,11 @@
     sessionDevices,
     sessionMetas,
     sessionTitleOverrides,
+    deleteSessionForever,
     sessions as liveSessions,
     subscribe,
   } from '$lib/session-store';
+  import type { ThreadRow } from '$lib/threads';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -122,13 +135,46 @@
     }),
   );
   // The chips scope the WHOLE board — the inbox included (an ask filters by its session's device).
-  const visibleAsks = $derived(
+  const deviceScopedAsks = $derived(
     deviceFilter === null
       ? asks
       : asks.filter((ask) => deviceIdOfSession(ask.sessionId) === deviceFilter),
   );
-  // Awaiting sessions whose asks aren't live yet (subscribe still in flight) fall back to plain rows.
-  const askSessionIds = $derived(new Set(visibleAsks.map((a) => a.sessionId)));
+  // Delete from the card (board-housekeeping): confirm once, then the existing forever-delete.
+  let deleteTarget = $state<ThreadRow | null>(null);
+  let deleteBusy = $state(false);
+  let deleteError = $state<string | null>(null);
+  let deleteOpen = $state(false);
+  function onRowDelete(row: ThreadRow): void {
+    deleteTarget = row;
+    deleteError = null;
+    deleteOpen = true;
+  }
+  async function onDeleteConfirm(): Promise<void> {
+    if (!deleteTarget) return;
+    deleteBusy = true;
+    try {
+      const result = await deleteSessionForever(deleteTarget.id);
+      if (!result.ok) {
+        deleteError = result.error;
+        return;
+      }
+      deleteOpen = false;
+      deleteTarget = null;
+      await invalidateAll();
+    } finally {
+      deleteBusy = false;
+    }
+  }
+  // The shared consequence copy (delete-copy.ts) — the row-level dialog never offers the reap
+  // option; the full options live in the session view.
+  const deleteBody = $derived(
+    sessionDeleteBody({ hasSegments: deleteTarget !== null && deleteTarget.segments.length > 0 }),
+  );
+  /** Offer the trash only where the housekeeping rule allows deletion: ENDED sessions. */
+  function rowDeleteHandler(row: ThreadRow): (() => void) | undefined {
+    return isSessionEndStatus(row.status) ? () => onRowDelete(row) : undefined;
+  }
 
   function onInboxApprove(sessionId: string, requestId: string): void {
     decide(sessionId, { requestId, behavior: 'allow' });
@@ -158,6 +204,27 @@
   );
 
   // The chips' scope applies to everything below the header: list, groups, and the board stats.
+  // Dismissed asks (board-housekeeping): closed cards stay hidden across reloads; storage prunes
+  // when a session LEAVES awaiting (registry-backed — a slow live subscribe can never fake a
+  // resolve and wipe dismissals), so a NEW ask from the same session always shows fresh.
+  let dismissedAsks = $state<DismissedAsks>(new Map());
+  const awaitingSessionIds = $derived(
+    new Set(rows.filter((row) => row.status === 'awaiting_input').map((row) => row.id)),
+  );
+  $effect(() => {
+    if (!browser) return;
+    dismissedAsks = pruneDismissedAsks(localStorage, awaitingSessionIds);
+  });
+  function onInboxDismiss(sessionId: string, requestId: string): void {
+    dismissedAsks = dismissAsk(localStorage, requestId, sessionId);
+  }
+  const visibleAsks = $derived(visibleInboxAsks(deviceScopedAsks, dismissedAsks));
+  // The honest header note: hidden cards never silently vanish from the count.
+  const dismissedCount = $derived(deviceScopedAsks.length - visibleAsks.length);
+  // The row chip's numbers: dismissed-but-still-pending asks per session.
+  const dismissedCounts = $derived(dismissedAskCountBySession(deviceScopedAsks, dismissedAsks));
+  // Awaiting sessions whose asks aren't live yet (subscribe still in flight) fall back to plain rows.
+  const askSessionIds = $derived(new Set(visibleAsks.map((a) => a.sessionId)));
   const visibleRows = $derived(filterRowsByDevice(rows, deviceFilter));
   const chips = $derived(
     buildDeviceChips({ devices: data.devices, channels: $deviceChannels, rows }),
@@ -254,19 +321,30 @@
     {:else}
       <div class="list">
         {#if visibleAsks.length > 0 || groups.awaiting.length > 0}
-          <SessionGroupHeader label="Needs you" />
+          <SessionGroupHeader
+            label="Needs you"
+            note={dismissedCount > 0 ? `${dismissedCount} dismissed` : undefined}
+          />
           {#if visibleAsks.length > 0}
             <ul class="asks" role="list" aria-live="polite">
               {#each visibleAsks as ask (`${ask.sessionId}:${ask.requestId}`)}
                 <li>
-                  <InboxCard {ask} {now} onapprove={onInboxApprove} onreject={onInboxReject} />
+                  <InboxCard
+                    {ask}
+                    {now}
+                    onapprove={onInboxApprove}
+                    onreject={onInboxReject}
+                    ondismiss={onInboxDismiss}
+                  />
                 </li>
               {/each}
             </ul>
           {/if}
           <ul class="rows" role="list">
             {#each groups.awaiting.filter((row) => !askSessionIds.has(row.id)) as row (row.id)}
-              <li><SessionRow {row} /></li>
+              <li>
+                <SessionRow {row} dismissedAskCount={dismissedCounts.get(row.id) ?? 0} />
+              </li>
             {/each}
           </ul>
         {/if}
@@ -274,7 +352,9 @@
           <SessionGroupHeader label="Active" />
           <ul class="rows" role="list">
             {#each groups.active as row (row.id)}
-              <li><SessionRow {row} /></li>
+              <li>
+                <SessionRow {row} dismissedAskCount={dismissedCounts.get(row.id) ?? 0} />
+              </li>
             {/each}
           </ul>
         {/if}
@@ -298,7 +378,7 @@
           {/if}
           <ul class="rows" role="list">
             {#each recentRows as row (row.id)}
-              <li><SessionRow {row} /></li>
+              <li><SessionRow {row} ondelete={rowDeleteHandler(row)} /></li>
             {/each}
           </ul>
           {#if pager.cursor !== null && deviceFilter === null && outcomeFilter === null}
@@ -321,7 +401,29 @@
   </div>
 {/if}
 
+<ConfirmDialog
+  bind:open={deleteOpen}
+  title="Delete this session?"
+  body={deleteBody}
+  confirmLabel="Delete session"
+  confirmTone="danger"
+  busy={deleteBusy}
+  onconfirm={onDeleteConfirm}
+  oncancel={() => (deleteTarget = null)}
+>
+  {#snippet details()}
+    {#if deleteError}
+      <p class="delete-error" role="alert">{deleteError}</p>
+    {/if}
+  {/snippet}
+</ConfirmDialog>
+
 <style>
+  .delete-error {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--danger);
+  }
   .onboard-scroll {
     flex: 1;
     overflow-y: auto;
