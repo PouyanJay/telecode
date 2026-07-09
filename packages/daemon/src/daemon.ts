@@ -510,6 +510,32 @@ export function createDaemon(options: DaemonOptions): Daemon {
       : { status: 'offline_paused', entries: [] };
   }
 
+  /** A still-unanswered free-form handover offer on a transcript — the takeover the operator can accept. */
+  function isPendingHandoverEntry(
+    entry: SessionHistoryEntry,
+  ): entry is Extract<SessionHistoryEntry, { kind: 'handover' }> {
+    return entry.kind === 'handover' && entry.answerText === undefined;
+  }
+
+  /**
+   * The still-pending free-form handover offer on a persisted (adopted) session, if any — bundled with the
+   * external conversation id a takeover RESUMES. Only an adopted session (`origin === 'external'`) with a
+   * known `claudeSessionId` can be rehydrated, so returning the id alongside the offer lets the caller
+   * re-register it without re-narrowing an unrelated optional.
+   */
+  function pendingHandoverFromPersisted(
+    persisted: PersistedSession,
+  ):
+    | { offer: Extract<SessionHistoryEntry, { kind: 'handover' }>; externalSessionId: string }
+    | undefined {
+    if (persisted.origin !== 'external' || persisted.claudeSessionId === undefined)
+      return undefined;
+    const offer = persisted.transcript.find(isPendingHandoverEntry);
+    return offer === undefined
+      ? undefined
+      : { offer, externalSessionId: persisted.claudeSessionId };
+  }
+
   /**
    * Seed sessions persisted by an earlier daemon run (invariant #7) so a reopened-but-finished session
    * backfills its real transcript instead of an empty offline record. In-memory sessions always win (there
@@ -520,11 +546,17 @@ export function createDaemon(options: DaemonOptions): Daemon {
     try {
       for (const [sessionId, persisted] of await sessionStore.loadAll()) {
         if (sessionRecords.has(sessionId)) continue;
+        // A still-pending handover offer can be rehydrated (its context rides the persisted transcript),
+        // so the session stays honestly `awaiting_input` and its "Take over & continue" survives the
+        // restart. Other `awaiting_input` sources (permission/question gates) have no live gate to resume
+        // into — restoring them would show an un-dismissable phantom gate — so those coerce to
+        // `needs_restart` (the honest "start a new session" state).
+        const handover = pendingHandoverFromPersisted(persisted);
         sessionRecords.set(sessionId, {
-          // A persisted `awaiting_input` has no live gate to resume into (pendingPermissions/questions
-          // die with the process) — restoring it as-is would show an un-dismissable phantom gate. Coerce
-          // it to `needs_restart` (the honest "start a new session" state) instead.
-          status: persisted.status === 'awaiting_input' ? 'needs_restart' : persisted.status,
+          status:
+            persisted.status === 'awaiting_input' && handover === undefined
+              ? 'needs_restart'
+              : persisted.status,
           transcript: persisted.transcript,
           permissionMode: persisted.permissionMode,
           ...definedFields({
@@ -541,6 +573,20 @@ export function createDaemon(options: DaemonOptions): Daemon {
         // blob) stays decryptable, and the daemon never rotates a restored session's key.
         if (persisted.contentKey !== undefined) cipher.restoreKey(sessionId, persisted.contentKey);
         restoreConversationState(sessionId, persisted);
+        // Re-register a still-pending handover offer so the takeover launches via the normal path instead
+        // of being dropped as a settled offer (the map, unlike the transcript, doesn't survive the process).
+        // Local activity prunes a stale offer before any new gate could fire (see
+        // supersedePendingHandoverByLocalActivity), so a persisted pending offer is the authoritative reason
+        // the session was `awaiting_input` — safe to keep that status and re-arm the takeover.
+        if (handover !== undefined) {
+          pendingHandovers.set(handover.offer.requestId, {
+            telecodeSessionId: sessionId,
+            externalSessionId: handover.externalSessionId,
+            cwd: persisted.cwd,
+            question: handover.offer.question,
+            summary: handover.offer.summary,
+          });
+        }
         backfillRestoredTitle(sessionId);
       }
       log.info({ deviceId: options.deviceId }, 'daemon: restored persisted sessions');
@@ -2925,13 +2971,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // TRANSCRIPT-driven, not map-driven: an un-answered offer entry can outlive the in-memory
     // `pendingHandovers` map across a daemon restart (T4 persists the transcript, not the map) —
     // and it must still clear. An ANSWERED offer carries `answerText` and is never pruned.
-    const isStaleOffer = (entry: SessionHistoryEntry): boolean =>
-      entry.kind === 'handover' && entry.answerText === undefined;
-    if (!rec.transcript.some(isStaleOffer)) return;
+    if (!rec.transcript.some(isPendingHandoverEntry)) return;
     for (const [requestId, offer] of pendingHandovers) {
       if (offer.telecodeSessionId === telecodeSessionId) pendingHandovers.delete(requestId);
     }
-    rec.transcript = rec.transcript.filter((entry) => !isStaleOffer(entry));
+    rec.transcript = rec.transcript.filter((entry) => !isPendingHandoverEntry(entry));
     // REPORT the flip (T2): the registry row sits at awaiting_input for the superseded offer, and
     // without a frame it would stick there until the next gate or ending.
     reportRunning(telecodeSessionId);
@@ -3070,6 +3114,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
     const ts = now();
     record(knownId, { kind: 'handover', requestId, question, summary, ts });
     setStatus(knownId, 'awaiting_input');
+    // Persist the offer explicitly, AFTER its entry + `awaiting_input` are set (`setStatus` only writes on
+    // terminal states). The earlier persist in this handler ran before the entry existed; capturing it here
+    // makes the offer's survival across a restart self-evident rather than implicit in that earlier call's
+    // deferred transcript read. On restore the offer is rehydrated (see pendingHandoverFromPersisted) so the
+    // takeover still launches — this persist is what makes that reliable.
+    persistSession(knownId, recordFor(knownId));
     sendForSession(adoptedSource(knownId), 'agent.handover', { requestId, question, summary, ts });
     log.info(
       { deviceId: options.deviceId, sessionId: knownId, requestId },
