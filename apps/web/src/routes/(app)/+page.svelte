@@ -203,17 +203,22 @@
     ),
   );
 
-  // The chips' scope applies to everything below the header: list, groups, and the board stats.
-  // Dismissed asks (board-housekeeping): closed cards stay hidden across reloads; storage prunes
-  // when a session LEAVES awaiting (registry-backed — a slow live subscribe can never fake a
-  // resolve and wipe dismissals), so a NEW ask from the same session always shows fresh.
+  // Dismissed asks (board-housekeeping): closed cards stay hidden across reloads; a dismissal is
+  // pruned only once its SESSION has loaded live AND its ask is gone from the live pending list — the
+  // honest "resolved" signal, keyed on the ask (not the session's status: a handover ask can outlive
+  // awaiting_input on a daemon-lost session). Until the session loads, the dismissal is kept, so a
+  // slow subscribe can never fake a resolve and a NEW ask always shows fresh.
   let dismissedAsks = $state<DismissedAsks>(new Map());
-  const awaitingSessionIds = $derived(
-    new Set(rows.filter((row) => row.status === 'awaiting_input').map((row) => row.id)),
+  const livePendingRequestIds = $derived(new Set(asks.map((a) => a.requestId)));
+  const loadedSessionIds = $derived(
+    new Set([...$liveSessions].filter(([, state]) => state.entries.length > 0).map(([id]) => id)),
   );
   $effect(() => {
     if (!browser) return;
-    dismissedAsks = pruneDismissedAsks(localStorage, awaitingSessionIds);
+    dismissedAsks = pruneDismissedAsks(localStorage, {
+      pendingRequestIds: livePendingRequestIds,
+      loadedSessionIds,
+    });
   });
   function onInboxDismiss(sessionId: string, requestId: string): void {
     dismissedAsks = dismissAsk(localStorage, requestId, sessionId);
@@ -378,7 +383,13 @@
           {/if}
           <ul class="rows" role="list">
             {#each recentRows as row (row.id)}
-              <li><SessionRow {row} ondelete={rowDeleteHandler(row)} /></li>
+              <li>
+                <SessionRow
+                  {row}
+                  dismissedAskCount={dismissedCounts.get(row.id) ?? 0}
+                  ondelete={rowDeleteHandler(row)}
+                />
+              </li>
             {/each}
           </ul>
           {#if pager.cursor !== null && deviceFilter === null && outcomeFilter === null}

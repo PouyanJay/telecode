@@ -111,6 +111,13 @@ test('dismissing a needs-you card moves the signal to the row chip, survives rel
   // An AWAITING row never offers the trash — the delete-offer gating, asserted explicitly.
   await expect(offeringRow.getByRole('button', { name: /Delete session/ })).toHaveCount(0);
 
+  // The dismissal must SURVIVE live re-ticks, not just a reload: the pruning effect re-runs on every
+  // frame, and a status-keyed prune wiped the dismissal continuously (the "keeps coming back" bug).
+  // Give it real time (past the inbox clock tick) and re-assert the card is still gone.
+  await page.waitForTimeout(2_000);
+  await expect(longCard).not.toBeVisible();
+  await expect(offeringRow.getByText('1 waiting')).toBeVisible();
+
   // A reload keeps the dismissal (localStorage) — card hidden, chip standing.
   await page.reload();
   await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
