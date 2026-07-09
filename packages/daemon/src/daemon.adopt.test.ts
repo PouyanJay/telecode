@@ -1192,6 +1192,78 @@ describe('daemon: adopted gate defers to the local prompt when no browser is wat
   });
 });
 
+describe('daemon: adoption failure honors a non-gating local mode (never forces a prompt)', () => {
+  it('defers a bypass tool ({}) when adoption cannot be acked, instead of failing closed to a prompt', async () => {
+    // The relay link is up but the `session.adopted` ack never comes back (relay/link wedged) — so
+    // adoption times out. A bypass local session needs NO relay to decide its own tool: Claude Code's mode
+    // runs it. Failing closed to a local prompt here would turn a bypass session into a prompting one
+    // whenever the relay is momentarily unreachable — the exact symptom behind "requires permission
+    // despite bypass". telecode must still voice no opinion: `{}`.
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-failclosed-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      // Short ack timeout so the adoption failure surfaces fast; the announce is deliberately never acked.
+      adopt: { socketPath, ackTimeoutMs: 300 },
+    });
+    await daemon.start();
+    try {
+      const bash = await hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        cwd: '/repo',
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf build' },
+        tool_use_id: 'toolu_bypass_failclosed',
+        permission_mode: 'bypassPermissions',
+      });
+      // Defer, not a forced prompt. Failing closed would return { hookSpecificOutput: { ... 'ask' } }.
+      expect(bash).toEqual({});
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still fails closed to a prompt for a GATING mode when adoption cannot be acked', async () => {
+    // The safety invariant is preserved for modes that gate: a `default`-mode consequential tool whose
+    // adoption never acks must fall back to Claude Code's own prompt (`ask`) — telecode never auto-runs a
+    // consequential tool just because adoption hit a snag.
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-failclosed-gate-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 300 },
+    });
+    await daemon.start();
+    try {
+      const bash = await hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        cwd: '/repo',
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf build' },
+        tool_use_id: 'toolu_default_failclosed',
+        permission_mode: 'default',
+      });
+      expect(bash).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } });
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('daemon: viewer presence resets on reconnect (no stale gating)', () => {
   it('resets to "not watching" on reconnect, so an adopted tool defers until the relay re-asserts', async () => {
     const relay = await startFakeRelay(USER, DEVICE);

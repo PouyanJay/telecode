@@ -21,6 +21,12 @@ export interface FakeRelay {
   waitForHello(): Promise<void>;
   /** Drop the current daemon connection (simulates a transient network loss), forcing it to reconnect. */
   dropConnection(): void;
+  /**
+   * Simulate a HALF-OPEN link (laptop sleep / NAT rebind): pause the underlying socket so the relay
+   * neither pongs the daemon's pings nor sends a `close`. The connection never fires `close` on its own —
+   * only the daemon's OWN heartbeat watchdog can detect it and reconnect.
+   */
+  goSilentHalfOpen(): void;
   /** Reject subsequent `hello`s by closing with 4001 (simulates a revoked/invalid device token). */
   rejectHellos(): void;
   close(): Promise<void>;
@@ -104,10 +110,22 @@ export async function startFakeRelay(
       socket?.close();
       socket = null;
     },
+    goSilentHalfOpen(): void {
+      // Pausing the underlying net socket stops the server from reading the daemon's ping frames, so no
+      // auto-pong is generated — and no `close` is sent. The daemon must detect the silence on its own.
+      // Reaches into `ws`'s internal `_socket`; assert it so a `ws` upgrade that moves it fails loudly here
+      // rather than silently no-opping (which would surface as a confusing test timeout downstream).
+      const raw = (socket as unknown as { _socket?: { pause(): void } })._socket;
+      if (raw === undefined) throw new Error('fake relay: ws internals (_socket) unavailable');
+      raw.pause();
+    },
     rejectHellos(): void {
       rejectHello = true;
     },
     close(): Promise<void> {
+      // Force-terminate every client first: a half-open (paused) socket left by `goSilentHalfOpen` never
+      // closes on its own, and `server.close` waits for open connections — so without this it would hang.
+      for (const client of server.clients) client.terminate();
       return new Promise((resolve) => server.close(() => resolve()));
     },
   };
