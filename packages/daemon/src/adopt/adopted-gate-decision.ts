@@ -19,6 +19,12 @@ import { classifyTool } from '../permission-policy';
  *  - `'gate'`   a gating mode and a consequential tool the local session WOULD prompt for: telecode holds
  *               it for the operator's remote decision (its approval value-add).
  *
+ * `AskUserQuestion` is the one carve-out from the `'defer'` rule: it is ALWAYS `'gate'`, in every mode.
+ * A question is a request FOR the human, not a permission gate — Claude Code's own non-gating modes do not
+ * answer it, they still show the local picker. So telecode forwards it whenever an operator is watching
+ * (handlePreToolUseHook falls back to the local picker when nobody is), keeping a bypass adopted session's
+ * questions answerable remotely. Mirrors classifyTool's own AskUserQuestion carve-out for launched sessions.
+ *
  * An absent or unrecognized mode fails safe to `default` (gate consequential) — never an optimistic defer.
  */
 export type AdoptedGateDecision = 'defer' | 'allow' | 'gate';
@@ -30,6 +36,8 @@ export function adoptedGateDecision(
   toolName: string,
   rawMode: string | undefined,
 ): AdoptedGateDecision {
+  // AskUserQuestion is always gated regardless of mode — see the AdoptedGateDecision doc above for why.
+  if (toolName === 'AskUserQuestion') return 'gate';
   if (rawMode !== undefined && NON_GATING_MODES.has(rawMode)) return 'defer';
   // Everything else is keyed off the modes telecode's own policy models; an unknown or absent mode fails
   // safe to `default` (gate consequential — never an optimistic defer on uncertainty).

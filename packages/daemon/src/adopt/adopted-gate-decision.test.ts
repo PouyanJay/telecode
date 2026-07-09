@@ -10,12 +10,20 @@ import { adoptedGateDecision } from './adopted-gate-decision';
  */
 describe('adoptedGateDecision', () => {
   it.each(['bypassPermissions', 'auto', 'dontAsk'])(
-    'defers wholesale in %s mode (Claude Code never prompts, so telecode must not either)',
+    'defers consequential + read-only tools wholesale in %s mode (Claude Code never prompts for those)',
     (mode) => {
       expect(adoptedGateDecision('Bash', mode)).toBe('defer');
       expect(adoptedGateDecision('Edit', mode)).toBe('defer');
       expect(adoptedGateDecision('Read', mode)).toBe('defer');
-      expect(adoptedGateDecision('AskUserQuestion', mode)).toBe('defer');
+    },
+  );
+
+  it.each(['bypassPermissions', 'auto', 'dontAsk', 'default', 'plan', 'acceptEdits', undefined])(
+    'ALWAYS gates AskUserQuestion regardless of mode (a question is for the human, not a gate) — mode %s',
+    (mode) => {
+      // Non-gating modes (bypass/auto/dontAsk) are the load-bearing cases: they used to defer. See the
+      // AdoptedGateDecision doc for why a question is always gated. undefined = no reported mode.
+      expect(adoptedGateDecision('AskUserQuestion', mode)).toBe('gate');
     },
   );
 

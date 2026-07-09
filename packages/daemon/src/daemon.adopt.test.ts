@@ -229,6 +229,60 @@ describe('daemon: adopted sessions end-to-end', () => {
     expect(bash).toEqual({});
   });
 
+  it('forwards AskUserQuestion even in bypassPermissions (a question is not a permission gate)', async () => {
+    // Bypass surrenders tool APPROVALS to the local session (the Bash test above), but a question is always
+    // gated regardless of mode (see adoptedGateDecision) — so while an operator is watching, telecode still
+    // forwards it to be answered remotely (the "no approval prompts, but still answer my questions" case).
+    // Adopt the session first, ack it.
+    const first = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      tool_name: 'Read',
+      tool_input: {},
+      permission_mode: 'bypassPermissions',
+    });
+    ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+    await first;
+
+    const ask = hookRpc(socketPath, {
+      hook_event_name: 'PreToolUse',
+      session_id: CLAUDE_SESSION,
+      tool_name: 'AskUserQuestion',
+      tool_use_id: 'toolu_bypass_q',
+      permission_mode: 'bypassPermissions',
+      tool_input: {
+        questions: [
+          {
+            question: 'DB?',
+            header: 'Database',
+            multiSelect: false,
+            options: [{ label: 'Postgres' }],
+          },
+        ],
+      },
+    });
+
+    // The question is forwarded (NOT deferred to the local picker despite bypass); the operator answers it.
+    const question = await relay.waitForFrame((e) => e.type === 'agent.question');
+    const requestId = (question.payload as { requestId: string }).requestId;
+    relay.send(
+      makeEnvelope({
+        type: 'question.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: TELECODE_SESSION,
+        payload: { requestId, answers: [{ selectedLabels: ['Postgres'] }] },
+      }),
+    );
+
+    const out = (await ask) as {
+      hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('deny');
+    assertReasonContainsAll(out.hookSpecificOutput.permissionDecisionReason, ['Postgres']);
+  });
+
   it('forwards an AskUserQuestion as agent.question and relays the pick as deny-feedback', async () => {
     // Adopt the session first (a read-only tool), then ack it.
     const first = hookRpc(socketPath, {
@@ -1184,6 +1238,51 @@ describe('daemon: adopted gate defers to the local prompt when no browser is wat
         tool_use_id: 'toolu_unwatched',
       });
       expect(bash).toEqual({});
+    } finally {
+      await daemon.stop();
+      await relay.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('defers an AskUserQuestion ({}) to the local picker when no browser is watching', async () => {
+    // AskUserQuestion is always gated by adoptedGateDecision, but "gate" only surfaces remotely when an
+    // operator is watching. With nobody watching, the question must fall back to Claude Code's own local
+    // picker ({}) — never block the local session on a remote answer no one is there to give.
+    const relay = await startFakeRelay(USER, DEVICE);
+    const dir = await mkdtemp(join(tmpdir(), 'telecode-adopt-unwatched-q-'));
+    const socketPath = join(dir, 'run', 'hook.sock');
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId: USER,
+      deviceId: DEVICE,
+      agentAdapter: createFakeAgentAdapter([]),
+      adopt: { socketPath, ackTimeoutMs: 2000 },
+    });
+    await daemon.start();
+    // Deliberately NO markViewerPresent — remoteViewerOnline stays at its cold default (false).
+    try {
+      const first = hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'Read',
+        tool_input: {},
+      });
+      ackAdopted(relay, await relay.waitForFrame((e) => e.type === 'session.adopted'));
+      await first;
+
+      const ask = await hookRpc(socketPath, {
+        hook_event_name: 'PreToolUse',
+        session_id: CLAUDE_SESSION,
+        tool_name: 'AskUserQuestion',
+        tool_use_id: 'toolu_unwatched_q',
+        tool_input: {
+          questions: [
+            { question: 'q?', header: 'H', multiSelect: false, options: [{ label: 'a' }] },
+          ],
+        },
+      });
+      expect(ask).toEqual({});
     } finally {
       await daemon.stop();
       await relay.close();

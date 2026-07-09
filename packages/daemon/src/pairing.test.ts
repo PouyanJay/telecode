@@ -21,11 +21,13 @@ describe('pairDevice', () => {
   let relayHttpUrl: string;
   let requests: RecordedRequest[];
   let pollResponses: object[];
+  let pollStatusCodes: number[];
   let codeRequestStatus: number;
 
   beforeEach(async () => {
     requests = [];
     pollResponses = [];
+    pollStatusCodes = [];
     codeRequestStatus = 200;
     server = createServer((req, res) => {
       let raw = '';
@@ -51,6 +53,7 @@ describe('pairDevice', () => {
           );
           return;
         }
+        res.statusCode = pollStatusCodes.shift() ?? 200;
         res.end(JSON.stringify(pollResponses.shift() ?? { status: 'authorization_pending' }));
       });
     });
@@ -145,6 +148,54 @@ describe('pairDevice', () => {
 
     await expect(pairDevice({ relayHttpUrl, intervalMs: 1 })).rejects.toThrow(
       'device/code request failed: 503',
+    );
+  });
+
+  it('rides out a transient 429 on the poll (rate-limited) and still resolves on approval', async () => {
+    // The relay rate-limits the token poll under a burst of re-pair attempts. A 429 body has no `status`
+    // field, so parsing it as a poll result would crash the whole pairing loop (the real re-pair failure).
+    // pairDevice must treat a 429 as transient — keep polling — and succeed on the next approved poll.
+    pollStatusCodes.push(429);
+    pollResponses.push({ error: 'Too Many Requests' });
+    pollResponses.push({
+      status: 'approved',
+      device_token: 'dt_new',
+      user_id: 'user-1',
+      device_id: 'device-1',
+    });
+
+    const creds = await pairDevice({ relayHttpUrl, intervalMs: 1 });
+
+    expect(creds).toEqual({ deviceToken: 'dt_new', userId: 'user-1', deviceId: 'device-1' });
+    expect(requests.filter((r) => r.url === '/device/token')).toHaveLength(2);
+  });
+
+  it('rides out a transient 5xx on the poll (relay redeploying) and still resolves on approval', async () => {
+    // The other half of the retryable branch: a 503 during a relay redeploy is transient, not a poll
+    // result — keep polling and succeed once the relay is back and approves.
+    pollStatusCodes.push(503);
+    pollResponses.push({ error: 'Service Unavailable' });
+    pollResponses.push({
+      status: 'approved',
+      device_token: 'dt_new',
+      user_id: 'user-1',
+      device_id: 'device-1',
+    });
+
+    const creds = await pairDevice({ relayHttpUrl, intervalMs: 1 });
+
+    expect(creds).toEqual({ deviceToken: 'dt_new', userId: 'user-1', deviceId: 'device-1' });
+    expect(requests.filter((r) => r.url === '/device/token')).toHaveLength(2);
+  });
+
+  it('throws a clear error (not a parse crash) on a non-transient poll failure', async () => {
+    // A 400 (e.g. an invalid device_code) is not retryable and its body has no `status` — pairDevice must
+    // surface the HTTP status, never let a statusless body reach the poll-result parser as a ZodError.
+    pollStatusCodes.push(400);
+    pollResponses.push({ error: 'invalid_request' });
+
+    await expect(pairDevice({ relayHttpUrl, intervalMs: 1 })).rejects.toThrow(
+      'device/token poll failed: 400',
     );
   });
 
