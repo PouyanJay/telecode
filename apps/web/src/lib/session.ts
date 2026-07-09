@@ -135,6 +135,15 @@ export const initialSessionState: SessionState = {
 };
 
 /** Reset to a fresh transcript when launching a new session (the relay assigns the next id). */
+/**
+ * Whether a session has backfilled its transcript at least once (vs. still waiting on its subscribe).
+ * A session with a live ask necessarily has ≥1 entry, so this is the honest "we've seen its state"
+ * signal the dismissal prune keys on to tell "resolved" from "not loaded yet".
+ */
+export function isSessionLoaded(state: SessionState): boolean {
+  return state.entries.length > 0;
+}
+
 export function startingState(): SessionState {
   return {
     sessionId: null,

@@ -53,10 +53,11 @@ export function dismissAsk(
 }
 
 /**
- * Drop dismissals whose ask has resolved and persist the survivors. A dismissal is kept when its ask
- * is still in the live pending list, OR its session hasn't loaded its transcript yet (we can't know
- * if the ask resolved until we've seen it). It's swept only when the session IS loaded and the ask
- * is gone — the honest "resolved" signal, independent of the session's status.
+ * Drop resolved dismissals and persist the survivors (see the module doc for the full sweep rule):
+ * keep when the ask is still live-pending, or its session hasn't loaded yet; sweep only once the
+ * session is loaded and the ask is gone. A DELETED session leaves `$liveSessions` entirely, so it is
+ * never "loaded" here — its dismissal is not actively swept but is inert (the session and its ask can
+ * never return; the stray localStorage entry is harmless dead weight).
  */
 export function pruneDismissedAsks(
   storage: Pick<Storage, 'getItem' | 'setItem'>,

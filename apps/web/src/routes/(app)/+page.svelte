@@ -39,6 +39,7 @@
     type DismissedAsks,
   } from '$lib/dismissed-asks';
   import { buildInboxAsks } from '$lib/inbox';
+  import { isSessionLoaded } from '$lib/session';
   import { launchDrawerOpen } from '$lib/launch-drawer';
   import { buildOnboardingSteps } from '$lib/onboarding';
   import { pairingInstructions } from '$lib/pairing-instructions';
@@ -211,7 +212,7 @@
   let dismissedAsks = $state<DismissedAsks>(new Map());
   const livePendingRequestIds = $derived(new Set(asks.map((a) => a.requestId)));
   const loadedSessionIds = $derived(
-    new Set([...$liveSessions].filter(([, state]) => state.entries.length > 0).map(([id]) => id)),
+    new Set([...$liveSessions].filter(([, state]) => isSessionLoaded(state)).map(([id]) => id)),
   );
   $effect(() => {
     if (!browser) return;

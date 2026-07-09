@@ -92,15 +92,27 @@ describe('dismissed-asks persistence (board-housekeeping T1)', () => {
     expect(pruned.size).toBe(1);
   });
 
-  it('sweeps a dismissal whose session is gone (deleted): loaded-elsewhere, ask absent', () => {
+  it('sweeps a resolved dismissal whose loaded session still exists (answered in place)', () => {
     const storage = memoryStorage();
-    dismissAsk(storage, 'req-1', 'sess-deleted');
-    // The board reports the deleted session as loaded (it was, before deletion) with no live ask.
+    dismissAsk(storage, 'req-1', 'sess-loaded');
+    // The session is loaded and its ask is gone (answered) → swept.
     const pruned = pruneDismissedAsks(storage, {
       pendingRequestIds: new Set(),
-      loadedSessionIds: new Set(['sess-deleted']),
+      loadedSessionIds: new Set(['sess-loaded']),
     });
     expect(pruned.size).toBe(0);
+  });
+
+  it('leaves a DELETED session dismissal inert (session left $liveSessions, so never "loaded" here)', () => {
+    const storage = memoryStorage();
+    dismissAsk(storage, 'req-1', 'sess-deleted');
+    // A deleted session is absent from $liveSessions entirely — not loaded, no live ask. The
+    // dismissal is KEPT (harmless dead weight; the session/ask can never return), not swept.
+    const pruned = pruneDismissedAsks(storage, {
+      pendingRequestIds: new Set(),
+      loadedSessionIds: new Set(),
+    });
+    expect(pruned.size).toBe(1);
   });
 });
 

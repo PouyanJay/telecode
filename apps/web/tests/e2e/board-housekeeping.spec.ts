@@ -111,13 +111,6 @@ test('dismissing a needs-you card moves the signal to the row chip, survives rel
   // An AWAITING row never offers the trash — the delete-offer gating, asserted explicitly.
   await expect(offeringRow.getByRole('button', { name: /Delete session/ })).toHaveCount(0);
 
-  // The dismissal must SURVIVE live re-ticks, not just a reload: the pruning effect re-runs on every
-  // frame, and a status-keyed prune wiped the dismissal continuously (the "keeps coming back" bug).
-  // Give it real time (past the inbox clock tick) and re-assert the card is still gone.
-  await page.waitForTimeout(2_000);
-  await expect(longCard).not.toBeVisible();
-  await expect(offeringRow.getByText('1 waiting')).toBeVisible();
-
   // A reload keeps the dismissal (localStorage) — card hidden, chip standing.
   await page.reload();
   await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
@@ -168,4 +161,46 @@ test('a failed delete keeps the dialog open and says why (error path)', async ({
   // The row survived the failed delete.
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByRole('main').getByRole('link', { name: new RegExp(TITLE) })).toBeVisible();
+});
+
+test('a dismissed handover on a NON-awaiting session (needs_restart) stays gone with a row chip', async ({
+  page,
+}) => {
+  // The reported bug: an adopted session the daemon lost to a restart reads NEEDS RESTART while
+  // still carrying a live pending handover. A status-keyed prune wiped the dismissal (card kept
+  // coming back) and the chip only rendered on awaiting/active rows (needs_restart is Recent → none).
+  const PROMPT = `offer a stale handover ${Date.now()}`;
+  await signIn(page);
+  await page.getByRole('button', { name: 'Launch session' }).first().click();
+  await page.getByLabel('First instruction').fill(PROMPT);
+  await page.getByRole('button', { name: /Launch on/ }).click();
+  await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });
+
+  await page.goto('/');
+  // Scope to THIS test's session (other specs in this file leave lingering handover cards).
+  const card = page
+    .getByRole('article', { name: 'READY TO TAKE OVER' })
+    .filter({ hasText: PROMPT })
+    .first();
+  await expect(card).toBeVisible({ timeout: 10_000 });
+  await card.getByRole('button', { name: /Dismiss this card/ }).click();
+  await expect(card).not.toBeVisible();
+
+  // Reload: the board re-subscribes and the daemon backfills NEEDS RESTART (the session was lost),
+  // while the handover stays pending. The row moves to the Recent group.
+  await page.reload();
+  await expect(page.getByText('Relay connected')).toBeVisible({ timeout: 10_000 });
+  const staleRow = page
+    .getByRole('listitem')
+    .filter({ hasText: `stale: ${PROMPT}` })
+    .first();
+  await expect(staleRow.getByText('NEEDS RESTART')).toBeVisible({ timeout: 10_000 });
+
+  // The dismissal SURVIVED (no card) even though the session is no longer awaiting, and the chip
+  // shows on the Recent row — both symptoms of the bug, asserted against the real trigger.
+  await expect(
+    page.getByRole('article', { name: 'READY TO TAKE OVER' }).filter({ hasText: PROMPT }),
+  ).toHaveCount(0);
+  await expect(staleRow.getByText('1 waiting')).toBeVisible();
+  await expect(staleRow.getByRole('status')).toHaveAccessibleName(/1 dismissed ask is still/);
 });
