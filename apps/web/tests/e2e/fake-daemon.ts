@@ -114,6 +114,12 @@ const OFFER_QUESTION = [
   'Should I proceed with **P7 map restyle** or **P8 build control room** next?',
 ].join('\n');
 const OFFER_QUESTION_SHORT = 'Ship it now, or wait for the review?';
+// A handover offer on a session the daemon then LOST to a restart (board-housekeeping fix): the
+// offer marks the registry awaiting_input, but a reload's subscribe backfills status `needs_restart`
+// while the pending handover entry lives on — the exact non-awaiting-but-pending case a dismissal
+// must survive and a row chip must still show.
+const STALE_OFFER_PROMPT = 'offer a stale handover';
+const staleOfferAnnounces = new Set<string>();
 // Reap behavior (Phase C T3): a session launched with this prompt answers `dirty` to workspace.reap.
 const DIRTY_WORKTREE_PROMPT = 'leave the worktree dirty';
 // Switch behavior (Phase C T4): a session launched with this prompt refuses every branch switch
@@ -370,6 +376,31 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       send('session.status', { status: 'waiting_local' }, sid);
       return;
     }
+    if (staleOfferAnnounces.has(ack.data.clientRef)) {
+      staleOfferAnnounces.delete(ack.data.clientRef);
+      const rec = recordFor(sid);
+      const requestId = `stale-handover-${++requestSeq}`;
+      rec.transcript.push(
+        { kind: 'user', text: 'Pick up where I left off' },
+        {
+          kind: 'handover',
+          requestId,
+          question: OFFER_QUESTION_SHORT,
+          summary: 'Continuing the work.',
+        },
+      );
+      // The live offer parks the registry at awaiting_input (the browser shows the card now)…
+      rec.status = 'awaiting_input';
+      send(
+        'agent.handover',
+        { requestId, question: OFFER_QUESTION_SHORT, summary: 'Continuing the work.' },
+        sid,
+      );
+      // …but the daemon then LOST the session (a restart): a reload's subscribe backfills
+      // `needs_restart`, so the row leaves the awaiting group while its handover stays pending.
+      rec.status = 'needs_restart';
+      return;
+    }
     const offerQuestion = offerAnnounces.get(ack.data.clientRef);
     if (offerQuestion !== undefined) {
       // An offering adopted parent (adopted-takeover T8): its turn ended on a free-form MARKDOWN
@@ -519,6 +550,15 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       parkedAnnounces.set(ref, launch.data.prompt);
       endTriggerAndAnnounce(sid, rec, 'Spawning a terminal session to adopt', [
         { clientRef: ref, title: `adopted: ${launch.data.prompt}` },
+      ]);
+      return;
+    }
+
+    if (launch.success && launch.data.prompt.startsWith(STALE_OFFER_PROMPT)) {
+      const ref = `stale-offer-parent-${++requestSeq}`;
+      staleOfferAnnounces.add(ref);
+      endTriggerAndAnnounce(sid, rec, 'Spawning a terminal session that will be lost', [
+        { clientRef: ref, title: `stale: ${launch.data.prompt}` },
       ]);
       return;
     }

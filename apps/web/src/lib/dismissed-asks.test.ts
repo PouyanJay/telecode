@@ -53,24 +53,65 @@ describe('dismissed-asks persistence (board-housekeeping T1)', () => {
     expect(readDismissedAsks(arrayShape).size).toBe(0);
   });
 
-  it('prunes dismissals whose SESSION left awaiting (resolved/ended/deleted), keeping awaiting ones', () => {
+  it('prunes a resolved ask (session loaded, ask gone), keeping a still-pending one', () => {
     const storage = memoryStorage();
-    dismissAsk(storage, 'req-live', 'sess-awaiting');
-    dismissAsk(storage, 'req-resolved', 'sess-done');
-    const pruned = pruneDismissedAsks(storage, new Set(['sess-awaiting']));
+    dismissAsk(storage, 'req-live', 'sess-loaded');
+    dismissAsk(storage, 'req-resolved', 'sess-loaded');
+    // Both sessions are loaded live; only req-live is still a pending ask → req-resolved is swept.
+    const pruned = pruneDismissedAsks(storage, {
+      pendingRequestIds: new Set(['req-live']),
+      loadedSessionIds: new Set(['sess-loaded']),
+    });
     expect([...pruned.keys()]).toEqual(['req-live']);
-    // The prune is persisted — a reload agrees.
     expect([...readDismissedAsks(storage).keys()]).toEqual(['req-live']);
   });
 
-  it('a slow live subscribe cannot fake a resolve: sessions still awaiting keep their dismissals', () => {
-    // A named REGRESSION ANCHOR, not distinct coverage: the signature takes awaiting SESSION ids —
-    // there is deliberately no "live ask list" parameter to get transiently-empty on reload (the
-    // bug this design fixed; the e2e reload test drives the full path). Kept as documentation that
-    // the parameter choice is load-bearing.
+  it('keeps a dismissed pending ask whose session is NOT awaiting_input (needs_restart handover)', () => {
+    // THE reported bug: a handover ask lives on a session the daemon lost (needs_restart) after a
+    // restart — the ask is still live-pending, so the dismissal must survive (the old status-keyed
+    // prune wiped it, so the card kept coming back with no chip).
     const storage = memoryStorage();
-    dismissAsk(storage, 'req-1', 'sess-awaiting');
-    const pruned = pruneDismissedAsks(storage, new Set(['sess-awaiting']));
+    dismissAsk(storage, 'req-handover', 'sess-needs-restart');
+    const pruned = pruneDismissedAsks(storage, {
+      pendingRequestIds: new Set(['req-handover']),
+      loadedSessionIds: new Set(['sess-needs-restart']),
+    });
+    expect(pruned.size).toBe(1);
+  });
+
+  it('a slow live subscribe cannot fake a resolve: an unloaded session keeps its dismissal', () => {
+    // On reload the live ask list is empty until each session subscribes+backfills. A dismissal is
+    // pruned ONLY once its session is loaded (entries present) and the ask is gone — never while the
+    // session is still unloaded (the reload transient that wiped dismissals).
+    const storage = memoryStorage();
+    dismissAsk(storage, 'req-1', 'sess-unloaded');
+    const pruned = pruneDismissedAsks(storage, {
+      pendingRequestIds: new Set(),
+      loadedSessionIds: new Set(), // not loaded yet
+    });
+    expect(pruned.size).toBe(1);
+  });
+
+  it('sweeps a resolved dismissal whose loaded session still exists (answered in place)', () => {
+    const storage = memoryStorage();
+    dismissAsk(storage, 'req-1', 'sess-loaded');
+    // The session is loaded and its ask is gone (answered) → swept.
+    const pruned = pruneDismissedAsks(storage, {
+      pendingRequestIds: new Set(),
+      loadedSessionIds: new Set(['sess-loaded']),
+    });
+    expect(pruned.size).toBe(0);
+  });
+
+  it('leaves a DELETED session dismissal inert (session left $liveSessions, so never "loaded" here)', () => {
+    const storage = memoryStorage();
+    dismissAsk(storage, 'req-1', 'sess-deleted');
+    // A deleted session is absent from $liveSessions entirely — not loaded, no live ask. The
+    // dismissal is KEPT (harmless dead weight; the session/ask can never return), not swept.
+    const pruned = pruneDismissedAsks(storage, {
+      pendingRequestIds: new Set(),
+      loadedSessionIds: new Set(),
+    });
     expect(pruned.size).toBe(1);
   });
 });

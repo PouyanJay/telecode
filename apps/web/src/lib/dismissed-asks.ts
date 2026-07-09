@@ -7,14 +7,14 @@ import type { InboxAsk } from './inbox';
  * unique UUIDs) and remember their SESSION, persisted in `localStorage` so a reload doesn't
  * resurrect closed cards.
  *
- * Pruning is deliberately keyed on the SESSION leaving `awaiting_input` — a fact the registry knows
- * instantly on load — never on an ask's absence from the live list: live asks arrive only after the
- * per-session subscribe + backfill, so "not in the list yet" must never read as "resolved" (that
- * exact transient wiped dismissals on reload). An id whose ask resolved while its session stays
- * awaiting (another ask still pending) lingers in storage but is INERT — the visible-card filter
- * and the row chip only ever count ids present in the LIVE ask list — and it's swept when the
- * session finally leaves awaiting. The persistence is a pure read/write over a `Storage`-shaped
- * seam (the settings.ts pattern) so it unit-tests without a DOM.
+ * Pruning is keyed on the LIVE ask list — the only honest "still pending" signal — but only once a
+ * session's transcript has actually loaded, so a slow subscribe can't fake a resolve. A dismissal is
+ * swept only when its session is loaded (entries backfilled) AND its ask is gone from the live
+ * pending list (answered / taken over / the session deleted). While a session is still unloaded it's
+ * kept (the reload transient that once wiped dismissals). Status is deliberately NOT the signal: a
+ * handover ask can outlive `awaiting_input` — e.g. it rides a session the daemon lost to a restart
+ * (`needs_restart`) — and the dismissal must still hold. The persistence is a pure read/write over a
+ * `Storage`-shaped seam (the settings.ts pattern) so it unit-tests without a DOM.
  */
 const STORAGE_KEY = 'telecode:dismissed-asks';
 
@@ -53,16 +53,23 @@ export function dismissAsk(
 }
 
 /**
- * Drop dismissals whose SESSION is no longer awaiting input (resolved, ended, or deleted) and
- * persist the survivors. `awaitingSessionIds` comes from the board's merged rows — registry-backed,
- * so it is authoritative from the first render and a slow live subscribe can never fake a resolve.
+ * Drop resolved dismissals and persist the survivors (see the module doc for the full sweep rule):
+ * keep when the ask is still live-pending, or its session hasn't loaded yet; sweep only once the
+ * session is loaded and the ask is gone. A DELETED session leaves `$liveSessions` entirely, so it is
+ * never "loaded" here — its dismissal is not actively swept but is inert (the session and its ask can
+ * never return; the stray localStorage entry is harmless dead weight).
  */
 export function pruneDismissedAsks(
   storage: Pick<Storage, 'getItem' | 'setItem'>,
-  awaitingSessionIds: ReadonlySet<string>,
+  live: { pendingRequestIds: ReadonlySet<string>; loadedSessionIds: ReadonlySet<string> },
 ): DismissedAsks {
   const current = readDismissedAsks(storage);
-  const next = new Map([...current].filter(([, sessionId]) => awaitingSessionIds.has(sessionId)));
+  const next = new Map(
+    [...current].filter(
+      ([requestId, sessionId]) =>
+        live.pendingRequestIds.has(requestId) || !live.loadedSessionIds.has(sessionId),
+    ),
+  );
   if (next.size !== current.size) write(storage, next);
   return next;
 }
