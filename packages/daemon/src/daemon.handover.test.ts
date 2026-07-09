@@ -250,6 +250,95 @@ describe('daemon: free-form handover & resume', () => {
     );
   });
 
+  it('rehydrates a pending handover across a restart — the takeover still launches, not "settled offer"', async () => {
+    // The in-memory pendingHandovers map dies with the process, but the offer entry is persisted. Without
+    // rehydration a daemon restart (upgrade/reboot/crash) orphans the offer: the browser still shows the
+    // actionable "Take over & continue" card (from the persisted pending entry) but the click lands on the
+    // settled-offer path and is silently dropped. After the fix the restarted daemon re-registers the offer,
+    // so the takeover launches its continuation (a session.chained frame) exactly as if there'd been no
+    // restart. Driven across two daemon instances sharing one on-disk store.
+    const runCalls: { prompt: string; resume?: string; forkSession?: boolean }[] = [];
+    const makeAdapter = (): AgentAdapter =>
+      createFakeAgentAdapter([{ type: 'message', text: 'Continuing with your answer.' }], {
+        sessionId: 'fork-sdk-id',
+        onRun: (call) => runCalls.push(call),
+      });
+    // One on-disk store shared by both daemon instances (isolated from the run/ socket + adopt-config).
+    const storeDir = join(dir, 'store');
+    const store = (): SessionStore => createSessionStore({ dir: storeDir });
+
+    // Daemon 1: adopt the session, then end a turn on a free-form question so a handover is offered + persisted.
+    await start(makeAdapter(), undefined, store());
+    await adopt(relay, socketPath);
+    const stop = hookRpc(socketPath, {
+      hook_event_name: 'Stop',
+      session_id: CLAUDE_SESSION,
+      cwd: '/repo',
+      last_assistant_message: 'Which database should we use for the app?',
+    });
+    const offer = await relay.waitForFrame((e) => e.type === 'agent.handover');
+    const { requestId } = offer.payload as { requestId: string };
+    await stop;
+
+    // Wait for the pending offer to land on disk (its entry must survive the "restart").
+    await vi.waitFor(async () => {
+      const persisted = (await store().loadAll()).get(PARENT_SESSION);
+      expect(
+        persisted?.transcript.some((e) => e.kind === 'handover' && e.answerText === undefined),
+      ).toBe(true);
+    });
+
+    // Restart: stop daemon 1, start a fresh daemon on the SAME store (the map is gone; the offer is on disk).
+    await daemon?.stop();
+    daemon = undefined;
+    await start(makeAdapter(), undefined, store());
+
+    // The takeover answer for the SAME requestId must now LAUNCH the continuation, not be dropped as settled.
+    relay.send(
+      makeEnvelope({
+        type: 'handover.answer',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: PARENT_SESSION,
+        payload: { requestId, answerText: 'Use Postgres.' },
+      }),
+    );
+
+    // A session.chained frame is the proof the takeover launched (the settled-offer path emits none).
+    const chained = await relay.waitForFrame((e) => e.type === 'session.chained');
+    expect((chained.payload as { parentSessionId: string }).parentSessionId).toBe(PARENT_SESSION);
+    // Ack the child id so the continuation proceeds to run its turn (resume of the adopted conversation).
+    relay.send(
+      makeEnvelope({
+        type: 'session.chained',
+        userId: USER,
+        deviceId: DEVICE,
+        sessionId: CHILD_SESSION,
+        payload: {
+          clientRef: (chained.payload as { clientRef: string }).clientRef,
+          parentSessionId: PARENT_SESSION,
+        },
+      }),
+    );
+    // The FULL offer context was rehydrated, not just the resume id: the child's sealed meta carries the
+    // adopted cwd (from the persisted record) and a title derived from the rehydrated question.
+    const childMeta = sessionMetaPayloadSchema.parse(
+      (await relay.waitForFrame((e) => e.type === 'session.meta' && e.session_id === CHILD_SESSION))
+        .payload,
+    );
+    expect(childMeta.cwd).toBe('/repo');
+    expect(childMeta.title).toContain('Continue:');
+    await vi.waitFor(() =>
+      expect(runCalls).toContainEqual(
+        expect.objectContaining({
+          prompt: 'Use Postgres.',
+          resume: CLAUDE_SESSION,
+          forkSession: true,
+        }),
+      ),
+    );
+  });
+
   it('the continuation inherits the terminal-mirrored bypass mode — runs unattended (continuation-permission-mode fix)', async () => {
     // The LOCAL session ran with permissions bypassed (its hook events say so — mirrored onto the
     // adopted record); handing it over must not produce a suddenly-gated continuation. The child's
