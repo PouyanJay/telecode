@@ -188,6 +188,12 @@ export interface DaemonOptions {
    */
   readonly reconnect?: { readonly baseMs?: number; readonly maxMs?: number };
   /**
+   * Relay-link liveness. How often the daemon pings the relay to detect a HALF-OPEN link and force a
+   * reconnect (mechanism + rationale on `startHeartbeat`). Defaults to 20s; `<= 0` disables the watchdog.
+   * Tests inject a small value for speed.
+   */
+  readonly heartbeat?: { readonly intervalMs?: number };
+  /**
    * Invoked when the relay rejects the device token as unauthorized (close 4001) on a *reconnect* — i.e.
    * the device was revoked while the daemon was running. The daemon stops redialing the dead token; the
    * composition root re-pairs. (On the *first* connect, `start()` rejects with {@link DaemonUnauthorizedError}
@@ -295,6 +301,12 @@ export function createDaemon(options: DaemonOptions): Daemon {
   let isRemoteViewerOnline = false;
   const reconnectBaseMs = options.reconnect?.baseMs ?? 500;
   const reconnectMaxMs = options.reconnect?.maxMs ?? 10_000;
+  // Relay-link liveness — see startHeartbeat() for why the daemon must probe its own outbound link.
+  const heartbeatMs = options.heartbeat?.intervalMs ?? 20_000;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  // True between sending a heartbeat ping and its pong. If a whole interval elapses with it still true, the
+  // relay never answered — the link is half-open, so we terminate the socket to force a redial.
+  let awaitingPong = false;
   // How long to await the relay's `session.chained` ACK for a handover continuation before falling back
   // (reuses the adopted-session ack timeout knob so tests can shrink it). Defaults to 10s.
   const chainAckTimeoutMs = options.adopt?.ackTimeoutMs ?? 10_000;
@@ -2041,6 +2053,13 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // tool on a remote approval nobody can give during the reconnect gap. The relay re-asserts the real state
     // right after hello.ack; until then assume nobody is watching (defer to the local prompt — safe default).
     isRemoteViewerOnline = false;
+    // Fresh socket, fresh heartbeat liveness: assume alive until the next sweep proves otherwise, and mark
+    // it alive on every pong (the relay auto-replies to our ping). The daemon-scoped heartbeat interval
+    // (started once in `start`) probes whichever socket is current.
+    awaitingPong = false;
+    ws.on('pong', () => {
+      awaitingPong = false;
+    });
     // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
     // handled before the next — a follow-up can't decrypt before the launch establishes the key. Each
     // socket gets its own chain; the cipher + outbound chain persist across reconnects.
@@ -2082,6 +2101,45 @@ export function createDaemon(options: DaemonOptions): Daemon {
       reconnectTimer = null;
       openConnection(onReady);
     }, delay);
+  }
+
+  /**
+   * Probe the relay link so a HALF-OPEN path can't strand the daemon (device shows offline, announces time
+   * out forever). The relay already pings the daemon (its own Phase-4 heartbeat), but the daemon dials
+   * OUT — on a half-open path (laptop sleep, NAT rebind) the relay's terminate can be blackholed too, so
+   * the ws `close` event never reaches us and the `close`-only reconnect path goes blind. So the daemon
+   * probes independently: each interval, if the previous ping went unanswered the link is dead — terminate
+   * the socket so its `close` handler redials; otherwise send a fresh ping (which also keeps NAT/proxy idle
+   * timers warm). Daemon-scoped and started once; it probes whichever socket is current and no-ops while
+   * reconnecting. `unref` so it never holds the process open.
+   */
+  function startHeartbeat(): void {
+    if (heartbeatMs <= 0 || heartbeatTimer !== null) return;
+    heartbeatTimer = setInterval(() => {
+      const ws = socket;
+      if (ws === null || ws.readyState !== WebSocket.OPEN) return; // reconnecting — nothing to probe yet
+      if (awaitingPong) {
+        log.warn(
+          { deviceId: options.deviceId },
+          'daemon: relay heartbeat unanswered — terminating half-open link',
+        );
+        awaitingPong = false;
+        ws.terminate(); // force a `close` → scheduleReconnect
+        return;
+      }
+      awaitingPong = true;
+      try {
+        ws.ping();
+      } catch (err) {
+        log.warn(
+          { err, deviceId: options.deviceId },
+          'daemon: heartbeat ping failed — terminating link',
+        );
+        awaitingPong = false;
+        ws.terminate();
+      }
+    }, heartbeatMs);
+    heartbeatTimer.unref();
   }
 
   // ── Adopted sessions ──────────────────────────────────────────────────────────────────────────────
@@ -3111,6 +3169,20 @@ export function createDaemon(options: DaemonOptions): Daemon {
         claudeSessionId: event.session_id,
       });
     } catch (err) {
+      // A non-gating local mode (bypassPermissions / auto / dontAsk) needs no relay to decide its own tool —
+      // Claude Code's mode runs it. Failing closed to a local prompt here would turn a bypass session into a
+      // prompting one whenever the relay link is momentarily unreachable (the "requires permission despite
+      // bypass" symptom), so defer (`{}`) for those modes. Any non-defer outcome (a gating tool, or one that
+      // would auto-allow in-mode) still fails closed to Claude Code's own prompt (`ask`) — telecode never
+      // auto-runs a consequential tool, nor auto-allows without an established session, because adoption
+      // hit a snag. An absent/unknown permission_mode is treated as gating, so it also fails closed here.
+      if (
+        event.hook_event_name === 'PreToolUse' &&
+        event.tool_name !== undefined &&
+        adoptedGateDecision(event.tool_name, event.permission_mode) === 'defer'
+      ) {
+        return {};
+      }
       log.warn(
         { err, deviceId: options.deviceId },
         'daemon: could not adopt session — failing closed',
@@ -3202,6 +3274,8 @@ export function createDaemon(options: DaemonOptions): Daemon {
         };
         openConnection(onReady, onFirstError);
       });
+      // The relay link is up — start probing it for liveness so a half-open drop can't strand the daemon.
+      startHeartbeat();
       // Listen for the `telecode hook` bridge only after the relay link is up, so an early hook event
       // (whose announce would be dropped on a not-yet-connected socket) is unlikely to fail closed.
       await hookSocket?.start();
@@ -3212,6 +3286,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
+      }
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
       }
       // Unblock any in-flight turns waiting on a human decision (incl. an adopted session's hook, which is
       // blocking the hook socket) so their runs finish instead of hanging on a closed socket. Settle BEFORE
