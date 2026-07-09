@@ -38,6 +38,11 @@ export interface DeviceCredentials {
   readonly deviceId: string;
 }
 
+/** A poll HTTP status is retryable (transient) if it's a rate-limit (429) or a server error (5xx). */
+function isRetryablePollStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
 export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCredentials> {
   // A logger-less caller gets a silent floor (never an unredacted root logger); main.ts passes the
   // real, redacting logger.
@@ -81,6 +86,21 @@ export async function pairDevice(options: PairDeviceOptions): Promise<DeviceCred
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ device_code: code.device_code }),
     });
+    // A non-2xx is NOT a poll result — its body carries no `status`, so parsing it would crash the whole
+    // pairing loop (the real re-pair failure: a burst of re-pair attempts trips the relay's rate limit and
+    // a 429's `{ error, message }` body blows up the discriminated union). A transient status just means
+    // "try again": skip to the next poll (the loop already waits `intervalMs`). Any other status is not
+    // retryable — surface it clearly rather than letting a statusless body reach the parser.
+    if (!tokenRes.ok) {
+      if (!isRetryablePollStatus(tokenRes.status)) {
+        throw new Error(`device/token poll failed: ${tokenRes.status}`);
+      }
+      log.warn(
+        { status: tokenRes.status },
+        'daemon: device/token poll throttled/unavailable — retrying',
+      );
+      continue;
+    }
     const result = pollResultSchema.parse(await tokenRes.json());
     if (result.status === 'approved') {
       log.info({ userId: result.user_id, deviceId: result.device_id }, 'daemon: device paired');
