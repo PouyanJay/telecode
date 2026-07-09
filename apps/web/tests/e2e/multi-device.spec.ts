@@ -93,7 +93,7 @@ test('the launch drawer picks a device: a launch lands on the CHOSEN machine, no
   await expect(page.getByRole('dialog', { name: 'Launch session' })).toBeVisible();
 
   // Pick the SECOND device (not devices[0]) and launch on it.
-  await page.getByLabel('Run on').selectOption(deviceMini.deviceId);
+  await page.getByLabel('Run on', { exact: true }).selectOption(deviceMini.deviceId);
   await page.getByLabel('First instruction').fill('Run on the mini please');
   await page.getByRole('button', { name: 'Launch on e2e-mini' }).click();
 
@@ -180,7 +180,7 @@ test('a revoked device’s session says DEVICE REVOKED — never an infinite spi
 
   // Put a real finished session on the mini, and remember its view URL.
   await page.getByRole('button', { name: 'Launch session' }).first().click();
-  await page.getByLabel('Run on').selectOption(deviceMini.deviceId);
+  await page.getByLabel('Run on', { exact: true }).selectOption(deviceMini.deviceId);
   await page.getByLabel('First instruction').fill('Session on a doomed device');
   await page.getByRole('button', { name: 'Launch on e2e-mini' }).click();
   await expect(page).toHaveURL(/\/sessions\/[0-9a-f-]{36}$/, { timeout: 10_000 });

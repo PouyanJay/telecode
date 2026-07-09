@@ -21,12 +21,18 @@
     now,
     onapprove,
     onreject,
+    ondismiss,
   }: {
     ask: InboxAsk;
     /** The ticking clock for the waiting pill (owned by the page so all cards agree). */
     now: number;
     onapprove: (sessionId: string, requestId: string) => void;
     onreject: (sessionId: string, requestId: string, message?: string) => void;
+    /**
+     * Close the card WITHOUT answering (board-housekeeping): the ask stays pending — the session
+     * row carries the amber chip instead. Absent = the card is not dismissible.
+     */
+    ondismiss?: (sessionId: string, requestId: string) => void;
   } = $props();
 
   const EYEBROWS = {
@@ -53,6 +59,17 @@
     </a>
     {#if ask.deviceName}<span class="device mono">· {ask.deviceName}</span>{/if}
     {#if waiting}<span class="waiting mono" aria-live="off">{waiting}</span>{/if}
+    {#if ondismiss}
+      <button
+        class="dismiss"
+        type="button"
+        onclick={() => ondismiss(ask.sessionId, ask.requestId)}
+        aria-label="Dismiss this card — the ask stays pending on its session"
+        title="Dismiss — the ask stays pending on its session"
+      >
+        <span aria-hidden="true">×</span>
+      </button>
+    {/if}
   </header>
 
   {#if ask.kind === 'permission'}
@@ -175,6 +192,37 @@
     color: var(--accent);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
+  }
+  .dismiss {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    /* Right-aligned when it's the only trailing item; tucked after the waiting timer otherwise. */
+    margin: -4px -4px -4px auto;
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: var(--text-lg);
+    line-height: 1;
+    border-radius: var(--radius-sm);
+  }
+  .dismiss:hover {
+    color: var(--text);
+    background: var(--bg-muted);
+  }
+  .dismiss:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--bg),
+      0 0 0 4px var(--focus-ring);
+  }
+  .waiting ~ .dismiss {
+    margin-left: var(--space-2);
   }
   .summary {
     margin: 0;

@@ -32,6 +32,7 @@
     composerModeFor,
     composerPlaceholderFor,
   } from '$lib/composer-mode';
+  import { sessionDeleteBody } from '$lib/delete-copy';
   import { readPermissionMode } from '$lib/settings';
   import { canSwitchBranch } from '$lib/branch-switch';
   import { canPushBranch } from '$lib/push-offer';
@@ -146,12 +147,8 @@
   let deleteBusy = $state(false);
   let archiveBusy = $state(false);
   let houseError = $state<string | null>(null);
-  // The one irreversible action's consequence copy, derived here so the markup stays scannable.
-  const deleteBody = $derived(
-    'This permanently removes the session, its encrypted history, and its titles from your ' +
-      `dashboard — on every device and browser. Files and code${device?.name ? ` on ${device.name}` : ' on your machine'} ` +
-      'are not touched.',
-  );
+  // The shared consequence copy (delete-copy.ts), device-aware when the device is known.
+  const deleteBody = $derived(sessionDeleteBody(device?.name ? { deviceName: device.name } : {}));
 
   // Between-turns branch switch (branch-actions T4): the session-shape gate (launched + settled-
   // but-followable) plus the liveness facts only this page holds (device reachable, channel up).

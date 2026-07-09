@@ -1,4 +1,5 @@
 import {
+  handoverAnswerPayloadSchema,
   deriveSharedKey,
   exportContentKey,
   generateContentKey,
@@ -560,6 +561,22 @@ async function handleEnvelope(envelope: Envelope): Promise<void> {
       { requestId, toolName: 'Write', input: DEFAULT_INPUT, diffStat: DEFAULT_DIFF_STAT },
       sid,
     );
+    return;
+  }
+
+  // Free-form handover answer (Journey 4): the user takes the offering session over — retire the
+  // parent and mint a linked continuation seeded with the answer (the chained ACK handler runs it).
+  if (envelope.type === 'handover.answer') {
+    const answer = handoverAnswerPayloadSchema.safeParse(await openSessionPayload(envelope));
+    if (!answer.success) return;
+    const parent = records.get(sid);
+    if (parent !== undefined) {
+      parent.status = 'done';
+      send('session.ended', { status: 'done' }, sid);
+    }
+    const ref = `handover-child-${++requestSeq}`;
+    pendingResumes.set(ref, { prompt: answer.data.answerText });
+    send('session.chained', { clientRef: ref, parentSessionId: sid });
     return;
   }
 

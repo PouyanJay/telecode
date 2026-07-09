@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Pill, StatusDot } from '@telecode/ui';
+  import { IconButton, Pill, StatusDot } from '@telecode/ui';
 
   import { SESSION_DISPLAY } from '$lib/session-display';
   import { sessionRepoTag } from '$lib/session-groups';
@@ -15,7 +15,24 @@
    * each hop with its time, the current segment ticked amber — replacing the origin pills; taking a session
    * over reads as a move, not a death. Only fields we actually persist are shown.
    */
-  let { row }: { row: ThreadRow } = $props();
+  let {
+    row,
+    dismissedAskCount = 0,
+    ondelete,
+  }: {
+    row: ThreadRow;
+    /**
+     * Pending asks the operator dismissed from the inbox (board-housekeeping): shown as the amber
+     * count chip — the row keeps the "something is waiting" signal after its card was closed.
+     */
+    dismissedAskCount?: number;
+    /**
+     * Permanently delete this session (board-housekeeping). Provided only where the housekeeping
+     * rule allows it (ended sessions); the page owns the confirm dialog. Rendered as a SIBLING of
+     * the row link (a button inside an <a> is invalid interactive nesting).
+     */
+    ondelete?: () => void;
+  } = $props();
 
   const display = $derived(SESSION_DISPLAY[row.status]);
   const isAwaiting = $derived(row.status === 'awaiting_input');
@@ -27,7 +44,8 @@
   const repoTag = $derived(sessionRepoTag(row));
 </script>
 
-<a class="row hairline-b" class:await={isAwaiting} href="/sessions/{row.id}">
+<div class="rowwrap" class:deletable={ondelete !== undefined}>
+  <a class="row hairline-b" class:await={isAwaiting} href="/sessions/{row.id}">
   <span class="status">
     <StatusDot tone={display.tone} label={display.label} pulse={display.pulse} />
   </span>
@@ -45,6 +63,20 @@
       {/if}
       {#if repoTag}
         <Pill label={repoTag} />
+      {/if}
+      {#if dismissedAskCount > 0}
+        <!-- Dismissed-but-pending asks (board-housekeeping): the amber "act now" signal moves here
+             when the inbox card is closed. Worded, never color-alone. -->
+        <span
+          class="asks-chip mono"
+          role="status"
+          aria-label="{dismissedAskCount} dismissed {dismissedAskCount === 1
+            ? 'ask is'
+            : 'asks are'} still awaiting you in this session"
+        >
+          <span class="asks-dot" aria-hidden="true"></span>
+          {dismissedAskCount} waiting
+        </span>
       {/if}
       <span class="title" title={row.title ?? row.id}>{row.title ?? row.id}</span>
     </span>
@@ -70,9 +102,67 @@
   <span class="chev" aria-hidden="true">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 3l4 4-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
   </span>
-</a>
+  </a>
+  {#if ondelete}
+    <span class="trash">
+      <IconButton
+        label="Delete session “{row.title ?? row.id}”"
+        variant="ghost"
+        size="sm"
+        danger
+        onclick={ondelete}
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+          <path
+            d="M2.5 3.5h9M5.5 3.5v-1a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1m2 0v8a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-8M5.75 6v4M8.25 6v4"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </IconButton>
+    </span>
+  {/if}
+</div>
 
 <style>
+  .rowwrap {
+    position: relative;
+  }
+  /* Reserve the trash's footprint so the delete affordance never overlaps the timestamp/chevron. */
+  .rowwrap.deletable .row {
+    padding-right: calc(var(--space-4) + 32px);
+  }
+  .trash {
+    position: absolute;
+    top: 50%;
+    right: var(--space-3);
+    transform: translateY(-50%);
+    display: inline-flex;
+    color: var(--text-muted);
+  }
+  .asks-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex: none;
+    padding: 1px var(--space-2);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border: 1px solid var(--accent-line);
+    border-radius: var(--radius-full);
+    background: var(--accent-soft);
+    white-space: nowrap;
+  }
+  .asks-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: var(--radius-full);
+    background: var(--accent);
+  }
   .row {
     display: grid;
     grid-template-columns: 148px minmax(0, 1fr) minmax(0, auto) auto 16px;

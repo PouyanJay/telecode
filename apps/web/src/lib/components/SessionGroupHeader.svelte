@@ -5,13 +5,19 @@
    */
   let {
     label,
+    note,
     actionHref,
     actionLabel,
-  }: { label: string; actionHref?: string; actionLabel?: string } = $props();
+  }: { label: string; note?: string; actionHref?: string; actionLabel?: string } = $props();
 </script>
 
 <div class="group">
   <span class="eyebrow">{label}</span>
+  {#if note}
+    <!-- Honesty note (board-housekeeping): e.g. "2 dismissed" — hidden cards never silently vanish
+         from the count; muted, not amber (the chip on the row carries the act-now signal). -->
+    <span class="note">{note}</span>
+  {/if}
   <span class="rule" aria-hidden="true"></span>
   {#if actionHref && actionLabel}
     <a class="action" href={actionHref}>{actionLabel}</a>
@@ -30,6 +36,13 @@
     font-size: 10px;
     letter-spacing: 0.14em;
     text-transform: uppercase;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .note {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
     color: var(--text-muted);
     white-space: nowrap;
   }
