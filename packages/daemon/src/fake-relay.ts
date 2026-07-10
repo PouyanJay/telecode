@@ -31,6 +31,8 @@ export interface FakeRelay {
   pingDaemon(): void;
   /** Reject subsequent `hello`s by closing with 4001 (simulates a revoked/invalid device token). */
   rejectHellos(): void;
+  /** Close the NEXT `hello` with `code` (one-shot), then accept — simulates a transient rejection. */
+  rejectNextHelloWith(code: number): void;
   close(): Promise<void>;
 }
 
@@ -49,6 +51,9 @@ export async function startFakeRelay(
 
   let socket: RelaySocket | null = null;
   let rejectHello = options.rejectHello ?? false;
+  // A one-shot close code for the NEXT hello (then cleared), so a test can simulate a transient rejection
+  // (e.g. WS_CLOSE_TRY_AGAIN on a cold DB) that the next hello recovers from.
+  let rejectNextHelloCode: number | null = null;
   const buffered: Envelope[] = [];
   const waiters: { predicate: (e: Envelope) => boolean; resolve: (e: Envelope) => void }[] = [];
   let helloWaiters: (() => void)[] = [];
@@ -69,6 +74,12 @@ export async function startFakeRelay(
         return;
       }
       if (envelope.type === 'hello') {
+        if (rejectNextHelloCode !== null) {
+          const code = rejectNextHelloCode;
+          rejectNextHelloCode = null;
+          conn.close(code, 'rejected');
+          return;
+        }
         if (rejectHello) {
           conn.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
           return;
@@ -128,6 +139,9 @@ export async function startFakeRelay(
     },
     rejectHellos(): void {
       rejectHello = true;
+    },
+    rejectNextHelloWith(code: number): void {
+      rejectNextHelloCode = code;
     },
     close(): Promise<void> {
       // Force-terminate every client first: a half-open (paused) socket left by `goSilentHalfOpen` never
