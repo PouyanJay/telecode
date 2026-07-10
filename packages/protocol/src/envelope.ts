@@ -19,6 +19,17 @@ export const MESSAGE_TYPES = [
   // control / lifecycle (daemon <-> relay)
   'hello',
   'hello.ack',
+  // Application-level link liveness (peer -> relay -> same peer) — the CANONICAL rationale; other sites
+  // reference this comment. A registered peer (daemon or browser) sends `link.ping`; the relay answers
+  // `link.pong` on the SAME socket — no DB, no routing, payload `{}`. WS protocol ping/pong control
+  // frames are NOT end-to-end through a cloud ingress (the proxy can answer them itself while the relay
+  // app is unreachable — a dead link then looks "healthy" indefinitely, observed live 2026-07-10), so
+  // peers must count ONLY app frames as proof of life and probe with these envelopes. `link.pong` is only
+  // ever a REPLY, so a peer that never pings never receives one — adding these types is backward
+  // compatible (a peer too old to know them rejects the whole envelope as invalid and drops it, which
+  // degrades an idle link to periodic reconnects, never a zombie).
+  'link.ping',
+  'link.pong',
   // Phase 0 walking skeleton (web <-> daemon, via relay)
   'echo',
   'echo.reply',

@@ -69,6 +69,15 @@ export interface RelayConnectionOptions {
    * controllable fake (the web Vitest runs in node, where there is no DOM `WebSocket`).
    */
   readonly createSocket?: (url: string) => WebSocket;
+  /**
+   * App-level link heartbeat (mirror of the daemon's watchdog; rationale on `link.ping` in the protocol's
+   * envelope.ts). A browser cannot observe WS protocol ping/pong at all, so without its own probe the only
+   * failure signal is a `close` event a zombie link never delivers — the UI then shows a stale view
+   * forever. Each `intervalMs` the client sends a `link.ping` envelope (the relay answers `link.pong`);
+   * `maxSilentRounds` consecutive rounds with zero inbound frames closes the socket, which routes into the
+   * normal reconnect path. Defaults 30s / 2 rounds; `intervalMs <= 0` disables. Tests inject small values.
+   */
+  readonly heartbeat?: { readonly intervalMs?: number; readonly maxSilentRounds?: number };
 }
 
 export interface RelayConnection {
@@ -148,6 +157,50 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   const BASE_RECONNECT_MS = 500;
   const MAX_RECONNECT_MS = 10_000;
+
+  // App-level heartbeat state (see RelayConnectionOptions.heartbeat; the daemon runs the same watchdog).
+  // `heartbeatArmed` gates the probe to an authenticated socket — distinct from the handshake GATE below,
+  // which sequences outbound session frames. Any inbound frame counts as proof of life (the relay's
+  // `link.pong` answer covers an otherwise-idle link). Connection-scoped: nothing here persists across a
+  // redial — every (re)dial and every hello.ack resets these for the socket now current.
+  const heartbeatMs = options.heartbeat?.intervalMs ?? 30_000;
+  const configuredSilentRounds = options.heartbeat?.maxSilentRounds ?? 2;
+  const heartbeatMaxSilentRounds = Number.isFinite(configuredSilentRounds)
+    ? Math.max(1, configuredSilentRounds)
+    : 2;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let heartbeatArmed = false;
+  let sawInboundSinceHeartbeat = false;
+  let heartbeatSilentRounds = 0;
+
+  /** One heartbeat round on the authenticated socket: close a silent link, else re-probe. */
+  function runHeartbeatRound(): void {
+    if (!heartbeatArmed || socket === null) return; // dialing/handshaking — nothing to probe yet
+    heartbeatSilentRounds = sawInboundSinceHeartbeat ? 0 : heartbeatSilentRounds + 1;
+    sawInboundSinceHeartbeat = false;
+    if (heartbeatSilentRounds >= heartbeatMaxSilentRounds) {
+      // The link is dead even if TCP looks open (a zombie through the ingress): close it so the
+      // `close` handler runs the normal reconnect path. Local close always fires, unlike the remote's.
+      heartbeatSilentRounds = 0;
+      heartbeatArmed = false;
+      socket.close();
+      return;
+    }
+    try {
+      // Deliberately bypasses the send chain: the probe carries no session state, needs no sealing, and
+      // must not queue behind it. A throwing send (socket mid-transition) is a dead link — close it.
+      socket.send(buildFrame('link.ping', { payload: {} }));
+    } catch {
+      heartbeatSilentRounds = 0;
+      heartbeatArmed = false;
+      socket.close();
+    }
+  }
+
+  function startHeartbeat(): void {
+    if (heartbeatMs <= 0 || heartbeatTimer !== null) return;
+    heartbeatTimer = setInterval(runHeartbeatRound, heartbeatMs);
+  }
 
   function buildFrame(
     type: MessageType,
@@ -279,6 +332,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
     // own chain; the cipher + outbound chain persist across reconnects so keys and order survive a redial.
     let inbound: Promise<void> = Promise.resolve();
     ws.addEventListener('message', (event: MessageEvent<string>) => {
+      // Any inbound frame on the CURRENT socket is proof of life for the keepalive (a late frame from a
+      // replaced socket must not mask a dead new link).
+      if (socket === ws) sawInboundSinceHeartbeat = true;
       // A failed frame (e.g. a decryption error from a key mismatch) surfaces as a connection error rather
       // than silently dropping — consistent with the send chain's handler.
       inbound = inbound.then(() => handleFrame(event.data)).catch(() => options.onStatus('error'));
@@ -286,8 +342,9 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
 
     ws.addEventListener('error', () => options.onStatus('error'));
     ws.addEventListener('close', () => {
-      // The socket died: close the gate so frames enqueued from here on wait for the NEXT
-      // handshake instead of being written into a dead (or not-yet-authenticated) socket.
+      // The socket died: stop probing it and close the gate so frames enqueued from here on wait for
+      // the NEXT handshake instead of being written into a dead (or not-yet-authenticated) socket.
+      if (socket === ws) heartbeatArmed = false;
       armHandshakeGate();
       // An intentional close() is terminal; an unexpected drop schedules a transparent redial.
       if (intentionallyClosed) return;
@@ -319,12 +376,22 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
       reconnectAttempts = 0;
       const reconnected = hasConnected;
       hasConnected = true;
+      // Fresh authenticated link: start (or keep) probing it, with a clean silence budget.
+      heartbeatArmed = true;
+      sawInboundSinceHeartbeat = false;
+      heartbeatSilentRounds = 0;
+      startHeartbeat();
       // The relay has authenticated this peer — release any session frames queued behind the gate.
       openHandshakeGate();
       options.onStatus('connected');
       // On a *reconnect* (not the first handshake) the caller reattaches its sessions (resubscribe →
       // backfill), since the daemon treats this as a reopen.
       if (reconnected) options.onReconnect?.();
+      return;
+    }
+    if (envelope.type === 'link.pong') {
+      // The relay's answer to our keepalive probe — transport-level proof of life, never a UI event.
+      // (Receiving it already reset the silence counter, like every inbound frame.)
       return;
     }
     if (envelope.type === 'session.key') {
@@ -509,6 +576,11 @@ export function createRelayConnection(options: RelayConnectionOptions): RelayCon
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      heartbeatArmed = false;
       socket?.close();
       socket = null;
     },

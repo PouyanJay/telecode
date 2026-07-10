@@ -310,9 +310,10 @@ export function createDaemon(options: DaemonOptions): Daemon {
     ? Math.max(1, configuredMaxSilentRounds)
     : 2;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  // Whether ANY inbound WS activity (a frame, or the peer's ping/pong) was seen since the last heartbeat
-  // check — proof the link is alive. `silentRounds` counts consecutive checks that saw none; the link is
-  // torn down only after `heartbeatMaxSilentRounds` of them, so a single idle miss can't kill a healthy link.
+  // Whether an inbound APP frame (the relay's `link.pong`, or any session traffic) was seen since the last
+  // heartbeat check — proof the relay APP is alive. WS ping/pong control frames deliberately do NOT count
+  // (see runHeartbeatRound). `silentRounds` counts consecutive checks that saw none; the link is torn down
+  // only after `heartbeatMaxSilentRounds` of them, so a single slow round-trip can't kill a healthy link.
   let sawInboundSinceHeartbeat = false;
   let silentRounds = 0;
   // How long to await the relay's `session.chained` ACK for a handover continuation before falling back
@@ -2037,6 +2038,11 @@ export function createDaemon(options: DaemonOptions): Daemon {
         await handleSessionPush(envelope);
         return;
       }
+      case 'link.pong': {
+        // The relay's answer to our `link.ping` probe. Receiving it already reset the heartbeat's
+        // silence counter (any inbound app frame does — see `markInbound`); nothing else to do.
+        return;
+      }
       case 'viewer.presence': {
         // Relay tells us whether any browser is watching this channel (the mirror of device.presence). We
         // hold it so the adopted-session gate only blocks for a remote approval while an operator is present.
@@ -2107,20 +2113,18 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // tool on a remote approval nobody can give during the reconnect gap. The relay re-asserts the real state
     // right after hello.ack; until then assume nobody is watching (defer to the local prompt — safe default).
     isRemoteViewerOnline = false;
-    // Fresh socket, fresh heartbeat liveness. ANY inbound WS activity marks the link alive — not just our
-    // own pong (the cloud ingress doesn't always round-trip a WS pong on an idle connection), but also the
-    // relay's own heartbeat ping and every app frame. So normal traffic and the relay's keepalive keep the
-    // link up; only a genuinely silent link is torn down. The daemon-scoped interval (started once in
-    // `start`) probes whichever socket is current.
+    // Fresh socket, fresh heartbeat liveness. Only an inbound APP frame marks the link alive — the
+    // relay's `link.pong` answer to our probe, or any session frame. WS protocol ping/pong control
+    // frames deliberately do NOT count: they are not end-to-end through a cloud ingress (rationale on
+    // `link.ping` in the protocol's envelope.ts). The daemon-scoped interval (started once in `start`)
+    // probes whichever socket is current.
     sawInboundSinceHeartbeat = false;
     silentRounds = 0;
-    // Guard on the CURRENT socket: a late pong/ping/message from an already-replaced socket must never
-    // reset liveness for the connection that succeeded it (which could mask a dead new link for a round).
+    // Guard on the CURRENT socket: a late frame from an already-replaced socket must never reset
+    // liveness for the connection that succeeded it (which could mask a dead new link for a round).
     const markInbound = (): void => {
       if (socket === ws) sawInboundSinceHeartbeat = true;
     };
-    ws.on('pong', markInbound);
-    ws.on('ping', markInbound);
     // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
     // handled before the next — a follow-up can't decrypt before the launch establishes the key. Each
     // socket gets its own chain; the cipher + outbound chain persist across reconnects.
@@ -2166,19 +2170,20 @@ export function createDaemon(options: DaemonOptions): Daemon {
   }
 
   /**
-   * Probe the relay link so a HALF-OPEN path can't strand the daemon (device shows offline, announces time
-   * out forever). The relay already pings the daemon (its own Phase-4 heartbeat), but the daemon dials
-   * OUT — on a half-open path (laptop sleep, NAT rebind) the relay's terminate can be blackholed too, so
-   * the ws `close` event never reaches us and the `close`-only reconnect path goes blind. So the daemon
-   * probes independently: each interval it checks whether ANY inbound activity arrived since the last round
-   * (an app frame, the relay's ping, or our own ping's pong — see `markInbound`). Silence for
-   * `heartbeatMaxSilentRounds` consecutive rounds means the link is dead → terminate the socket so its
-   * `close` handler redials. A single miss is tolerated because an idle-but-healthy link's WS pong isn't
-   * always round-tripped by the cloud ingress; the grace window plus resetting on any inbound (not just the
-   * pong) stops a working connection from being torn down on every idle interval. Each round still sends a
-   * ping to solicit inbound from an otherwise-quiet peer (and keep NAT/proxy idle timers warm). Daemon-
-   * scoped and started once; it probes whichever socket is current and no-ops while reconnecting. `unref`
-   * so it never holds the process open.
+   * Probe the relay link so a DEAD path can't strand the daemon (device shows offline, announces time out
+   * forever). The daemon dials OUT — on a half-open path (laptop sleep, NAT rebind) or a proxy-orphaned one
+   * (the relay's side is gone but the ingress keeps ours open) the ws `close` event never reaches us and
+   * the `close`-only reconnect path goes blind. So the daemon probes independently, END-TO-END: each round
+   * it sends a `link.ping` ENVELOPE — a normal app frame the relay application must answer with
+   * `link.pong` — and checks whether any inbound APP frame arrived since the last round (the pong or
+   * session traffic; see `markInbound`). WS protocol ping/pong control frames deliberately do not count —
+   * they are not end-to-end through a cloud ingress (rationale on `link.ping` in the protocol's
+   * envelope.ts). Silence for `heartbeatMaxSilentRounds` consecutive rounds means the link is dead →
+   * terminate the socket so its `close` handler redials. A single miss is tolerated so one slow
+   * round-trip can't tear down a working connection. Against a relay too old to answer `link.ping` (it
+   * drops the whole envelope as invalid) an idle link degrades to a periodic reconnect (the pre-grace
+   * behavior) — never a zombie. Daemon-scoped and started once; it probes whichever socket is current and
+   * no-ops while reconnecting. `unref` so it never holds the process open.
    */
   /** One heartbeat round on the current OPEN socket: tear down after too many silent rounds, else re-probe. */
   function runHeartbeatRound(ws: WebSocket): void {
@@ -2194,11 +2199,23 @@ export function createDaemon(options: DaemonOptions): Daemon {
       return;
     }
     try {
-      ws.ping(); // solicit a pong so an idle-but-healthy link still produces inbound next round
+      // Solicit end-to-end proof of life: the relay APP answers this envelope with a `link.pong`, so an
+      // idle-but-healthy link still produces an inbound app frame next round. Deliberately bypasses
+      // `enqueueSend`: the probe carries no session state and must not queue behind a stalled chain.
+      ws.send(
+        JSON.stringify(
+          makeEnvelope({
+            type: 'link.ping',
+            userId: options.userId,
+            deviceId: options.deviceId,
+            payload: {},
+          }),
+        ),
+      );
     } catch (err) {
       log.warn(
         { err, deviceId: options.deviceId },
-        'daemon: heartbeat ping failed — terminating link',
+        'daemon: heartbeat probe failed — terminating link',
       );
       silentRounds = 0;
       ws.terminate();

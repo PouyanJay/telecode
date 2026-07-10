@@ -479,3 +479,99 @@ describe('resumeNew: sealed like a launch (ux Phase 6 T8)', () => {
     expect(frame.payload).toEqual({ prompt: 'plain resume', clientRef: 'ref-c' });
   });
 });
+
+/**
+ * App-level link keepalive. A browser cannot see (or send) WS protocol ping/pong at all, and through a
+ * cloud ingress those control frames are not end-to-end anyway — so without its own probe the client's
+ * only failure signal is a `close` event a zombie link never delivers (the 2026-07-10 incident: the UI
+ * showed a stale "offline" view while its socket was long dead). The client sends a `link.ping`
+ * envelope each interval and counts inbound frames; silence across the round budget closes the socket,
+ * which routes into the existing reconnect path.
+ */
+describe('relay-client link heartbeat (zombie detection)', () => {
+  const linkPong = (): string =>
+    JSON.stringify(
+      makeEnvelope({ type: 'link.pong', userId: USER, deviceId: DEVICE, payload: {} }),
+    );
+
+  async function connectedWithHeartbeat(intervalMs = 1000): Promise<{
+    sockets: FakeSocket[];
+    events: Envelope[];
+    conn: ReturnType<typeof createRelayConnection>;
+  }> {
+    const events: Envelope[] = [];
+    const { sockets, conn } = connectWithFakes({
+      heartbeat: { intervalMs, maxSilentRounds: 2 },
+      onEvent: (e) => events.push(e),
+    });
+    sockets[0]!.fireOpen();
+    await flush();
+    sockets[0]!.fireMessage(helloAck());
+    await flush();
+    return { sockets, events, conn };
+  }
+
+  it('probes with a link.ping envelope each interval once the handshake completes', async () => {
+    const { sockets, conn } = await connectedWithHeartbeat();
+
+    expect(sockets[0]!.sent.some((f) => f.includes('"link.ping"'))).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sockets[0]!.sent.filter((f) => f.includes('"link.ping"'))).toHaveLength(1);
+
+    conn.close();
+  });
+
+  it('closes a silent (zombie) socket after the round budget so the reconnect path takes over', async () => {
+    const { sockets, conn } = await connectedWithHeartbeat();
+
+    // Two silent rounds: no link.pong, no frames at all — the link is dead even if TCP looks open.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(sockets[0]!.isClosed()).toBe(true);
+
+    // The close event routes into the normal reconnect machinery — a fresh socket dials and hellos.
+    sockets[0]!.fireClose();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sockets.length).toBeGreaterThan(1);
+    await flush();
+    expect(sockets[1]!.sentHello()).toBe(false); // not yet open
+    sockets[1]!.fireOpen();
+    await flush();
+    expect(sockets[1]!.sentHello()).toBe(true);
+
+    conn.close();
+  });
+
+  it('a link.pong answer (or any inbound frame) keeps the link open indefinitely', async () => {
+    const { sockets, conn } = await connectedWithHeartbeat();
+
+    for (let round = 0; round < 6; round += 1) {
+      await vi.advanceTimersByTimeAsync(1000);
+      sockets[0]!.fireMessage(linkPong());
+      await flush();
+    }
+    expect(sockets[0]!.isClosed()).toBe(false);
+    expect(sockets).toHaveLength(1);
+
+    conn.close();
+  });
+
+  it('treats link.pong as transport — it never reaches onEvent', async () => {
+    const { sockets, events, conn } = await connectedWithHeartbeat();
+
+    sockets[0]!.fireMessage(linkPong());
+    await flush();
+    expect(events).toHaveLength(0);
+
+    conn.close();
+  });
+
+  it('stops probing after an intentional close()', async () => {
+    const { sockets, conn } = await connectedWithHeartbeat();
+
+    conn.close();
+    const sentBefore = sockets[0]!.sent.length;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(sockets[0]!.sent).toHaveLength(sentBefore);
+    expect(sockets).toHaveLength(1); // and no reconnect either
+  });
+});
