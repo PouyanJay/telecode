@@ -91,7 +91,7 @@ describe('relay device presence snapshot: GET /me/devices online', () => {
     expect(cold.get(dustyId)).toBe(false);
 
     // The live device's daemon registers → only IT flips online in the snapshot.
-    const daemon = await connectDaemon(relayUrl, alice.userId, liveId, DEVICE_TOKEN);
+    const daemon = await connectDaemon(relayUrl, alice.userId, liveId, { token: DEVICE_TOKEN });
     const warm = await listedOnline(alice.token);
     expect(warm.get(liveId)).toBe(true);
     expect(warm.get(dustyId)).toBe(false);
@@ -107,7 +107,7 @@ describe('relay device presence snapshot: GET /me/devices online', () => {
       deviceTokenHash: hashDeviceToken(DEVICE_TOKEN),
     });
 
-    const daemon = await connectDaemon(relayUrl, alice.userId, deviceId, DEVICE_TOKEN);
+    const daemon = await connectDaemon(relayUrl, alice.userId, deviceId, { token: DEVICE_TOKEN });
     expect((await listedOnline(alice.token)).get(deviceId)).toBe(true);
 
     daemon.close();
@@ -125,7 +125,9 @@ describe('relay device presence snapshot: GET /me/devices online', () => {
       name: 'bob-laptop',
       deviceTokenHash: hashDeviceToken(DEVICE_TOKEN),
     });
-    const bobDaemon = await connectDaemon(relayUrl, bob.userId, bobDeviceId, DEVICE_TOKEN);
+    const bobDaemon = await connectDaemon(relayUrl, bob.userId, bobDeviceId, {
+      token: DEVICE_TOKEN,
+    });
 
     // Alice's list simply does not contain Bob's device — online or not.
     const aliceView = await listedOnline(alice.token);

@@ -61,23 +61,25 @@ export async function connectBrowser(
   return socket;
 }
 
-/** Send an `echo` from a connected browser socket. */
+/** Send an `echo` frame from any connected socket (role-agnostic test traffic / inbound-liveness signal). */
 export function sendEcho(socket: WebSocket, userId: string, deviceId: string, text: string): void {
   socket.send(JSON.stringify(makeEnvelope({ type: 'echo', userId, deviceId, payload: { text } })));
 }
 
 /**
- * Open a daemon-role connection to the relay and wait until it is registered (hello.ack). When the relay
- * enforces device auth, pass the device `token` to authenticate the `hello`. Mirrors {@link connectBrowser}
- * for tests that need both ends of a channel (e.g. an end-to-end encrypted round-trip).
+ * Open a daemon-role connection to the relay and wait until it is registered (hello.ack). Mirrors
+ * {@link connectBrowser} for tests that need both ends of a channel (e.g. an end-to-end encrypted
+ * round-trip). `opts.token` authenticates the `hello` when the relay enforces device auth. `opts.autoPong:
+ * false` makes the client NOT auto-reply to the relay's ping — simulating a cloud ingress that doesn't
+ * round-trip a WS pong, so heartbeat liveness must rest on other inbound activity.
  */
 export async function connectDaemon(
   relayUrl: string,
   userId: string,
   deviceId: string,
-  token?: string,
+  opts: { token?: string; autoPong?: boolean } = {},
 ): Promise<WebSocket> {
-  const socket = new WebSocket(relayUrl);
+  const socket = new WebSocket(relayUrl, { autoPong: opts.autoPong ?? true });
   await new Promise<void>((resolve, reject) => {
     socket.once('open', () => resolve());
     socket.once('error', reject);
@@ -89,7 +91,7 @@ export async function connectDaemon(
         type: 'hello',
         userId,
         deviceId,
-        payload: { role: 'daemon', ...(token !== undefined ? { token } : {}) },
+        payload: { role: 'daemon', ...(opts.token !== undefined ? { token: opts.token } : {}) },
       }),
     ),
   );

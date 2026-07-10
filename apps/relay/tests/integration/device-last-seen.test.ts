@@ -85,7 +85,7 @@ describe('relay: devices.last_seen_at stamping', () => {
 
   it('stamps last_seen_at when the daemon registers', async () => {
     expect(await lastSeenAt(deviceId)).toBeNull();
-    const daemon = await connectDaemon(relayUrl, userId, deviceId, DEVICE_TOKEN);
+    const daemon = await connectDaemon(relayUrl, userId, deviceId, { token: DEVICE_TOKEN });
     // The stamp is fire-and-forget (registration never waits on it), so poll for it to land.
     await expect
       .poll(async () => (await lastSeenAt(deviceId)) !== null, { timeout: 3000 })
@@ -94,7 +94,7 @@ describe('relay: devices.last_seen_at stamping', () => {
   });
 
   it('stamps last_seen_at again when the daemon disconnects', async () => {
-    const daemon = await connectDaemon(relayUrl, userId, deviceId, DEVICE_TOKEN);
+    const daemon = await connectDaemon(relayUrl, userId, deviceId, { token: DEVICE_TOKEN });
     // The hello stamp is fire-and-forget — wait for it to land before using it as the baseline. The
     // injected clock is strictly monotonic (one second per stamp), so the disconnect stamp is
     // distinguishable with no wall-clock dependency.
@@ -139,7 +139,7 @@ describe('relay: devices.last_seen_at stamping', () => {
     await flakyApp.listen({ port: 0, host: '127.0.0.1' });
     const flakyUrl = `ws://127.0.0.1:${(flakyApp.server.address() as AddressInfo).port}/ws`;
     // connectDaemon resolves only on hello.ack — registration succeeded despite the failed stamp.
-    const daemon = await connectDaemon(flakyUrl, userId, deviceId, DEVICE_TOKEN);
+    const daemon = await connectDaemon(flakyUrl, userId, deviceId, { token: DEVICE_TOKEN });
     daemon.close();
     await flakyApp.close();
     expect(await lastSeenAt(deviceId)).toBeNull();
@@ -159,7 +159,7 @@ describe('relay: devices.last_seen_at stamping', () => {
       browser,
       (e) => e.type === 'device.presence' && (e.payload as { online: boolean }).online,
     );
-    const daemon = await connectDaemon(flakyUrl, userId, deviceId, DEVICE_TOKEN);
+    const daemon = await connectDaemon(flakyUrl, userId, deviceId, { token: DEVICE_TOKEN });
     await online;
 
     // The daemon drops; its stamp write rejects — watching browsers must still be told it went offline.

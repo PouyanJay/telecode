@@ -176,12 +176,9 @@ describe('device-restore grant: re-pairing a revoked device preserves its identi
     expect(listed[0]?.id).toBe(first.device_id);
 
     // The rotated token authenticates a daemon hello on the same channel...
-    const daemon = await connectDaemon(
-      relayUrl,
-      alice.userId,
-      first.device_id,
-      second.device_token,
-    );
+    const daemon = await connectDaemon(relayUrl, alice.userId, first.device_id, {
+      token: second.device_token,
+    });
     daemon.close();
 
     // ...and the dead prior token does not (closed 4001, same as any revoked credential).

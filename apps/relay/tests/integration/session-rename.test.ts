@@ -269,7 +269,9 @@ describe('session rename: PATCH /me/sessions/:id', () => {
 
   it('drops a daemon-forged session.title frame (rename is REST-only, never a raw frame)', async () => {
     const alice = await seedSession('alice');
-    const daemon = await connectDaemon(relayUrl, alice.userId, alice.deviceId, alice.deviceToken);
+    const daemon = await connectDaemon(relayUrl, alice.userId, alice.deviceId, {
+      token: alice.deviceToken,
+    });
     const browser = await connectBrowser(
       relayUrl,
       alice.userId,
