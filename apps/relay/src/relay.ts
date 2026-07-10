@@ -93,6 +93,16 @@ export interface RelayOptions {
    */
   readonly heartbeat?: { readonly intervalMs?: number; readonly maxSilentRounds?: number };
   /**
+   * Max WebSocket connection age (deploy safety). Each connection is gracefully closed after
+   * `baseMs + random(0, jitterMs)`, prompting the client to reconnect. Azure Container Apps keeps a
+   * deprecated revision alive to drain open WebSockets, so without an upper bound a peer can stick to the
+   * OLD revision after a rolling deploy indefinitely (the new revision — which serves the web — then shows
+   * it offline). Cycling connections migrates them onto the current revision within the age window; the
+   * jitter staggers reconnects so they don't stampede. Defaults: 30m base + 30m jitter (30–60m); `baseMs
+   * <= 0` disables it. Tests inject small values.
+   */
+  readonly maxConnectionAge?: { readonly baseMs?: number; readonly jitterMs?: number };
+  /**
    * Bounded per-session ciphertext cache (Phase 4 Task 8). The relay keeps the recent encrypted frames it
    * forwards (and the latest `session.key`) so a reopening browser can be replayed them immediately on
    * `session.subscribe` — instant recent history even while the daemon is mid-reconnect, decrypted with
@@ -146,6 +156,12 @@ export interface RelayOptions {
  * Exported so tests assert against the same constant rather than a duplicated magic number.
  */
 export const WS_CLOSE_CODE_CONNECTION_CAP = 4029;
+
+/** Normal WebSocket closure (RFC 6455 1000) — a clean close the daemon/browser reconnect on (not an error). */
+export const WS_CLOSE_CODE_NORMAL = 1000;
+
+/** Default max connection age base + jitter (30m each → a 30–60m window). See RelayOptions.maxConnectionAge. */
+const DEFAULT_MAX_CONNECTION_AGE_MS = 30 * 60_000;
 
 /**
  * The daemon→browser frame types worth caching for an instant reopen (the session's recent history).
@@ -944,6 +960,13 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // its `close` handler — so a dead daemon's browsers are told it went offline, exactly as a clean
   // disconnect would. `unref` so the timer never holds the process open.
   const heartbeatMs = options.heartbeat?.intervalMs ?? 30_000;
+  // Max connection age (deploy safety, see RelayOptions.maxConnectionAge): each socket is gracefully closed
+  // after base + up-to-jitter so peers migrate off a draining old revision onto the current one. `<= 0` off.
+  const maxConnectionAgeBaseMs = options.maxConnectionAge?.baseMs ?? DEFAULT_MAX_CONNECTION_AGE_MS;
+  const maxConnectionAgeJitterMs = Math.max(
+    0,
+    options.maxConnectionAge?.jitterMs ?? DEFAULT_MAX_CONNECTION_AGE_MS,
+  );
   // Floor at 1 round (and coerce a NaN from a bad config to the default): 0 would drop every peer each round.
   const configuredMaxSilentRounds = options.heartbeat?.maxSilentRounds ?? 2;
   const heartbeatMaxSilentRounds = Number.isFinite(configuredMaxSilentRounds)
@@ -1087,7 +1110,24 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     };
     socket.on('pong', markInbound);
     socket.on('ping', markInbound);
-    socket.on('close', () => sockets.delete(socket));
+
+    // Max connection age (deploy safety, see RelayOptions.maxConnectionAge): a NORMAL (non-4001) close so
+    // the daemon/browser reconnects rather than treating it as an auth failure. `ws.close()` self-resolves
+    // via its own close-timer if the peer never completes the handshake; cleared on close so it never fires
+    // late. A per-connection reconnect surfaces as a brief (~one round-trip) offline blip in the web, once
+    // per age window, staggered by the jitter.
+    const ageTimer =
+      maxConnectionAgeBaseMs > 0
+        ? setTimeout(
+            () => socket.close(WS_CLOSE_CODE_NORMAL, 'max connection age'),
+            maxConnectionAgeBaseMs + Math.random() * maxConnectionAgeJitterMs,
+          )
+        : null;
+    ageTimer?.unref();
+    socket.on('close', () => {
+      sockets.delete(socket);
+      if (ageTimer) clearTimeout(ageTimer);
+    });
 
     // Frame handling is async (session.* control messages await DB writes), so we chain frames into a
     // per-connection queue: each frame is fully handled before the next, preserving stream order (a
