@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { WS_CLOSE_TRY_AGAIN } from '@telecode/protocol';
 import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -13,6 +14,11 @@ import { startFakeRelay, type FakeRelay } from './fake-relay';
  * blindly redials the same dead token loops forever — so `start()` must reject with a
  * {@link DaemonUnauthorizedError} on the first connect, and a later revocation (surfaced on a reconnect)
  * must fire `onUnauthorized` and stop redialing, so the composition root can clear + re-pair.
+ *
+ * The last test pins the OPPOSITE wire-contract guarantee: a NON-4001 close (WS_CLOSE_TRY_AGAIN, sent when
+ * the relay's DB is transiently unavailable) must NOT re-pair — the daemon just reconnects with its
+ * existing credentials. No daemon-code change is needed for this (any non-4001 close already reconnects);
+ * the test locks that in as a cross-package contract so a future close-handler change can't regress it.
  */
 const silent = pino({ level: 'silent' });
 
@@ -86,5 +92,26 @@ describe('daemon re-auth on a rejected device token', () => {
       new Promise<typeof NO_HELLO>((resolve) => setTimeout(() => resolve(NO_HELLO), 150)),
     ]);
     expect(redial).toBe(NO_HELLO);
+  });
+
+  it('reconnects and retries (never re-pairs) when a hello is closed with WS_CLOSE_TRY_AGAIN', async () => {
+    // A transient DB outage (cold Supabase free tier) closes the hello with the retryable code, NOT 4001.
+    // The daemon must ride past it — reconnect and register with its EXISTING token — without ever firing
+    // onUnauthorized (which would clear credentials and re-pair, a human step).
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startFakeRelay(userId, deviceId);
+    relays.push(relay);
+
+    let unauthorizedFired = false;
+    // Reject the FIRST hello with the retryable code, then accept — the retry must succeed.
+    relay.rejectNextHelloWith(WS_CLOSE_TRY_AGAIN);
+    const daemon = makeDaemon(relay, userId, deviceId, () => {
+      unauthorizedFired = true;
+    });
+
+    // start() resolves only once a hello.ack lands — i.e. the retry after the retryable close registered.
+    await expect(daemon.start()).resolves.toBeUndefined();
+    expect(unauthorizedFired).toBe(false);
   });
 });

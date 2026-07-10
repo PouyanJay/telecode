@@ -14,6 +14,7 @@ import {
   sessionEndedPayloadSchema,
   sessionReconcilePayloadSchema,
   sessionStatusPayloadSchema,
+  WS_CLOSE_TRY_AGAIN,
   WS_CLOSE_UNAUTHORIZED,
   type Envelope,
   type SessionEndedPayload,
@@ -34,7 +35,7 @@ import { createTelemetry, type Telemetry } from './telemetry';
 import { MAX_SEALED_BLOB_CHARS, MAX_SEALED_BLOB_NONCE_CHARS } from './db/sealed-blob-bounds';
 import { registerInfraRoutes } from './infra/infra-routes';
 import { type InfraScaler } from './infra/infra-scaler';
-import { type DeviceRegistry } from './registry/device-registry';
+import { type DeviceRecord, type DeviceRegistry } from './registry/device-registry';
 import { registerDeviceRoutes } from './registry/device-routes';
 import { type SessionRegistry } from './registry/session-registry';
 import { registerSessionRoutes, type SessionRenamedEvent } from './registry/session-routes';
@@ -1182,9 +1183,23 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
       // A daemon must present its device token; the resolved device must match the envelope's
       // (user_id, device_id) and not be revoked. This is the laptop-side execution boundary.
       if (role === 'daemon' && deviceRegistry) {
-        const device = token
-          ? await deviceRegistry.findActiveByTokenHash(hashDeviceToken(token))
-          : null;
+        // Hash outside the try so the catch below is unambiguously the DB lookup — the only fallible part.
+        const tokenHash = token ? hashDeviceToken(token) : null;
+        let device: DeviceRecord | null;
+        try {
+          device = tokenHash ? await deviceRegistry.findActiveByTokenHash(tokenHash) : null;
+        } catch (err) {
+          // The device-token lookup hit the DB and it was transiently unavailable (a cold/paused
+          // Supabase free-tier instance right after a deploy). This is NOT an auth failure — closing 4001
+          // would force a valid device to re-pair. Close with a retryable code so the daemon reconnects
+          // and retries with its existing credentials as soon as the DB is back (see WS_CLOSE_TRY_AGAIN).
+          log.warn(
+            { err, channel },
+            'relay: device-token check unavailable — asking daemon to retry',
+          );
+          socket.close(WS_CLOSE_TRY_AGAIN, 'service unavailable');
+          return;
+        }
         if (!device || device.userId !== envelope.user_id || device.id !== envelope.device_id) {
           log.warn({ channel }, 'relay: rejected daemon hello (invalid device token)');
           socket.close(WS_CLOSE_UNAUTHORIZED, 'unauthorized');
