@@ -14,6 +14,12 @@ export type Database = NodePgDatabase<typeof schema>;
 export interface DbHandle {
   readonly db: Database;
   readonly pool: Pool;
+  /**
+   * Run a trivial query to keep a pooled connection (and, on a free-tier/serverless Postgres, the DB
+   * compute) warm. The relay pings this on an interval so a token check on an otherwise-idle DB doesn't
+   * hit a cold-start/timeout. Rejects on a DB error so the caller can log it (best-effort).
+   */
+  keepAlive(): Promise<void>;
   /** Close the pool. Idempotent per pool; call on shutdown. */
   close(): Promise<void>;
 }
@@ -28,6 +34,9 @@ export function createDb(connectionString: string, logger?: Logger): DbHandle {
   return {
     db,
     pool,
+    async keepAlive(): Promise<void> {
+      await pool.query('SELECT 1');
+    },
     async close(): Promise<void> {
       await pool.end();
     },

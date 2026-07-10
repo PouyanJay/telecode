@@ -104,6 +104,15 @@ export interface RelayOptions {
    */
   readonly maxConnectionAge?: { readonly baseMs?: number; readonly jitterMs?: number };
   /**
+   * Database keep-alive (free-tier warmth). The relay runs `ping` immediately and then every `intervalMs`
+   * to keep the DB's pooled connection + compute warm, so a device-token check on an otherwise-idle DB
+   * doesn't hit a cold-start/timeout and wrongly reject a valid daemon. This restores the incidental DB
+   * traffic the old reconnect churn used to provide — without the churn. Best-effort: a failed ping only
+   * logs. Defaults to a 4-minute interval; `intervalMs <= 0` or an absent option disables it. Tests inject
+   * a fast interval + a fake ping.
+   */
+  readonly dbKeepAlive?: { readonly ping: () => Promise<void>; readonly intervalMs?: number };
+  /**
    * Bounded per-session ciphertext cache (Phase 4 Task 8). The relay keeps the recent encrypted frames it
    * forwards (and the latest `session.key`) so a reopening browser can be replayed them immediately on
    * `session.subscribe` — instant recent history even while the daemon is mid-reconnect, decrypted with
@@ -163,6 +172,9 @@ export const WS_CLOSE_CODE_NORMAL = 1000;
 
 /** Default max connection age base + jitter (30m each → a 30–60m window). See RelayOptions.maxConnectionAge. */
 const DEFAULT_MAX_CONNECTION_AGE_MS = 30 * 60_000;
+
+/** Default DB keep-alive interval (4m) — under a typical free-tier/pooler idle-scale-down window. */
+const DEFAULT_DB_KEEP_ALIVE_MS = 4 * 60_000;
 
 /**
  * The daemon→browser frame types worth caching for an instant reopen (the session's recent history).
@@ -995,6 +1007,34 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   heartbeat?.unref();
   app.addHook('onClose', async () => {
     if (heartbeat) clearInterval(heartbeat);
+  });
+
+  // Database keep-alive (free-tier warmth, see RelayOptions.dbKeepAlive): a trivial query immediately and
+  // every interval keeps the DB's pooled connection + compute warm, so a device-token check on an idle DB
+  // doesn't hit a cold-start and reject a valid daemon. Best-effort — a failed ping only logs. `unref` so
+  // it never holds the process open.
+  const dbKeepAliveMs = options.dbKeepAlive?.intervalMs ?? DEFAULT_DB_KEEP_ALIVE_MS;
+  let dbKeepAlive: ReturnType<typeof setInterval> | null = null;
+  if (options.dbKeepAlive && dbKeepAliveMs > 0) {
+    let pinging = false;
+    const pingDb = (): void => {
+      // Skip a tick while a previous ping is still in flight — a cold DB can take longer than the interval,
+      // and overlapping pings would each hold a pooled connection for no benefit.
+      if (pinging) return;
+      pinging = true;
+      void options.dbKeepAlive
+        ?.ping()
+        .catch((err: unknown) => log.warn({ err }, 'relay: db keep-alive ping failed'))
+        .finally(() => {
+          pinging = false;
+        });
+    };
+    pingDb(); // warm immediately (e.g. right after a deploy) so early daemon hellos hit a warm DB
+    dbKeepAlive = setInterval(pingDb, dbKeepAliveMs);
+    dbKeepAlive.unref();
+  }
+  app.addHook('onClose', async () => {
+    if (dbKeepAlive) clearInterval(dbKeepAlive);
   });
 
   app.get('/healthz', async () => ({ status: 'ok' }));
