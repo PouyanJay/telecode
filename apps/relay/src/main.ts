@@ -189,6 +189,9 @@ const app = await buildRelay({
   maxConnectionsPerIp,
   telemetry,
   ...(rateLimit ? { rateLimit } : {}),
+  // Keep the DB warm so a token check on an idle free-tier instance doesn't cold-start and reject a
+  // valid daemon (restores the warmth the old reconnect churn provided, without the churn).
+  ...(dbHandle ? { dbKeepAlive: { ping: () => dbHandle.keepAlive() } } : {}),
   ...(dbHandle ? { sessionRegistry: createSessionRegistry(dbHandle) } : {}),
   ...(authEnabled && dbHandle && channelTokenSecret && serviceSecret
     ? {
