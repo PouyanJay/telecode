@@ -27,6 +27,8 @@ export interface FakeRelay {
    * only the daemon's OWN heartbeat watchdog can detect it and reconnect.
    */
   goSilentHalfOpen(): void;
+  /** Send a raw WS ping to the daemon (mirrors the real relay's own keepalive ping — inbound liveness). */
+  pingDaemon(): void;
   /** Reject subsequent `hello`s by closing with 4001 (simulates a revoked/invalid device token). */
   rejectHellos(): void;
   close(): Promise<void>;
@@ -35,9 +37,11 @@ export interface FakeRelay {
 export async function startFakeRelay(
   userId: string,
   deviceId: string,
-  options: { rejectHello?: boolean } = {},
+  options: { rejectHello?: boolean; autoPong?: boolean } = {},
 ): Promise<FakeRelay> {
-  const server = new WebSocketServer({ port: 0 });
+  // `autoPong: false` simulates a cloud ingress that doesn't round-trip a WS pong on an idle connection —
+  // the daemon's heartbeat must then stay alive on other inbound activity (app frames), not just the pong.
+  const server = new WebSocketServer({ port: 0, autoPong: options.autoPong ?? true });
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('fake relay has no port');
@@ -118,6 +122,9 @@ export async function startFakeRelay(
       const raw = (socket as unknown as { _socket?: { pause(): void } })._socket;
       if (raw === undefined) throw new Error('fake relay: ws internals (_socket) unavailable');
       raw.pause();
+    },
+    pingDaemon(): void {
+      socket?.ping();
     },
     rejectHellos(): void {
       rejectHello = true;

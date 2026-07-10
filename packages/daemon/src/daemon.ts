@@ -188,11 +188,11 @@ export interface DaemonOptions {
    */
   readonly reconnect?: { readonly baseMs?: number; readonly maxMs?: number };
   /**
-   * Relay-link liveness. How often the daemon pings the relay to detect a HALF-OPEN link and force a
-   * reconnect (mechanism + rationale on `startHeartbeat`). Defaults to 20s; `<= 0` disables the watchdog.
-   * Tests inject a small value for speed.
+   * Relay-link liveness (mechanism + rationale on `startHeartbeat`). `intervalMs`: how often to probe the
+   * link (default 30s; `<= 0` disables the watchdog). `maxSilentRounds`: consecutive zero-inbound rounds
+   * tolerated before terminating (default 2 → ~60s of true silence; floored at 1). Tests inject small values.
    */
-  readonly heartbeat?: { readonly intervalMs?: number };
+  readonly heartbeat?: { readonly intervalMs?: number; readonly maxSilentRounds?: number };
   /**
    * Invoked when the relay rejects the device token as unauthorized (close 4001) on a *reconnect* — i.e.
    * the device was revoked while the daemon was running. The daemon stops redialing the dead token; the
@@ -302,11 +302,19 @@ export function createDaemon(options: DaemonOptions): Daemon {
   const reconnectBaseMs = options.reconnect?.baseMs ?? 500;
   const reconnectMaxMs = options.reconnect?.maxMs ?? 10_000;
   // Relay-link liveness — see startHeartbeat() for why the daemon must probe its own outbound link.
-  const heartbeatMs = options.heartbeat?.intervalMs ?? 20_000;
+  const heartbeatMs = options.heartbeat?.intervalMs ?? 30_000;
+  // Floor at 1 round (and coerce a NaN from a bad computed config back to the default): 0 rounds would
+  // terminate the link every single interval, defeating the grace window entirely.
+  const configuredMaxSilentRounds = options.heartbeat?.maxSilentRounds ?? 2;
+  const heartbeatMaxSilentRounds = Number.isFinite(configuredMaxSilentRounds)
+    ? Math.max(1, configuredMaxSilentRounds)
+    : 2;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  // True between sending a heartbeat ping and its pong. If a whole interval elapses with it still true, the
-  // relay never answered — the link is half-open, so we terminate the socket to force a redial.
-  let awaitingPong = false;
+  // Whether ANY inbound WS activity (a frame, or the peer's ping/pong) was seen since the last heartbeat
+  // check — proof the link is alive. `silentRounds` counts consecutive checks that saw none; the link is
+  // torn down only after `heartbeatMaxSilentRounds` of them, so a single idle miss can't kill a healthy link.
+  let sawInboundSinceHeartbeat = false;
+  let silentRounds = 0;
   // How long to await the relay's `session.chained` ACK for a handover continuation before falling back
   // (reuses the adopted-session ack timeout knob so tests can shrink it). Defaults to 10s.
   const chainAckTimeoutMs = options.adopt?.ackTimeoutMs ?? 10_000;
@@ -2099,18 +2107,26 @@ export function createDaemon(options: DaemonOptions): Daemon {
     // tool on a remote approval nobody can give during the reconnect gap. The relay re-asserts the real state
     // right after hello.ack; until then assume nobody is watching (defer to the local prompt — safe default).
     isRemoteViewerOnline = false;
-    // Fresh socket, fresh heartbeat liveness: assume alive until the next sweep proves otherwise, and mark
-    // it alive on every pong (the relay auto-replies to our ping). The daemon-scoped heartbeat interval
-    // (started once in `start`) probes whichever socket is current.
-    awaitingPong = false;
-    ws.on('pong', () => {
-      awaitingPong = false;
-    });
+    // Fresh socket, fresh heartbeat liveness. ANY inbound WS activity marks the link alive — not just our
+    // own pong (the cloud ingress doesn't always round-trip a WS pong on an idle connection), but also the
+    // relay's own heartbeat ping and every app frame. So normal traffic and the relay's keepalive keep the
+    // link up; only a genuinely silent link is torn down. The daemon-scoped interval (started once in
+    // `start`) probes whichever socket is current.
+    sawInboundSinceHeartbeat = false;
+    silentRounds = 0;
+    // Guard on the CURRENT socket: a late pong/ping/message from an already-replaced socket must never
+    // reset liveness for the connection that succeeded it (which could mask a dead new link for a round).
+    const markInbound = (): void => {
+      if (socket === ws) sawInboundSinceHeartbeat = true;
+    };
+    ws.on('pong', markInbound);
+    ws.on('ping', markInbound);
     // Inbound frames are handled asynchronously (decryption is async) and chained so each is fully
     // handled before the next — a follow-up can't decrypt before the launch establishes the key. Each
     // socket gets its own chain; the cipher + outbound chain persist across reconnects.
     let inbound: Promise<void> = Promise.resolve();
     ws.on('message', (raw: Buffer) => {
+      markInbound();
       inbound = inbound
         .then(() => handleFrame(raw, onReady))
         .catch((err: unknown) => log.error({ err }, 'daemon: frame handling failed'));
@@ -2154,36 +2170,47 @@ export function createDaemon(options: DaemonOptions): Daemon {
    * out forever). The relay already pings the daemon (its own Phase-4 heartbeat), but the daemon dials
    * OUT — on a half-open path (laptop sleep, NAT rebind) the relay's terminate can be blackholed too, so
    * the ws `close` event never reaches us and the `close`-only reconnect path goes blind. So the daemon
-   * probes independently: each interval, if the previous ping went unanswered the link is dead — terminate
-   * the socket so its `close` handler redials; otherwise send a fresh ping (which also keeps NAT/proxy idle
-   * timers warm). Daemon-scoped and started once; it probes whichever socket is current and no-ops while
-   * reconnecting. `unref` so it never holds the process open.
+   * probes independently: each interval it checks whether ANY inbound activity arrived since the last round
+   * (an app frame, the relay's ping, or our own ping's pong — see `markInbound`). Silence for
+   * `heartbeatMaxSilentRounds` consecutive rounds means the link is dead → terminate the socket so its
+   * `close` handler redials. A single miss is tolerated because an idle-but-healthy link's WS pong isn't
+   * always round-tripped by the cloud ingress; the grace window plus resetting on any inbound (not just the
+   * pong) stops a working connection from being torn down on every idle interval. Each round still sends a
+   * ping to solicit inbound from an otherwise-quiet peer (and keep NAT/proxy idle timers warm). Daemon-
+   * scoped and started once; it probes whichever socket is current and no-ops while reconnecting. `unref`
+   * so it never holds the process open.
    */
+  /** One heartbeat round on the current OPEN socket: tear down after too many silent rounds, else re-probe. */
+  function runHeartbeatRound(ws: WebSocket): void {
+    silentRounds = sawInboundSinceHeartbeat ? 0 : silentRounds + 1;
+    sawInboundSinceHeartbeat = false;
+    if (silentRounds >= heartbeatMaxSilentRounds) {
+      log.warn(
+        { deviceId: options.deviceId, silentRounds },
+        'daemon: relay link silent across heartbeat rounds — terminating half-open link',
+      );
+      silentRounds = 0;
+      ws.terminate(); // force a `close` → scheduleReconnect
+      return;
+    }
+    try {
+      ws.ping(); // solicit a pong so an idle-but-healthy link still produces inbound next round
+    } catch (err) {
+      log.warn(
+        { err, deviceId: options.deviceId },
+        'daemon: heartbeat ping failed — terminating link',
+      );
+      silentRounds = 0;
+      ws.terminate();
+    }
+  }
+
   function startHeartbeat(): void {
     if (heartbeatMs <= 0 || heartbeatTimer !== null) return;
     heartbeatTimer = setInterval(() => {
       const ws = socket;
       if (ws === null || ws.readyState !== WebSocket.OPEN) return; // reconnecting — nothing to probe yet
-      if (awaitingPong) {
-        log.warn(
-          { deviceId: options.deviceId },
-          'daemon: relay heartbeat unanswered — terminating half-open link',
-        );
-        awaitingPong = false;
-        ws.terminate(); // force a `close` → scheduleReconnect
-        return;
-      }
-      awaitingPong = true;
-      try {
-        ws.ping();
-      } catch (err) {
-        log.warn(
-          { err, deviceId: options.deviceId },
-          'daemon: heartbeat ping failed — terminating link',
-        );
-        awaitingPong = false;
-        ws.terminate();
-      }
+      runHeartbeatRound(ws);
     }, heartbeatMs);
     heartbeatTimer.unref();
   }
