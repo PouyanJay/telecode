@@ -32,6 +32,13 @@ describe('envelopeSchema', () => {
     expect(env.session_id).toBeUndefined();
   });
 
+  // App-level liveness probes: WS control ping/pong is not end-to-end through a cloud ingress, so
+  // peers probe with these envelopes and count only app frames as proof of life.
+  it.each(['link.ping', 'link.pong'])('parses the link-liveness type %s', (type) => {
+    const env = parseEnvelope({ ...validWire, type, payload: {} });
+    expect(env.type).toBe(type);
+  });
+
   it('accepts an optional session_id', () => {
     const env = parseEnvelope({ ...validWire, session_id: 's_1' });
     expect(env.session_id).toBe('s_1');

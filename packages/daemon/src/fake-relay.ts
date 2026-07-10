@@ -39,11 +39,15 @@ export interface FakeRelay {
 export async function startFakeRelay(
   userId: string,
   deviceId: string,
-  options: { rejectHello?: boolean; autoPong?: boolean } = {},
+  options: { rejectHello?: boolean; autoPong?: boolean; answerPings?: boolean } = {},
 ): Promise<FakeRelay> {
   // `autoPong: false` simulates a cloud ingress that doesn't round-trip a WS pong on an idle connection —
   // the daemon's heartbeat must then stay alive on other inbound activity (app frames), not just the pong.
   const server = new WebSocketServer({ port: 0, autoPong: options.autoPong ?? true });
+  // `answerPings: false` simulates a relay reachable at the TCP/WS level whose APP never answers the
+  // `link.ping` probe — the zombie-via-ingress shape. (A genuinely OLD relay differs only in mechanism:
+  // it rejects the whole envelope as invalid; the daemon-visible outcome — no `link.pong` — is the same.)
+  const answerPings = options.answerPings ?? true;
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('fake relay has no port');
@@ -92,6 +96,13 @@ export async function startFakeRelay(
         helloWaiters = [];
         pending.forEach((w) => w());
         return;
+      }
+      // App-level liveness (mirrors the real relay): answer the daemon's `link.ping` probe with a
+      // `link.pong` on the same socket. The probe is still delivered below so a test can await it.
+      if (envelope.type === 'link.ping' && answerPings) {
+        conn.send(
+          JSON.stringify(makeEnvelope({ type: 'link.pong', userId, deviceId, payload: {} })),
+        );
       }
       deliver(envelope);
     });

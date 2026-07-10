@@ -82,10 +82,11 @@ describe('daemon: relay heartbeat (half-open detection)', () => {
     await expect(reRegistered).resolves.toBeUndefined();
   });
 
-  it('leaves a HEALTHY link alone — a live link that keeps ponging never gets torn down', async () => {
-    // Guards against the inverse regression: if the pong-reset ever inverted, the watchdog would terminate a
-    // perfectly good socket every interval and thrash reconnects on every real session. Here the relay is
-    // never silenced, so it auto-pongs each heartbeat — the link must survive many intervals untouched.
+  it('leaves a HEALTHY link alone — a relay that answers the link.ping probes never gets torn down', async () => {
+    // Guards against the inverse regression: if the liveness-reset ever inverted, the watchdog would
+    // terminate a perfectly good socket every interval and thrash reconnects on every real session. Here
+    // the relay answers each `link.ping` probe with a `link.pong` app frame (the real relay's behavior) —
+    // the link must survive many intervals untouched.
     const userId = randomUUID();
     const deviceId = randomUUID();
     const relay = await startFakeRelay(userId, deviceId);
@@ -97,23 +98,25 @@ describe('daemon: relay heartbeat (half-open detection)', () => {
       agentAdapter: createFakeAgentAdapter([]),
       logger: silent,
       reconnect: { baseMs: 10, maxMs: 40 },
-      heartbeat: { intervalMs: 20 },
+      // A generous silence budget (3 rounds × 30ms = 90ms) so CPU contention on the probe round-trip
+      // can't false-terminate a link the fake relay is answering.
+      heartbeat: { intervalMs: 30, maxSilentRounds: 3 },
     });
     daemons.push(daemon);
     await daemon.start();
 
-    // ~12 heartbeat intervals with a healthy (auto-ponging) relay: no re-registration should occur.
+    // ~8 heartbeat intervals with a healthy (probe-answering) relay: no re-registration should occur.
     await expect(reconnectedWithin(relay, 250)).resolves.toBe('stable');
   });
 
-  it('stays connected on app traffic when WS pongs are not returned (any inbound resets liveness)', async () => {
+  it('stays connected on app traffic when WS pongs are not returned (any app frame resets liveness)', async () => {
     // The twitchiness fix: on an idle connection the cloud ingress doesn't always round-trip a WS pong, but
-    // app frames still flow. So the watchdog must reset liveness on ANY inbound activity, not just a pong —
-    // a link demonstrably carrying traffic must never be torn down. `autoPong: false` = an ingress that
-    // never pongs; the echo round-trips are the only proof of life, and they must suffice.
+    // app frames still flow. So the watchdog must reset liveness on any inbound APP frame, not only the
+    // relay's `link.pong` — a link demonstrably carrying traffic must never be torn down. `autoPong: false`
+    // + `answerPings: false` = the echo round-trips are the only proof of life, and they must suffice.
     const userId = randomUUID();
     const deviceId = randomUUID();
-    const relay = await startFakeRelay(userId, deviceId, { autoPong: false });
+    const relay = await startFakeRelay(userId, deviceId, { autoPong: false, answerPings: false });
     relays.push(relay);
     const daemon = createDaemon({
       relayUrl: relay.url,
@@ -156,7 +159,7 @@ describe('daemon: relay heartbeat (half-open detection)', () => {
     // for, in the autoPong-off flavor rather than goSilentHalfOpen's full TCP pause).
     const userId = randomUUID();
     const deviceId = randomUUID();
-    const relay = await startFakeRelay(userId, deviceId, { autoPong: false });
+    const relay = await startFakeRelay(userId, deviceId, { autoPong: false, answerPings: false });
     relays.push(relay);
     const daemon = createDaemon({
       relayUrl: relay.url,
@@ -175,12 +178,15 @@ describe('daemon: relay heartbeat (half-open detection)', () => {
     await expect(reRegistered).resolves.toBeUndefined();
   });
 
-  it('a relay-initiated ping keeps an otherwise-idle link alive (any inbound, not just a pong)', async () => {
-    // The relay's own keepalive ping (relay→daemon) is inbound liveness too — receiving it must reset the
-    // watchdog exactly like a pong. autoPong off + no app frames, but the relay pings each round: no drop.
+  it('reconnects a link where WS control frames still flow but app frames never arrive (zombie via ingress)', async () => {
+    // THE 2026-07-10 incident, reproduced: the cloud ingress kept the daemon⇄proxy leg alive at the WS
+    // protocol level (pings/pongs flowing) while the relay app was unreachable — the daemon saw "inbound",
+    // stayed on the dead link for 34 minutes, and every announce timed out unacked. WS control frames are
+    // NOT end-to-end, so they must NOT count as proof of life: with pongs auto-returned AND the relay
+    // actively pinging, but zero app frames answered, the watchdog must still tear down and reconnect.
     const userId = randomUUID();
     const deviceId = randomUUID();
-    const relay = await startFakeRelay(userId, deviceId, { autoPong: false });
+    const relay = await startFakeRelay(userId, deviceId, { autoPong: true, answerPings: false });
     relays.push(relay);
     const daemon = createDaemon({
       relayUrl: relay.url,
@@ -189,22 +195,46 @@ describe('daemon: relay heartbeat (half-open detection)', () => {
       agentAdapter: createFakeAgentAdapter([]),
       logger: silent,
       reconnect: { baseMs: 10, maxMs: 40 },
+      heartbeat: { intervalMs: 20, maxSilentRounds: 2 },
+    });
+    daemons.push(daemon);
+    await daemon.start();
+
+    const reRegistered = relay.waitForHello();
+    // Keep the control-frame chatter alive the whole time (the ingress's synthetic liveness): pings from
+    // the "relay" side, pongs auto-answered — everything a zombie link still delivers.
+    const chatter = setInterval(() => relay.pingDaemon(), 10);
+    try {
+      await expect(reRegistered).resolves.toBeUndefined();
+    } finally {
+      clearInterval(chatter);
+    }
+  });
+
+  it('the relay answering link.ping with link.pong keeps an otherwise-idle link alive', async () => {
+    // The positive half of the app-level probe: an idle-but-healthy link produces no session traffic and
+    // (behind the ingress) no reliable WS pongs — the `link.ping` → `link.pong` round-trip is what proves
+    // the relay APP is reachable, and it alone must keep the link up.
+    const userId = randomUUID();
+    const deviceId = randomUUID();
+    const relay = await startFakeRelay(userId, deviceId, { autoPong: false, answerPings: true });
+    relays.push(relay);
+    const daemon = createDaemon({
+      relayUrl: relay.url,
+      userId,
+      deviceId,
+      agentAdapter: createFakeAgentAdapter([]),
+      logger: silent,
+      reconnect: { baseMs: 10, maxMs: 40 },
+      // A generous silence budget (3 rounds × 30ms = 90ms) so CPU contention on the probe round-trip
+      // can't false-terminate a link the fake relay is answering.
       heartbeat: { intervalMs: 30, maxSilentRounds: 3 },
     });
     daemons.push(daemon);
     await daemon.start();
 
-    const reHello = relay.waitForHello().then(() => 'reconnected' as const);
-    // Ping the daemon every ~10ms for ~200ms (well past the 90ms budget); each ping is inbound liveness.
-    for (let i = 0; i < 18; i += 1) {
-      relay.pingDaemon();
-      await delay(10);
-    }
-    const outcome = await Promise.race([
-      reHello,
-      new Promise<'stable'>((resolve) => setTimeout(() => resolve('stable'), 20)),
-    ]);
-    expect(outcome).toBe('stable');
+    // ~8 heartbeat intervals with nothing but the probe round-trip: no re-registration should occur.
+    await expect(reconnectedWithin(relay, 250)).resolves.toBe('stable');
   });
 
   it('installs no watchdog when the heartbeat is disabled (intervalMs <= 0)', async () => {

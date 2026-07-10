@@ -1338,6 +1338,27 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
         }
         return;
       }
+      // App-level link liveness: answer a registered peer's `link.ping` probe on the SAME socket — the
+      // end-to-end proof that the relay APPLICATION is reachable (rationale on `link.ping` in the
+      // protocol's envelope.ts). Connection-scoped routing metadata: no DB, no routing, payload-blind.
+      // A stray `link.pong` (only ever a relay-generated reply) is dropped here so it can never fall
+      // through to a broadcast.
+      if (envelope.type === 'link.ping') {
+        socket.send(
+          JSON.stringify(
+            makeEnvelope({
+              type: 'link.pong',
+              userId: envelope.user_id,
+              deviceId: envelope.device_id,
+              payload: {},
+            }),
+          ),
+        );
+        return;
+      }
+      if (envelope.type === 'link.pong') {
+        return;
+      }
       if (peer.role === 'browser') {
         await routeFromBrowser(envelope, channel, text, socket);
       } else if (peer.role === 'daemon') {
