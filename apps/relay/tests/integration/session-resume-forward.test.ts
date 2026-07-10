@@ -78,7 +78,7 @@ describe('relay: session.resume_new forwarding', () => {
     );
     const parentId = row.rows[0]!.id;
 
-    const daemon = await connectDaemon(relayUrl, user.userId, deviceId, deviceToken);
+    const daemon = await connectDaemon(relayUrl, user.userId, deviceId, { token: deviceToken });
     const browser = await connectBrowser(relayUrl, user.userId, deviceId, channelToken);
     try {
       const onForward = waitForEnvelope(daemon, (e) => e.type === 'session.resume_new');

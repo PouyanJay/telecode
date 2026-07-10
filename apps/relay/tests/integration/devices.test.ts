@@ -327,7 +327,7 @@ describe('relay device listing: GET /me/devices', () => {
     // The browser watches the KEEPER's channel — the revoked device's frames must not reach it. The
     // keeper daemon exists only to provide a deterministic ordering barrier on the browser's socket.
     const relayUrl = `ws://127.0.0.1:${(app.server.address() as AddressInfo).port}/ws`;
-    const daemon = await connectDaemon(relayUrl, alice.userId, keeperId, keeperToken);
+    const daemon = await connectDaemon(relayUrl, alice.userId, keeperId, { token: keeperToken });
     const browser = await connectBrowser(
       relayUrl,
       alice.userId,

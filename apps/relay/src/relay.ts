@@ -83,12 +83,15 @@ export interface RelayOptions {
   readonly push?: { readonly store: PushSubscriptionStore; readonly sender: PushSender };
   /**
    * WebSocket keepalive (Phase 4 Task 4). The relay pings every connected peer each `intervalMs` and
-   * terminates any that didn't pong since the last round — this is how a half-open connection (laptop
-   * sleep, silent network death) is detected, since such a socket never fires `close` on its own.
-   * Terminating a dead daemon runs the normal disconnect path (browsers are told it went offline).
-   * Defaults to 30s; `intervalMs <= 0` disables it. Tests inject a short interval.
+   * terminates any that showed NO inbound activity (frame, ping, or pong) for `maxSilentRounds` consecutive
+   * rounds — this is how a half-open connection (laptop sleep, silent network death) is detected, since such
+   * a socket never fires `close` on its own. Terminating a dead daemon runs the normal disconnect path
+   * (browsers are told it went offline). Resetting on ANY inbound (not just a pong) plus the grace window
+   * stops an idle-but-healthy peer — whose WS pong the cloud ingress doesn't reliably round-trip when idle —
+   * from being torn down on a single miss. Defaults: 30s interval, 2 rounds (~60s of true silence; floored
+   * at 1); `intervalMs <= 0` disables it. Tests inject short values.
    */
-  readonly heartbeat?: { readonly intervalMs?: number };
+  readonly heartbeat?: { readonly intervalMs?: number; readonly maxSilentRounds?: number };
   /**
    * Bounded per-session ciphertext cache (Phase 4 Task 8). The relay keeps the recent encrypted frames it
    * forwards (and the latest `session.key`) so a reopening browser can be replayed them immediately on
@@ -244,7 +247,12 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
   // Heartbeat bookkeeping (Phase 4 Task 4): every connected socket and whether it has ponged since the
   // last ping round. A socket that misses a round is half-open (sleep / silent drop) and gets terminated.
   const sockets = new Set<WebSocket>();
-  const liveness = new WeakMap<WebSocket, boolean>();
+  // Per-socket heartbeat liveness: `sawInbound` = any inbound activity (frame / ping / pong) since the last
+  // sweep; `silentRounds` = consecutive sweeps that saw none. A peer is terminated only after
+  // `heartbeatMaxSilentRounds` of true silence — resetting on ANY inbound (not just a pong) keeps an
+  // idle-but-healthy peer, whose WS pong the cloud ingress may not round-trip when idle, from being dropped.
+  const sawInbound = new WeakMap<WebSocket, boolean>();
+  const silentRounds = new WeakMap<WebSocket, number>();
   // Per-IP concurrent WebSocket count, for the connection cap (abuse prevention). Unbounded when
   // the cap is unset.
   const maxConnectionsPerIp = options.maxConnectionsPerIp;
@@ -931,21 +939,29 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     await registerRateLimit(app, options.rateLimit);
   }
 
-  // Keepalive sweep (Phase 4 Task 4): ping every socket; terminate any that didn't pong since the last
-  // round. Terminating a dead peer fires its `close` handler — so a dead daemon's browsers are told it
-  // went offline, exactly as a clean disconnect would. `unref` so the timer never holds the process open.
+  // Keepalive sweep (Phase 4 Task 4): each round, terminate any socket that saw NO inbound for
+  // `heartbeatMaxSilentRounds` consecutive rounds, else re-probe with a ping. Terminating a dead peer fires
+  // its `close` handler — so a dead daemon's browsers are told it went offline, exactly as a clean
+  // disconnect would. `unref` so the timer never holds the process open.
   const heartbeatMs = options.heartbeat?.intervalMs ?? 30_000;
+  // Floor at 1 round (and coerce a NaN from a bad config to the default): 0 would drop every peer each round.
+  const configuredMaxSilentRounds = options.heartbeat?.maxSilentRounds ?? 2;
+  const heartbeatMaxSilentRounds = Number.isFinite(configuredMaxSilentRounds)
+    ? Math.max(1, configuredMaxSilentRounds)
+    : 2;
   const heartbeat =
     heartbeatMs > 0
       ? setInterval(() => {
           for (const ws of sockets) {
-            if (liveness.get(ws) === false) {
+            const rounds = sawInbound.get(ws) === true ? 0 : (silentRounds.get(ws) ?? 0) + 1;
+            sawInbound.set(ws, false);
+            silentRounds.set(ws, rounds);
+            if (rounds >= heartbeatMaxSilentRounds) {
               ws.terminate();
               continue;
             }
-            liveness.set(ws, false);
             try {
-              ws.ping();
+              ws.ping(); // solicit a pong so an idle-but-healthy peer still produces inbound next round
             } catch {
               ws.terminate(); // a failed ping means the socket is already gone
             }
@@ -1059,11 +1075,18 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
 
     const peer: PeerState = { role: 'unknown', channel: null, userId: null, deviceId: null };
 
-    // Heartbeat liveness: track this socket and mark it alive on every pong (the ws client auto-replies
-    // to the relay's ping). A round with no pong means a dead/half-open peer (Phase 4 Task 4).
+    // Heartbeat liveness: track this socket and mark it alive on ANY inbound activity — a frame, the ws
+    // client's auto-pong to our ping, or the peer's own keepalive ping (the daemon pings us too). Not just
+    // the pong, since the cloud ingress may not round-trip a WS pong on an idle-but-healthy connection.
+    // Assume alive on connect (the hello arrives immediately); a sweep proves otherwise (Phase 4 Task 4).
     sockets.add(socket);
-    liveness.set(socket, true);
-    socket.on('pong', () => liveness.set(socket, true));
+    sawInbound.set(socket, true);
+    silentRounds.set(socket, 0);
+    const markInbound = (): void => {
+      sawInbound.set(socket, true);
+    };
+    socket.on('pong', markInbound);
+    socket.on('ping', markInbound);
     socket.on('close', () => sockets.delete(socket));
 
     // Frame handling is async (session.* control messages await DB writes), so we chain frames into a
@@ -1072,6 +1095,7 @@ export async function buildRelay(options: RelayOptions = {}): Promise<FastifyIns
     // are contained per-frame — never an unhandled rejection that would crash the relay.
     let processing: Promise<void> = Promise.resolve();
     socket.on('message', (raw: Buffer) => {
+      markInbound(); // an inbound frame is proof of life — resets the heartbeat silence counter
       processing = processing
         .then(() => handleFrame(raw))
         .catch((err: unknown) => {

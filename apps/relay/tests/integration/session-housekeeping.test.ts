@@ -560,7 +560,9 @@ describe('session housekeeping: GET pagination + archive + delete', () => {
         updatedAt: '2026-07-02T00:00:00Z',
       });
 
-      const daemon = await connectDaemon(relayUrl, alice.userId, alice.deviceId, alice.deviceToken);
+      const daemon = await connectDaemon(relayUrl, alice.userId, alice.deviceId, {
+        token: alice.deviceToken,
+      });
       const watcher = await connectBrowser(
         relayUrl,
         alice.userId,
